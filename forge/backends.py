@@ -21,7 +21,7 @@ import os
 import urllib.request
 
 KEEP_ALIVE = os.environ.get("FORGE_KEEP_ALIVE", "30m")
-NUM_CTX = int(os.environ.get("FORGE_NUM_CTX", "8192"))
+NUM_CTX = int(os.environ.get("FORGE_NUM_CTX", "16384"))  # summarization compaction keeps us under this
 NUM_PREDICT = int(os.environ.get("FORGE_NUM_PREDICT", "2048"))
 
 

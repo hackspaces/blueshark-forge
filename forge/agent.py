@@ -16,9 +16,18 @@ import os
 import re
 import threading
 
+from .backends import NUM_CTX
 from .tools import ACTION_SCHEMA, TOOL_HELP, execute
 
 STUCK_AT = int(os.environ.get("FORGE_STUCK_THRESHOLD", "7"))  # failures before escalating a rung
+
+SUMMARIZE_SYSTEM = (
+    "You compress an AI coding agent's work-in-progress into a dense STATE note it will "
+    "read to continue. Capture: the task/goal, what has been done, key findings, files "
+    "read or changed (with exact paths), decisions made, errors hit, and the current state "
+    "and next step. Preserve concrete details — paths, names, commands, values. No preamble, "
+    "no fluff. Just the state, tightly written."
+)
 
 _MSG_OPEN = re.compile(r'"message"\s*:\s*"')
 
@@ -61,8 +70,9 @@ AUTONOMOUS = """
 
 BE AUTONOMOUS — this is the core of how you work. When the user asks for something, DO it end to end: make the reasonable choice yourself (pick the file, read it, make the change), use your tools, verify the result, and report what you actually did. Do NOT ask for permission or confirmation to take normal steps. Do NOT stop just to narrate what you are about to do — do it, then tell them the outcome. If the user says "any/you pick/you decide", that means choose and proceed immediately. Only come back to the user before finishing when you hit a genuine blocker you cannot resolve yourself, a real ambiguity where guessing would waste real work, or an action that is destructive or irreversible. A request like "read a file and add a comment" should end with the comment added and verified, not with a question."""
 
-# Rough char budget before we compact old observations (keeps small-context models alive)
-_COMPACT_AT = 24000
+# Compact when the window is ~60% full. Budget in chars (≈4 chars/token) so it
+# scales with whatever num_ctx the model is configured for.
+_COMPACT_AT = int(NUM_CTX * 4 * 0.60)
 
 
 class Agent:
@@ -82,6 +92,7 @@ class Agent:
         if workspace:
             self.messages.append({"role": "user", "content": workspace})
             self.messages.append({"role": "assistant", "content": '{"thought":"Oriented in the workspace. Ready.","action":"say","message":"Ready."}'})
+        self.head_len = len(self.messages)  # system (+ workspace) — never compacted away
         self.plan = []
         self.stop = threading.Event()  # set from the UI (Esc) to interrupt mid-run
 
@@ -91,20 +102,35 @@ class Agent:
         self.tier = 0
         self.backend = ladder[0]
 
-    # ---- context hygiene ----
+    # ---- context management ----
     def _compact(self):
-        """Summarize old observation turns so the window stays lean."""
+        """When the window fills, SUMMARIZE the older middle turns into a dense
+        state note (instead of dropping them). System + workspace stay pinned,
+        the recent turns stay verbatim, and the plan is pinned separately — so
+        nothing important is lost, the context just gets denser."""
         size = sum(len(m["content"]) for m in self.messages)
         if size < _COMPACT_AT:
             return
-        # keep system + last 8 turns verbatim; collapse the middle
-        head, tail = self.messages[:1], self.messages[-8:]
-        middle = self.messages[1:-8]
-        if not middle:
+        head = self.messages[:self.head_len]
+        tail = self.messages[-6:]
+        middle = self.messages[self.head_len:-6]
+        if len(middle) < 4:
             return
-        note = f"[{len(middle)} earlier steps compacted. Current plan is pinned below.]"
-        self.messages = head + [{"role": "user", "content": note}] + tail
-        self.on_event("compact", n=len(middle))
+        self.on_event("compacting")
+        summary = self._summarize(middle)
+        note = {"role": "user", "content": "[Earlier progress, summarized to save context:]\n" + summary}
+        self.messages = head + [note] + tail
+        self.on_event("compact", tokens=sum(len(m["content"]) for m in self.messages) // 4)
+
+    def _summarize(self, msgs):
+        convo = "\n\n".join(f"[{m['role']}] {m['content'][:1200]}" for m in msgs)[:16000]
+        try:
+            # summarize with the cheapest ladder model — fast and enough for this
+            return self.ladder[0].chat(
+                [{"role": "system", "content": SUMMARIZE_SYSTEM},
+                 {"role": "user", "content": convo}]).strip()[:4000]
+        except Exception:
+            return f"[{len(msgs)} earlier steps omitted; continue from the recent turns and the plan below]"
 
     def _pin_plan(self):
         if self.plan:

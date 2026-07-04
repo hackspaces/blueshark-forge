@@ -88,8 +88,10 @@ class UI:
             self._end_spin(); print(f"  {MG}↑ stuck — escalating to a stronger local model: {k['model']}{RST}")
         elif kind == "inbox":
             self._end_spin(); print(f"  {YE}✉ {k['sender']}: {k['text'][:76]}{RST}")
+        elif kind == "compacting":
+            self.start_spin("compacting context")
         elif kind == "compact":
-            print(f"  {DIM}⟲ compacted {k['n']} old steps{RST}")
+            self._end_spin(); print(f"  {DIM}⟲ context compacted (now ~{k.get('tokens','?')} tokens){RST}")
         elif kind in ("malformed", "loop"):
             self._end_spin(); print(f"  {DIM}· ({kind}, recovering){RST}")
     def start_spin(self, label="thinking"):
