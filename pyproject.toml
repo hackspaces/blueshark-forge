@@ -14,7 +14,7 @@ keywords = ["agent", "llm", "local", "ollama", "coding-agent", "harness", "agent
 dependencies = []  # stdlib only — the whole point
 
 [project.urls]
-Homepage = "https://github.com/ypachchi/blueshark-forge"
+Homepage = "https://github.com/hackspaces/blueshark-forge"
 
 [project.scripts]
 forge = "forge.__main__:main"
