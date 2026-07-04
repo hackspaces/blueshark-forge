@@ -172,7 +172,12 @@ def run(backend, session, verbose=False, workspace=None):
             if line.startswith("Project type:"):
                 ptype = " · " + line.split(":", 1)[1].strip()[:30]
     models = " → ".join(b.name.split(":", 1)[-1] for b in ladder)
-    print(f"{B}{MG}forge{RST} · {models} · {DIM}{session.cwd}{ptype}{RST}")
+    try:
+        w = ladder[0].context_window()
+        ctx = f" · {w//1024}K ctx" if w >= 1024 else ""
+    except Exception:
+        ctx = ""
+    print(f"{B}{MG}forge{RST} · {models}{ctx} · {DIM}{session.cwd}{ptype}{RST}")
     if hasattr(ladder[0], "warm"):
         with Spinner("loading model"):
             ladder[0].warm()

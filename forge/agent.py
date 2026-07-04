@@ -103,24 +103,34 @@ class Agent:
         self.backend = ladder[0]
 
     # ---- context management ----
+    def _fill(self):
+        """(tokens_used, window) for the current model. Uses the EXACT prompt-token
+        count from the last response and the model's REAL context window when the
+        backend reports them; falls back to a char estimate before the first call."""
+        window = self.backend.effective_ctx() if hasattr(self.backend, "effective_ctx") else NUM_CTX
+        used = getattr(self.backend, "last_prompt_tokens", 0)
+        if not used:  # no real count yet (first turn) — estimate from chars
+            used = sum(len(m["content"]) for m in self.messages) // 4
+        return used, window
+
     def _compact(self):
-        """When the window fills, SUMMARIZE the older middle turns into a dense
-        state note (instead of dropping them). System + workspace stay pinned,
-        the recent turns stay verbatim, and the plan is pinned separately — so
+        """At ~70% of the model's real window, SUMMARIZE the older middle turns
+        into a dense state note (instead of dropping them). System + workspace
+        stay pinned, recent turns stay verbatim, the plan is pinned separately —
         nothing important is lost, the context just gets denser."""
-        size = sum(len(m["content"]) for m in self.messages)
-        if size < _COMPACT_AT:
+        used, window = self._fill()
+        if used < 0.70 * window:
             return
         head = self.messages[:self.head_len]
         tail = self.messages[-6:]
         middle = self.messages[self.head_len:-6]
         if len(middle) < 4:
             return
-        self.on_event("compacting")
+        self.on_event("compacting", used=used, window=window)
         summary = self._summarize(middle)
         note = {"role": "user", "content": "[Earlier progress, summarized to save context:]\n" + summary}
         self.messages = head + [note] + tail
-        self.on_event("compact", tokens=sum(len(m["content"]) for m in self.messages) // 4)
+        self.on_event("compact", window=window)
 
     def _summarize(self, msgs):
         convo = "\n\n".join(f"[{m['role']}] {m['content'][:1200]}" for m in msgs)[:16000]

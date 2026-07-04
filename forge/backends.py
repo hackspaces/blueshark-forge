@@ -21,8 +21,12 @@ import os
 import urllib.request
 
 KEEP_ALIVE = os.environ.get("FORGE_KEEP_ALIVE", "30m")
-NUM_CTX = int(os.environ.get("FORGE_NUM_CTX", "16384"))  # summarization compaction keeps us under this
+# Memory-safe CAP on the context we actually run with. A model's real window may
+# be far larger (qwen3-coder = 256K); we use min(real_window, cap) so a huge
+# window doesn't blow up unified memory. Raise it if you have RAM to spare.
+NUM_CTX_CAP = int(os.environ.get("FORGE_NUM_CTX", "16384"))
 NUM_PREDICT = int(os.environ.get("FORGE_NUM_PREDICT", "2048"))
+NUM_CTX = NUM_CTX_CAP  # back-compat alias
 
 
 class OllamaBackend:
@@ -30,6 +34,30 @@ class OllamaBackend:
         self.model = model
         self.url = (url or os.environ.get("OLLAMA_URL", "http://localhost:11434")).rstrip("/")
         self.name = f"ollama:{model}"
+        self._window = None            # the model's real context length (from /api/show)
+        self.last_prompt_tokens = 0     # exact tokens of the last prompt (from the response)
+
+    def context_window(self):
+        """The model's TRUE context length, queried once from Ollama."""
+        if self._window is None:
+            self._window = self._query_window() or 8192
+        return self._window
+
+    def _query_window(self):
+        try:
+            req = urllib.request.Request(f"{self.url}/api/show",
+                                         data=json.dumps({"model": self.model}).encode(),
+                                         headers={"Content-Type": "application/json"})
+            info = json.loads(urllib.request.urlopen(req, timeout=30).read())
+            for k, v in (info.get("model_info") or {}).items():
+                if k.endswith("context_length"):
+                    return int(v)
+        except Exception:
+            return None
+
+    def effective_ctx(self):
+        """What we actually run with: the real window, capped for memory."""
+        return min(self.context_window(), NUM_CTX_CAP)
 
     def _body(self, messages, schema, temperature, stream):
         body = {
@@ -37,7 +65,7 @@ class OllamaBackend:
             "messages": messages,
             "stream": stream,
             "keep_alive": KEEP_ALIVE,
-            "options": {"temperature": temperature, "num_ctx": NUM_CTX, "num_predict": NUM_PREDICT},
+            "options": {"temperature": temperature, "num_ctx": self.effective_ctx(), "num_predict": NUM_PREDICT},
         }
         if schema:
             body["format"] = schema
@@ -50,7 +78,10 @@ class OllamaBackend:
 
     def chat(self, messages, schema=None, temperature=0.0):
         with urllib.request.urlopen(self._req(self._body(messages, schema, temperature, False)), timeout=600) as r:
-            return json.loads(r.read())["message"]["content"]
+            resp = json.loads(r.read())
+        if resp.get("prompt_eval_count"):
+            self.last_prompt_tokens = resp["prompt_eval_count"]
+        return resp["message"]["content"]
 
     def stream(self, messages, schema=None, temperature=0.0):
         with urllib.request.urlopen(self._req(self._body(messages, schema, temperature, True)), timeout=600) as r:
@@ -62,6 +93,8 @@ class OllamaBackend:
                 if chunk:
                     yield chunk
                 if obj.get("done"):
+                    if obj.get("prompt_eval_count"):
+                        self.last_prompt_tokens = obj["prompt_eval_count"]
                     break
 
     def warm(self):
@@ -80,6 +113,13 @@ class OpenAICompatBackend:
         self.url = url.rstrip("/")
         self.key = key or os.environ.get("OPENAI_API_KEY", "")
         self.name = f"openai:{model}"
+        self.last_prompt_tokens = 0
+
+    def context_window(self):
+        return int(os.environ.get("FORGE_REMOTE_CTX", "128000"))  # most modern APIs; override if needed
+
+    def effective_ctx(self):
+        return min(self.context_window(), NUM_CTX_CAP * 8)  # remote windows are large; cap generously
 
     def _body(self, messages, schema, temperature, stream):
         body = {"model": self.model, "messages": messages, "temperature": temperature, "stream": stream}
@@ -95,7 +135,10 @@ class OpenAICompatBackend:
 
     def chat(self, messages, schema=None, temperature=0.0):
         with urllib.request.urlopen(self._req(self._body(messages, schema, temperature, False)), timeout=600) as r:
-            return json.loads(r.read())["choices"][0]["message"]["content"]
+            resp = json.loads(r.read())
+        if resp.get("usage", {}).get("prompt_tokens"):
+            self.last_prompt_tokens = resp["usage"]["prompt_tokens"]
+        return resp["choices"][0]["message"]["content"]
 
     def stream(self, messages, schema=None, temperature=0.0):
         with urllib.request.urlopen(self._req(self._body(messages, schema, temperature, True)), timeout=600) as r:
