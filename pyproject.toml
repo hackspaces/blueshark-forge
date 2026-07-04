@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "blueshark-forge"
+version = "0.1.0"
+description = "A model-agnostic agentic runtime for the terminal. Any local model becomes a capable agent — the intelligence lives in the harness, not the weights."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "Yash Pachchi" }]
+keywords = ["agent", "llm", "local", "ollama", "coding-agent", "harness", "agentic"]
+dependencies = []  # stdlib only — the whole point
+
+[project.urls]
+Homepage = "https://github.com/ypachchi/blueshark-forge"
+
+[project.scripts]
+forge = "forge.__main__:main"
+
+[tool.setuptools]
+packages = ["forge"]

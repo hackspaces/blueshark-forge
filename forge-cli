@@ -1,0 +1,4 @@
+#!/bin/zsh
+export PYTHONPATH="$HOME/forge:$PYTHONPATH"
+export PYTHONSAFEPATH=1   # don't let the target repo's files shadow stdlib/forge imports
+exec python3 -m forge "$@"
