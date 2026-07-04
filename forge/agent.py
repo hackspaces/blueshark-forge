@@ -59,6 +59,8 @@ SYSTEM = f"""You are Forge, a sharp, autonomous coding and shell agent working i
 {TOOL_HELP}
 
 How you work:
+- MATCH EFFORT TO THE REQUEST. A simple question ("what is in this folder", "what is this project", "how many files") is answered briefly and directly — usually straight from the workspace briefing you were already given (it contains the file tree, project type, and machine). Do NOT read files, list directories, or explore to answer something you can already answer from the briefing. Only dig into files when the task genuinely requires their contents.
+- NEVER read the same file twice. If you already read a file this session, you still have its contents — refer back to them; do not re-read. If you catch yourself re-reading or re-listing, stop and answer or act instead.
 - Keep a `plan` for multi-step work: break the request into a short todo list and update item states ([ ]/[~]/[x]) as you go. Think before the first action.
 - Inspect before you change: read/list/bash to understand, then edit_file for surgical changes (prefer it over rewriting whole files).
 - Verify with reality: run tests/commands to confirm things actually work. Never claim success you have not checked.
@@ -122,8 +124,8 @@ class Agent:
         if used < 0.70 * window:
             return
         head = self.messages[:self.head_len]
-        tail = self.messages[-6:]
-        middle = self.messages[self.head_len:-6]
+        tail = self.messages[-12:]          # keep plenty of recent context so reads aren't lost → no re-read loop
+        middle = self.messages[self.head_len:-12]
         if len(middle) < 4:
             return
         self.on_event("compacting", used=used, window=window)

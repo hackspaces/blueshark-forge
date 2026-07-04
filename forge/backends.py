@@ -24,9 +24,22 @@ KEEP_ALIVE = os.environ.get("FORGE_KEEP_ALIVE", "30m")
 # Memory-safe CAP on the context we actually run with. A model's real window may
 # be far larger (qwen3-coder = 256K); we use min(real_window, cap) so a huge
 # window doesn't blow up unified memory. Raise it if you have RAM to spare.
-NUM_CTX_CAP = int(os.environ.get("FORGE_NUM_CTX", "16384"))
 NUM_PREDICT = int(os.environ.get("FORGE_NUM_PREDICT", "2048"))
-NUM_CTX = NUM_CTX_CAP  # back-compat alias
+
+
+def ctx_cap():
+    """Memory-safe cap on context, resolved live: env > config > default."""
+    v = os.environ.get("FORGE_NUM_CTX")
+    if v:
+        return int(v)
+    try:
+        from . import config
+        return int(config.get("num_ctx", 32768))
+    except Exception:
+        return 32768
+
+
+NUM_CTX = ctx_cap()  # back-compat static alias for the char-estimate fallback
 
 
 class OllamaBackend:
@@ -57,7 +70,7 @@ class OllamaBackend:
 
     def effective_ctx(self):
         """What we actually run with: the real window, capped for memory."""
-        return min(self.context_window(), NUM_CTX_CAP)
+        return min(self.context_window(), ctx_cap())
 
     def _body(self, messages, schema, temperature, stream):
         body = {
@@ -119,7 +132,7 @@ class OpenAICompatBackend:
         return int(os.environ.get("FORGE_REMOTE_CTX", "128000"))  # most modern APIs; override if needed
 
     def effective_ctx(self):
-        return min(self.context_window(), NUM_CTX_CAP * 8)  # remote windows are large; cap generously
+        return min(self.context_window(), ctx_cap() * 8)  # remote windows are large; cap generously
 
     def _body(self, messages, schema, temperature, stream):
         body = {"model": self.model, "messages": messages, "temperature": temperature, "stream": stream}

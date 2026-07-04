@@ -45,6 +45,20 @@ def recommend(ram_gb):
     return TIERS[-1][1], TIERS[-1][2]
 
 
+def num_ctx_for(ram_gb):
+    """How much context window to run with, sized to RAM (bigger = fewer
+    compactions, but more unified memory for the KV cache)."""
+    if ram_gb >= 64:
+        return 65536
+    if ram_gb >= 40:
+        return 32768
+    if ram_gb >= 28:
+        return 24576
+    if ram_gb >= 14:
+        return 12288
+    return 8192
+
+
 def _ollama_ok():
     if not shutil.which("ollama"):
         return False, "Ollama is not installed. Install it from https://ollama.com, then re-run `forge setup`."
@@ -101,8 +115,10 @@ def run(auto=False, keep_models=None):
 
     cfg = config.load()
     cfg["ladder"] = ladder
+    cfg["num_ctx"] = num_ctx_for(hw["ram_gb"])
     cfg["machine"] = hw
     config.save(cfg)
     print(f"\n  ✓ config written to {config.PATH}")
+    print(f"  ✓ context window sized to {cfg['num_ctx']} tokens for {hw['ram_gb']}GB")
     print(f"  ✓ run `forge` to start (ladder: {' → '.join(ladder)})")
     return 0
