@@ -20,14 +20,15 @@ ACTION_SCHEMA = {
         "thought": {"type": "string", "description": "brief reasoning, one line"},
         "action": {
             "type": "string",
-            "enum": ["bash", "read_file", "write_file", "edit_file", "list_files", "say"],
+            "enum": ["bash", "read_file", "write_file", "edit_file", "list_files", "fleet_send", "say"],
         },
         "command": {"type": "string", "description": "shell command (bash)"},
         "path": {"type": "string", "description": "file path (read/write/edit/list)"},
         "content": {"type": "string", "description": "full file content (write_file)"},
         "old": {"type": "string", "description": "exact text to replace (edit_file)"},
         "new": {"type": "string", "description": "replacement text (edit_file)"},
-        "message": {"type": "string", "description": "message to the user (say)"},
+        "target": {"type": "string", "description": "which session to message (fleet_send): its project name, dir, or id"},
+        "message": {"type": "string", "description": "the message text (say, or fleet_send)"},
     },
     "required": ["thought", "action"],
 }
@@ -39,6 +40,7 @@ Actions:
   write_file  {path, content}     create/overwrite a file with full content
   edit_file   {path, old, new}    surgically replace an exact snippet (preferred for changes)
   list_files  {path?}             list a directory
+  fleet_send  {target, message}   message another forge session (it receives it mid-work)
   say         {message}           talk to the user (ends your turn)"""
 
 

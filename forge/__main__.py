@@ -105,14 +105,27 @@ def _daemon_running():
 
 
 def cmd_status(args):
+    from . import fleet
     pid = _daemon_running()
     print(f"● autopilot UP (pid {pid})" if pid else "○ autopilot down  (start: forge up)")
     print()
     live = sessmod.registry()
     if not live:
         print("no live forge sessions."); return
+    icon = {"working": "◐", "idle": "●"}
     for e in live:
-        print(f"● {e['name']:16} {e.get('model',''):22} {e['status']:8} ({e['sid'][:8]}) {e['cwd']}")
+        st = e.get("status", "idle")
+        print(f"{icon.get(st,'●')} {e['name']}  [{st}]  {e.get('model','')}  ({e['sid'][:8]})")
+        print(f"   {e['cwd']}")
+        # what is it doing? last user request + last assistant reply from the transcript
+        recs = fleet._records(e["sid"])
+        last_user = next((r["text"] for r in reversed(recs) if r.get("type") == "user" and r.get("text")), None)
+        last_say = fleet.last_say(e["sid"])
+        if last_user:
+            print(f"   you:    {last_user[:120]}")
+        if last_say:
+            print(f"   forge:  {' '.join(last_say.split())[:150]}")
+        print()
 
 
 def cmd_send(args):
