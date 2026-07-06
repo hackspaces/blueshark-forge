@@ -160,8 +160,18 @@ def _setup_ollama(hw, auto, keep_models):
                 "ladder": ladder, "num_ctx": num_ctx_for(hw["ram_gb"]), "machine": hw})
     config.save(cfg)
     print(f"\n  ✓ config written to {config.PATH}  ·  window {cfg['num_ctx']} tokens")
+    _bridge_report()
     print(f"  ✓ run `forge` to start (ladder: {' → '.join(ladder)})")
     return 0
+
+
+def _bridge_report():
+    """Claude Code interop: check what's on this machine, prepare what's safe."""
+    from . import bridge
+    print("\n  Claude Code fleet interop:")
+    for ln in bridge.doctor():
+        print(f"    {ln}")
+    print()
 
 
 def _setup_server(hw, engine, url, models, api_key):
@@ -176,5 +186,6 @@ def _setup_server(hw, engine, url, models, api_key):
     print(f"\n  ✓ engine: {engine}  ·  {url}")
     print(f"  ✓ ladder: {' → '.join(models)}")
     print(f"  ✓ config written to {config.PATH}")
+    _bridge_report()
     print(f"  ✓ run `forge` to start (make sure your server is up)")
     return 0

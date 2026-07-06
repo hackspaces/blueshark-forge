@@ -55,7 +55,7 @@ Actions:
   list_files  {path?}             list a directory
   grep        {pattern, path?}    search file CONTENTS by regex (ripgrep; structured, fast)
   glob        {pattern}           find files by name (e.g. **/*.py); use this over `find`
-  fleet_send  {target, message}   message another forge session (it receives it mid-work)
+  fleet_send  {target, message}   message another session — forge or Claude Code (it receives it mid-work)
   say         {message}           talk to the user (ends your turn)"""
 
 

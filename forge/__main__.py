@@ -116,17 +116,18 @@ def _daemon_running():
 
 
 def cmd_status(args):
-    from . import fleet
+    from . import fleet, bridge
     pid = _daemon_running()
     print(f"● autopilot UP (pid {pid})" if pid else "○ autopilot down  (start: forge up)")
     print()
     live = sessmod.registry()
-    if not live:
-        print("no live forge sessions."); return
+    claude = bridge.claude_peers()
+    if not live and not claude:
+        print("no live forge or Claude Code sessions."); return
     icon = {"working": "◐", "idle": "●"}
     for e in live:
         st = e.get("status", "idle")
-        print(f"{icon.get(st,'●')} {e['name']}  [{st}]  {e.get('model','')}  ({e['sid'][:8]})")
+        print(f"{icon.get(st,'●')} {e['name']}  [forge/{st}]  {e.get('model','')}  ({e['sid'][:8]})")
         print(f"   {e['cwd']}")
         # what is it doing? last user request + last assistant reply from the transcript
         recs = fleet._records(e["sid"])
@@ -136,6 +137,17 @@ def cmd_status(args):
             print(f"   you:    {last_user[:120]}")
         if last_say:
             print(f"   forge:  {' '.join(last_say.split())[:150]}")
+        print()
+    for e in claude:
+        print(f"◇ {e['name']}  [claude]  ({e['sid'][:8]})")
+        print(f"   {e['cwd']}")
+        info = bridge.summarize(e)
+        if info["title"]:
+            print(f"   task:   {info['title'][:120]}")
+        if info["prompt"]:
+            print(f"   you:    {info['prompt'][:120]}")
+        if info["claude"]:
+            print(f"   claude: {info['claude'][:150]}")
         print()
 
 

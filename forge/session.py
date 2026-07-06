@@ -108,14 +108,28 @@ class Session:
 
             def do_GET(self):
                 if self.path == "/ping":
-                    self.send_response(200); self.end_headers(); self.wfile.write(b"ok")
+                    ident = json.dumps({"pid": os.getpid(), "cwd": session.cwd,
+                                        "sessionId": session.sid, "name": session.name,
+                                        "kind": "forge"}).encode()
+                    self.send_response(200); self.end_headers(); self.wfile.write(ident)
                 else:
                     self.send_response(404); self.end_headers()
 
+            def _authed(self):
+                # forge protocol: this session's own token (from the 0600 registry).
+                if self.headers.get("X-Forge-Token", "") == session.token:
+                    return "X-Forge-From"
+                # Claude Code fleet protocol: the machine-wide shared token, on /send.
+                from . import bridge
+                tok = bridge.token()
+                if (self.path == "/send" and tok
+                        and self.headers.get("X-Fleet-Token", "") == tok):
+                    return "X-Fleet-From"
+                return None
+
             def do_POST(self):
-                # authenticate: only holders of this session's token (i.e. real forge
-                # sessions, which can read the 0600 registry) may inject messages.
-                if self.headers.get("X-Forge-Token", "") != session.token:
+                from_header = self._authed()
+                if not from_header:
                     self.send_response(403); self.end_headers(); self.wfile.write(b"forbidden"); return
                 try:
                     n = int(self.headers.get("Content-Length", 0))
@@ -124,7 +138,7 @@ class Session:
                 if n < 0 or n > 1_000_000:            # bound the read
                     self.send_response(413); self.end_headers(); return
                 body = self.rfile.read(n).decode("utf-8", "replace")
-                sender = "".join(c for c in self.headers.get("X-Forge-From", "peer") if c.isalnum() or c in "-_.")[:64]
+                sender = "".join(c for c in self.headers.get(from_header, "peer") if c.isalnum() or c in "-_.:")[:64]
                 session.push(sender, body)
                 self.send_response(200); self.end_headers(); self.wfile.write(b"ok")
 
@@ -142,6 +156,8 @@ class Session:
                 "token": self.token, "startedAt": time.time(),
             })
             _save_registry(entries)
+        from . import bridge
+        bridge.register(self)   # visible to Claude Code's fleet too (no-op without one)
 
     def set_status(self, status):
         self.status = status
@@ -153,6 +169,8 @@ class Session:
                 _save_registry([e for e in _load_registry() if e.get("pid") != os.getpid()])
         except OSError:
             pass
+        from . import bridge
+        bridge.unregister()
 
 
 class EphemeralSession:

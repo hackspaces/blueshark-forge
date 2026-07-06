@@ -105,6 +105,23 @@ forge learnings [dir]       durable facts forge has learned about a repo
 forge --version
 ```
 
+## One fleet with Claude Code
+
+If Claude Code runs on the same machine with a fleet channel (`~/.claude/fleet`),
+forge joins that network automatically — no configuration:
+
+- **Unified board** — `forge status` lists Claude Code sessions alongside forge
+  sessions (and Claude Code's fleet board sees forge sessions).
+- **Cross-runtime messaging** — `forge send <target> <msg>` and the agent's
+  `fleet_send` action reach Claude Code sessions; Claude Code's `fleet_send`
+  reaches forge sessions. Messages land mid-work, as if from a teammate.
+
+forge speaks the Claude fleet's wire protocol directly: every forge session
+registers in the shared inbox registry (tagged `kind: "forge"`) and accepts the
+fleet's authenticated `POST /send`. `forge setup` checks the interop on any
+machine and prepares what's safe (shared token), reporting exactly what works.
+Without Claude Code, forge's native fleet works standalone.
+
 ## Why
 
 Claude Code, Codex, and the rest are excellent, but each locks you to one

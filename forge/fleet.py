@@ -75,7 +75,11 @@ def recent_work(sid, max_chars=9000):
 
 # ---- MESSAGE ----------------------------------------------------------------
 def find_session(target):
-    live = sessmod.registry()
+    """Match a target across BOTH fleets: forge sessions and Claude Code
+    sessions (via the bridge). Forge entries have no 'kind'; claude peers
+    carry kind='claude'."""
+    from . import bridge
+    live = sessmod.registry() + bridge.claude_peers()
     t = target.lower()
     # exact session id wins (that's how the daemon addresses a session)
     exact = [e for e in live if e["sid"].lower() == t]
@@ -85,14 +89,28 @@ def find_session(target):
             or t in e["cwd"].lower() or t in e["name"].lower()]
 
 
-def send(target, text, sender="fleet"):
+def roster():
+    """One-line-per-session view of everything reachable, both runtimes."""
+    from . import bridge
+    forge_s = [f"{e['name']}({e['sid'][:8]})" for e in sessmod.registry()]
+    claude_s = [f"{e['name']}({e['sid'][:8]}, claude)" for e in bridge.claude_peers()]
+    return ", ".join(forge_s + claude_s) or "(none)"
+
+
+def send(target, text, sender="fleet", sender_cwd="", sender_sid=""):
     hits = find_session(target)
     if len(hits) != 1:
-        names = ", ".join(f"{e['name']}({e['sid'][:8]})" for e in sessmod.registry()) or "(none)"
-        raise SystemExit(f"target '{target}' matched {len(hits)}; live: {names}")
+        raise SystemExit(f"target '{target}' matched {len(hits)}; live: {roster()}")
     e = hits[0]
     if not e.get("port"):
         raise SystemExit(f"session {e['name']} has no reachable inbox")
+    if e.get("kind") == "claude":       # a Claude Code session — speak its protocol
+        from . import bridge
+        try:
+            bridge.send(e, text, sender, sender_cwd, sender_sid)
+        except (urllib.error.URLError, OSError) as ex:
+            raise SystemExit(f"couldn't deliver to {e['name']} (claude): {ex}")
+        return e
     headers = {"X-Forge-From": sender}
     if e.get("token"):
         headers["X-Forge-Token"] = e["token"]   # authenticate to the peer's inbox

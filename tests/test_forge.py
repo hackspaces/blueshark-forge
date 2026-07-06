@@ -336,6 +336,91 @@ class TestConfigEdge(unittest.TestCase):
         os.remove(bad)
 
 
+class TestClaudeBridge(unittest.TestCase):
+    """forge ↔ Claude Code fleet interop."""
+
+    def setUp(self):
+        import unittest.mock as mock
+        from forge import bridge
+        self.tmp = tempfile.mkdtemp()
+        self.inbox = os.path.join(self.tmp, "inbox.json")
+        self.tokf = os.path.join(self.tmp, "token")
+        _write(self.tokf, "shared-secret")
+        self.patches = [
+            mock.patch.object(bridge, "DIR", self.tmp),
+            mock.patch.object(bridge, "INBOX", self.inbox),
+            mock.patch.object(bridge, "TOKEN_FILE", self.tokf),
+        ]
+        for p in self.patches:
+            p.start()
+
+    def tearDown(self):
+        import shutil
+        for p in self.patches:
+            p.stop()
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_claude_peers_skips_forge_and_dead(self):
+        import json as _json
+        from forge import bridge
+        _write(self.inbox, _json.dumps([
+            {"sessionId": "aaa", "name": "web", "cwd": "/x", "port": 1, "pid": os.getpid()},
+            {"sessionId": "bbb", "name": "me", "cwd": "/y", "port": 2, "pid": os.getpid(), "kind": "forge"},
+            {"sessionId": "ccc", "name": "dead", "cwd": "/z", "port": 3, "pid": 99999999},
+        ]))
+        peers = bridge.claude_peers()
+        self.assertEqual([p["sid"] for p in peers], ["aaa"])
+        self.assertEqual(peers[0]["kind"], "claude")
+
+    def test_register_and_unregister(self):
+        from forge import bridge
+
+        class S:
+            sid, name, cwd, port = "f1", "proj", "/p", 4242
+        bridge.register(S())
+        entries = bridge._read_inbox()
+        self.assertEqual(len(entries), 1)
+        self.assertEqual(entries[0]["kind"], "forge")
+        self.assertEqual(entries[0]["sessionId"], "f1")
+        bridge.unregister()
+        self.assertEqual(bridge._read_inbox(), [])
+
+    def test_find_session_covers_claude_peers(self):
+        import json as _json
+        from forge import bridge, fleet
+        _write(self.inbox, _json.dumps(
+            [{"sessionId": "abc123", "name": "webapp", "cwd": "/w", "port": 5, "pid": os.getpid()}]))
+        hits = fleet.find_session("webapp")
+        self.assertEqual(len(hits), 1)
+        self.assertEqual(hits[0]["kind"], "claude")
+
+    def test_inbox_accepts_claude_fleet_protocol(self):
+        import urllib.request
+        from forge import session as sm2
+        s = sm2.Session("brdg", self.tmp, "m")
+        s.start_inbox()
+        req = urllib.request.Request(
+            f"http://127.0.0.1:{s.port}/send", data=b"hi from claude",
+            headers={"X-Fleet-Token": "shared-secret", "X-Fleet-From": "claude-sess"})
+        urllib.request.urlopen(req, timeout=5).read()
+        msgs = s.drain()
+        self.assertEqual(msgs, [{"from": "claude-sess", "text": "hi from claude"}])
+        # wrong token still rejected
+        bad = urllib.request.Request(
+            f"http://127.0.0.1:{s.port}/send", data=b"x", headers={"X-Fleet-Token": "nope"})
+        with self.assertRaises(urllib.error.HTTPError):
+            urllib.request.urlopen(bad, timeout=5)
+
+    def test_doctor_without_claude(self):
+        import unittest.mock as mock
+        from forge import bridge
+        with mock.patch("shutil.which", return_value=None), \
+             mock.patch("os.path.isdir", return_value=False):
+            lines = bridge.doctor(create_token=False)
+        self.assertEqual(len(lines), 1)
+        self.assertIn("not found", lines[0])
+
+
 class TestTuiHelpers(unittest.TestCase):
     """Pure helpers from the TUI: ANSI-aware clipping and raw-mode key decoding."""
 
