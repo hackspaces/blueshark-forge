@@ -421,6 +421,48 @@ class TestClaudeBridge(unittest.TestCase):
         self.assertIn("not found", lines[0])
 
 
+class TestInterrupt(unittest.TestCase):
+    def test_bash_killed_when_stop_fires(self):
+        import threading
+        import time as _t
+        stop = threading.Event()
+        threading.Timer(0.4, stop.set).start()
+        t0 = _t.monotonic()
+        obs, ok = execute({"action": "bash", "command": "sleep 30"}, "/tmp", stop=stop)
+        self.assertLess(_t.monotonic() - t0, 5)
+        self.assertFalse(ok)
+        self.assertIn("stopped", obs)
+
+    def test_bash_timeout_still_works(self):
+        import unittest.mock as mock
+        from forge import tools
+        with mock.patch.object(tools, "BASH_TIMEOUT", 1):
+            obs, ok = execute({"action": "bash", "command": "sleep 30"}, "/tmp")
+        self.assertFalse(ok)
+        self.assertIn("timed out", obs)
+
+    def test_run_interruptible_returns_worker_result(self):
+        import threading
+        from forge.tui import run_interruptible
+        stop = threading.Event()
+        self.assertEqual(run_interruptible(lambda: "done", stop), "done")  # non-tty path
+
+
+class TestRoster(unittest.TestCase):
+    def test_roster_lists_both_runtimes(self):
+        import json as _json
+        import unittest.mock as mock
+        from forge import bridge, fleet
+        tmp = tempfile.mkdtemp()
+        inbox = os.path.join(tmp, "inbox.json")
+        _write(inbox, _json.dumps(
+            [{"sessionId": "cc1", "name": "webapp", "cwd": "/w", "port": 5, "pid": os.getpid()}]))
+        with mock.patch.object(bridge, "INBOX", inbox):
+            r = fleet.roster()
+        self.assertIn("webapp", r)
+        self.assertIn("claude", r)
+
+
 class TestTuiHelpers(unittest.TestCase):
     """Pure helpers from the TUI: ANSI-aware clipping and raw-mode key decoding."""
 

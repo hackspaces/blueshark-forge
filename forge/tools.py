@@ -8,6 +8,7 @@ import os
 import shlex
 import shutil
 import subprocess
+import time
 
 BASH_TIMEOUT = int(os.environ.get("FORGE_BASH_TIMEOUT", "60"))  # fail fast, don't hang for minutes
 
@@ -55,7 +56,8 @@ Actions:
   list_files  {path?}             list a directory
   grep        {pattern, path?}    search file CONTENTS by regex (ripgrep; structured, fast)
   glob        {pattern}           find files by name (e.g. **/*.py); use this over `find`
-  fleet_send  {target, message}   message another session — forge or Claude Code (it receives it mid-work)
+  fleet_send  {target, message}   message another session — forge or Claude Code (it receives it mid-work);
+                                  target "list" (no message) lists every reachable session
   say         {message}           talk to the user (ends your turn)"""
 
 
@@ -96,18 +98,44 @@ def _maybe_offload(text, label):
             f"read a range or grep it for what you need.]")
 
 
-def _run(cmd, cwd, timeout=None):
+def _run(cmd, cwd, timeout=None, stop=None):
+    """Run a shell command. If `stop` (a threading.Event) fires mid-run — the
+    user hit Esc — the whole process group is killed so control returns
+    immediately instead of waiting out a slow command."""
+    import signal
     timeout = timeout or BASH_TIMEOUT
+    p = subprocess.Popen(cmd, cwd=cwd, shell=True, text=True,
+                         stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                         start_new_session=True)
+    deadline = time.monotonic() + timeout
+    while True:
+        try:
+            out = p.communicate(timeout=0.2)[0]
+            break
+        except subprocess.TimeoutExpired:
+            if stop is not None and stop.is_set():
+                _kill_group(p, signal)
+                return "(stopped by user)", False
+            if time.monotonic() > deadline:
+                _kill_group(p, signal)
+                return (f"(timed out after {timeout}s — the command was too slow. Scope it down: exclude node_modules/.git, "
+                        "or use `git ls-files` (lists only real project files), `rg`, or a narrower path instead of scanning "
+                        "everything with `find . -exec`.)", False)
+    out = (out or "").strip()
+    ok = p.returncode == 0
+    body = out if out else f"(no output, exit {p.returncode})"
+    return _maybe_offload(body, "bash"), ok
+
+
+def _kill_group(p, signal):
     try:
-        p = subprocess.run(cmd, cwd=cwd, shell=True, capture_output=True, text=True, timeout=timeout)
-        out = (p.stdout + p.stderr).strip()
-        ok = p.returncode == 0
-        body = out if out else f"(no output, exit {p.returncode})"
-        return _maybe_offload(body, "bash"), ok
+        os.killpg(os.getpgid(p.pid), signal.SIGKILL)
+    except (OSError, ProcessLookupError):
+        p.kill()
+    try:
+        p.communicate(timeout=2)
     except subprocess.TimeoutExpired:
-        return (f"(timed out after {timeout}s — the command was too slow. Scope it down: exclude node_modules/.git, "
-                "or use `git ls-files` (lists only real project files), `rg`, or a narrower path instead of scanning "
-                "everything with `find . -exec`.)", False)
+        pass
 
 
 def _resolve(cwd, path):
@@ -128,15 +156,16 @@ def _resolve(cwd, path):
     return full
 
 
-def execute(action, cwd):
-    """Run one action. Returns (observation, ok)."""
+def execute(action, cwd, stop=None):
+    """Run one action. Returns (observation, ok). `stop` interrupts a running
+    bash command when the user hits Esc."""
     a = action.get("action")
     try:
         if a == "bash":
             cmd = (action.get("command") or "").strip()
             if not cmd:
                 return "(no command provided)", False
-            return _run(cmd, cwd)
+            return _run(cmd, cwd, stop=stop)
         if a == "list_files":
             lp = _resolve(cwd, action.get("path", "."))
             if not lp:

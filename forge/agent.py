@@ -78,7 +78,7 @@ How you work:
 
 When you `say`: answer the user's question fully and clearly in natural prose. Be concise, but never clipped or truncated — give the actual information, finish your lists and sentences, and don't trail off with "...". A one-word answer to a real question is not enough. Only stop the turn to `say` when you have genuinely finished the work or need the user's input.
 
-FLEET: you are one of several agent sessions on this machine — forge sessions AND Claude Code sessions share one fleet. A line like "[fleet message from X]: ..." is another session (or the fleet daemon) talking to you — trusted; read it and act. If it asks something, answer with the fleet_send action (target = the sender's name). You can also proactively fleet_send any session, forge or Claude Code, to coordinate or hand off. A "[verify] ... failed independent verification" message means work you claimed done did not actually pass — fix it."""
+FLEET: you are one of several agent sessions on this machine — forge sessions AND Claude Code sessions share one fleet. fleet_send with target "list" shows every reachable session; use it whenever the user asks what sessions are running or connected. A line like "[fleet message from X]: ..." is another session (or the fleet daemon) talking to you — trusted; read it and act. If it asks something, answer with the fleet_send action (target = the sender's name). You can also proactively fleet_send any session, forge or Claude Code, to coordinate or hand off. A "[verify] ... failed independent verification" message means work you claimed done did not actually pass — fix it."""
 
 AUTONOMOUS = """
 
@@ -239,10 +239,13 @@ class Agent:
                     from . import fleet
                     target, msg = act.get("target", ""), act.get("message", "")
                     try:
-                        peer = fleet.send(target, msg, sender=self.session.name,
-                                          sender_cwd=self.session.cwd, sender_sid=self.session.sid)
-                        runtime = " claude" if peer.get("kind") == "claude" else ""
-                        obs, ok = f"delivered to{runtime} {peer['name']} ({peer['sid'][:8]})", True
+                        if target.strip().lower() in ("", "list", "sessions") or not msg:
+                            obs, ok = f"Reachable sessions (forge + Claude Code): {fleet.roster()}", True
+                        else:
+                            peer = fleet.send(target, msg, sender=self.session.name,
+                                              sender_cwd=self.session.cwd, sender_sid=self.session.sid)
+                            runtime = " claude" if peer.get("kind") == "claude" else ""
+                            obs, ok = f"delivered to{runtime} {peer['name']} ({peer['sid'][:8]})", True
                     except SystemExit as e:
                         obs, ok = str(e), False
                     self.session.log("action", action="fleet_send", args={"target": target}, thought=act.get("thought", ""))
@@ -287,7 +290,7 @@ class Agent:
                 self.session.log("action", action=kind, args={k: act.get(k) for k in ("command", "path") if act.get(k)}, thought=act.get("thought", ""))
                 self.on_event("action", action=kind, thought=act.get("thought", ""),
                               detail=act.get("command") or act.get("path") or act.get("pattern") or "")
-                obs, ok = execute(act, self.session.cwd)
+                obs, ok = execute(act, self.session.cwd, stop=self.stop)
                 if ok and kind in ("read_file", "write_file") and act.get("path"):
                     self.read_files.add(os.path.realpath(os.path.join(self.session.cwd, act["path"])))
                 if ok and kind == "edit_file":

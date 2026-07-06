@@ -291,10 +291,20 @@ def run_interruptible(fn, stop_event, on_hint=None):
     fd = sys.stdin.fileno()
     old = termios.tcgetattr(fd)
     hinted = False
+    forced = False
     try:
+        # cbreak, but with ISIG off: Ctrl-C arrives as the \x03 byte we handle
+        # (a graceful stop) instead of raising KeyboardInterrupt mid-run.
+        # Output processing stays on so the agent's transcript renders normally.
         tty.setcbreak(fd)
+        attrs = termios.tcgetattr(fd)
+        attrs[3] &= ~termios.ISIG
+        termios.tcsetattr(fd, termios.TCSANOW, attrs)
         while not done.is_set():
-            r, _, _ = select.select([fd], [], [], 0.1)
+            try:
+                r, _, _ = select.select([fd], [], [], 0.1)
+            except KeyboardInterrupt:       # SIGINT racing the ISIG switch-off
+                stop_event.set(); continue
             if not r:
                 continue
             ch = os.read(fd, 1)
@@ -305,13 +315,18 @@ def run_interruptible(fn, stop_event, on_hint=None):
                         os.read(fd, 32)
                     continue
             if ch in (ESC, CTRL_C):
+                if stop_event.is_set():     # second press — give the prompt back now
+                    forced = True
+                    break
                 if not hinted and on_hint:
                     on_hint()
                     hinted = True
                 stop_event.set()
     finally:
         termios.tcsetattr(fd, termios.TCSADRAIN, old)
-        done.wait(timeout=5)
+        done.wait(timeout=0.5 if forced else 5)
+    if forced and not done.is_set():
+        return "(stopped)"                  # abandon the stuck step; the daemon thread dies with it
     if err[0] is not None:
         raise err[0]
     return result[0]

@@ -226,48 +226,55 @@ def run(backend, session, verbose=False, workspace=None):
 
     screen.enter()
     try:
-        screen.emit(_banner(models, ctx, session.cwd, ptype))
-        screen.emit(f"{DIM}  Esc clears the line (or stops the agent mid-run) · @file to include a file · /help{RST}\n\n")
-        history = []
-        while True:
-            user = screen.prompt(f"{GR}❯{RST} ", history, status_line())
-            if user is None:
-                break
-            user = user.strip()
-            if not user:
-                continue
-            history.append(user)
-            if user in ("/exit", "/quit"):
-                break
-            screen.emit(f"\n{GR}❯{RST} {user}\n")           # echo into the transcript
-            if user == "/help":
-                screen.emit(f"{DIM}  Esc: clear/stop · ↑↓ history · Ctrl-A/E home/end · Ctrl-U/K/W kill{RST}\n")
-                screen.emit(f"{DIM}  /model · /config · /verbose · /plan · /cwd · /exit{RST}\n"); continue
-            if user in ("/model", "/models"):
-                _menu_model(agent, screen, history); continue
-            if user == "/config":
-                _menu_config(agent, screen); continue
-            if user == "/verbose":
-                ui.verbose = not ui.verbose; screen.emit(f"{DIM}  verbose {'on' if ui.verbose else 'off'}{RST}\n"); continue
-            if user == "/plan":
-                (ui._render_plan(agent.plan) if agent.plan else screen.emit(f"{DIM}  (no plan yet){RST}\n")); continue
-            if user == "/cwd":
-                screen.emit(f"{DIM}  {session.cwd}{RST}\n"); continue
-
-            ui.new_turn()
-            agent.stop.clear()
-            screen.show_submitted(f"{GR}❯{RST} ", user)
-            spin = FooterSpinner(screen, "working").start()
-            reply = None
-            try:
-                reply = run_interruptible(lambda: agent.send(_expand_ats(user, session.cwd)), agent.stop)
-            except ForgeError as e:
-                screen.emit(f"\n  {RD}✗ {e}{RST}\n")
-            finally:
-                spin.stop()
-            if reply == "(stopped)":
-                screen.emit(f"{DIM}  ⊘ stopped. what next?{RST}\n")
-            elif reply is not None and not ui.said:        # fallback (step limit / malformed)
-                screen.emit(f"\n{reply}\n")
+        _run_loop(screen, ui, agent, session, status_line, models, ctx, ptype)
+    except KeyboardInterrupt:
+        pass                                   # clean exit, never a traceback
     finally:
         screen.exit()
+
+
+def _run_loop(screen, ui, agent, session, status_line, models, ctx, ptype):
+    from .tui import FooterSpinner
+    screen.emit(_banner(models, ctx, session.cwd, ptype))
+    screen.emit(f"{DIM}  Esc clears the line (or stops the agent mid-run) · @file to include a file · /help{RST}\n\n")
+    history = []
+    while True:
+        user = screen.prompt(f"{GR}❯{RST} ", history, status_line())
+        if user is None:
+            break
+        user = user.strip()
+        if not user:
+            continue
+        history.append(user)
+        if user in ("/exit", "/quit"):
+            break
+        screen.emit(f"\n{GR}❯{RST} {user}\n")           # echo into the transcript
+        if user == "/help":
+            screen.emit(f"{DIM}  Esc: clear/stop · ↑↓ history · Ctrl-A/E home/end · Ctrl-U/K/W kill{RST}\n")
+            screen.emit(f"{DIM}  /model · /config · /verbose · /plan · /cwd · /exit{RST}\n"); continue
+        if user in ("/model", "/models"):
+            _menu_model(agent, screen, history); continue
+        if user == "/config":
+            _menu_config(agent, screen); continue
+        if user == "/verbose":
+            ui.verbose = not ui.verbose; screen.emit(f"{DIM}  verbose {'on' if ui.verbose else 'off'}{RST}\n"); continue
+        if user == "/plan":
+            (ui._render_plan(agent.plan) if agent.plan else screen.emit(f"{DIM}  (no plan yet){RST}\n")); continue
+        if user == "/cwd":
+            screen.emit(f"{DIM}  {session.cwd}{RST}\n"); continue
+
+        ui.new_turn()
+        agent.stop.clear()
+        screen.show_submitted(f"{GR}❯{RST} ", user)
+        spin = FooterSpinner(screen, "working").start()
+        reply = None
+        try:
+            reply = run_interruptible(lambda: agent.send(_expand_ats(user, session.cwd)), agent.stop)
+        except ForgeError as e:
+            screen.emit(f"\n  {RD}✗ {e}{RST}\n")
+        finally:
+            spin.stop()
+        if reply == "(stopped)":
+            screen.emit(f"{DIM}  ⊘ stopped. what next?{RST}\n")
+        elif reply is not None and not ui.said:        # fallback (step limit / malformed)
+            screen.emit(f"\n{reply}\n")
