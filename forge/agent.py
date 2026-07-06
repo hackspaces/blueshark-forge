@@ -271,12 +271,27 @@ class Agent:
                         self.messages.append({"role": "user", "content": f"⚠ {obs}"})
                         continue
 
+                # capture the before-content so we can show a real diff after a write
+                before = ""
+                if kind == "write_file":
+                    _fp = os.path.join(self.session.cwd, act.get("path", ""))
+                    if os.path.isfile(_fp):
+                        try:
+                            with open(_fp, errors="replace") as _f:
+                                before = _f.read()
+                        except OSError:
+                            pass
+
                 self.session.log("action", action=kind, args={k: act.get(k) for k in ("command", "path") if act.get(k)}, thought=act.get("thought", ""))
                 self.on_event("action", action=kind, thought=act.get("thought", ""),
-                              detail=act.get("command") or act.get("path") or "")
+                              detail=act.get("command") or act.get("path") or act.get("pattern") or "")
                 obs, ok = execute(act, self.session.cwd)
                 if ok and kind in ("read_file", "write_file") and act.get("path"):
                     self.read_files.add(os.path.realpath(os.path.join(self.session.cwd, act["path"])))
+                if ok and kind == "edit_file":
+                    self.on_event("diff", path=act.get("path", ""), old=act.get("old", ""), new=act.get("new", ""))
+                elif ok and kind == "write_file":
+                    self.on_event("diff", path=act.get("path", ""), old=before, new=act.get("content", ""))
                 self.session.log("observation", text=obs[:4000], ok=ok)
                 self.on_event("observation", text=obs, ok=ok)
 

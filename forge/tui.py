@@ -1,89 +1,113 @@
-"""Terminal UX: a raw-mode line editor (Esc clears the line, arrows, history) and
-an interrupt watcher so Esc stops the agent mid-run. Dependency-free (termios)."""
+"""Terminal UX: a raw-mode line editor drawn in a bordered box (Esc clears the
+line, arrows, history) and an interrupt watcher so Esc stops the agent mid-run.
+Dependency-free (termios). Falls back to plain input() when not a TTY."""
 import os
+import re
 import select
+import shutil
 import sys
 import termios
 import threading
 import tty
 
-DIM = "\033[2m"; GR = "\033[32m"; RST = "\033[0m"
+DIM = "\033[2m"; GR = "\033[32m"; MG = "\033[35m"; RST = "\033[0m"
 
 ESC, CTRL_C, CTRL_D, CR, LF, BS1, BS2 = b"\x1b", b"\x03", b"\x04", b"\r", b"\n", b"\x7f", b"\x08"
+_ANSI = re.compile(r"\033\[[0-9;]*m")
 
 
 def _supported():
     return sys.stdin.isatty() and sys.stdout.isatty()
 
 
-def read_line(prompt, history):
-    """Read one line in raw mode. Esc clears the current line; ↑/↓ walk history;
-    ←/→ move; Enter submits; Ctrl-C clears (or exits if empty); Ctrl-D exits.
-    Returns the string, or None to quit. Falls back to input() if not a TTY."""
+def _vis(s):
+    return len(_ANSI.sub("", s))
+
+
+def read_line(prompt, history, status=""):
+    """Read one line, drawn in a rounded box with an optional dim status line
+    above it. Esc clears (or, mid-run, stops); ↑/↓ history; ←/→ move; Enter
+    submits; Ctrl-C clears then exits; Ctrl-D exits. Returns the string or None."""
     if not _supported():
         try:
-            return input(prompt)
+            return input(_ANSI.sub("", prompt))
         except EOFError:
             return None
     fd = sys.stdin.fileno()
     old = termios.tcgetattr(fd)
-    buf, cur, hidx = [], 0, len(history)
-    saved = ""
+    buf, cur, hidx, saved = [], 0, len(history), ""
+    drawn = [False]
 
-    def redraw():
-        sys.stdout.write("\r\033[K" + prompt + "".join(buf))
-        # move cursor back to position
-        back = len(buf) - cur
-        if back:
-            sys.stdout.write(f"\033[{back}D")
+    if status:
+        print(f"{DIM}{status}{RST}")
+
+    def render():
+        W = max(24, shutil.get_terminal_size((80, 24)).columns)
+        plen = _vis(prompt)
+        avail = max(4, W - 4 - plen)
+        text = "".join(buf)
+        start = max(0, cur - avail) if cur > avail else 0
+        vis = text[start:start + avail]
+        vcur = cur - start
+        top = "╭" + "─" * (W - 2) + "╮"
+        content = f"│ {prompt}{vis}"
+        mid = content + " " * max(0, W - 1 - _vis(content)) + "│"
+        bot = "╰" + "─" * (W - 2) + "╯"
+        if drawn[0]:
+            sys.stdout.write("\r\033[2A")          # up to the top border
+        sys.stdout.write(f"\r\033[K{DIM}{top}\r\n\033[K{RST}{mid}{DIM}\r\n\033[K{bot}{RST}")
+        drawn[0] = True
+        sys.stdout.write("\033[1A\r")              # back up to the input line
+        col = 2 + plen + vcur
+        if col:
+            sys.stdout.write(f"\033[{col}C")
         sys.stdout.flush()
+
+    def finish():
+        sys.stdout.write("\033[1B\r\n"); sys.stdout.flush()   # move below the box
 
     try:
         tty.setraw(fd)
-        redraw()
+        render()
         while True:
             ch = os.read(fd, 1)
             if ch in (CR, LF):
-                sys.stdout.write("\r\n"); sys.stdout.flush()
-                return "".join(buf)
+                finish(); return "".join(buf)
             if ch == CTRL_D:
-                sys.stdout.write("\r\n"); sys.stdout.flush()
-                return None
+                finish(); return None
             if ch == CTRL_C:
                 if buf:
-                    buf, cur = [], 0; redraw(); continue
-                sys.stdout.write("\r\n"); sys.stdout.flush()
-                return None
+                    buf, cur = [], 0; render(); continue
+                finish(); return None
             if ch == ESC:
-                # could be a bare Esc (clear) or an arrow sequence
                 r, _, _ = select.select([fd], [], [], 0.02)
                 if not r:
-                    buf, cur = [], 0; redraw(); continue     # bare Esc → clear line
+                    buf, cur = [], 0; render(); continue      # bare Esc → clear
                 seq = os.read(fd, 2)
-                if seq == b"[A":                              # up → older history
+                if seq == b"[A":
                     if history and hidx > 0:
                         if hidx == len(history): saved = "".join(buf)
-                        hidx -= 1; buf = list(history[hidx]); cur = len(buf); redraw()
-                elif seq == b"[B":                            # down → newer
+                        hidx -= 1; buf = list(history[hidx]); cur = len(buf); render()
+                elif seq == b"[B":
                     if hidx < len(history):
                         hidx += 1
                         buf = list(history[hidx]) if hidx < len(history) else list(saved)
-                        cur = len(buf); redraw()
-                elif seq == b"[C":                            # right
-                    if cur < len(buf): cur += 1; redraw()
-                elif seq == b"[D":                            # left
-                    if cur > 0: cur -= 1; redraw()
+                        cur = len(buf); render()
+                elif seq == b"[C":
+                    if cur < len(buf): cur += 1; render()
+                elif seq == b"[D":
+                    if cur > 0: cur -= 1; render()
                 continue
             if ch in (BS1, BS2):
                 if cur > 0:
-                    del buf[cur - 1]; cur -= 1; redraw()
+                    del buf[cur - 1]; cur -= 1; render()
                 continue
             try:
                 c = ch.decode("utf-8", "ignore")
             except Exception:
                 continue
             if c and c.isprintable():
-                buf.insert(cur, c); cur += 1; redraw()
+                buf.insert(cur, c); cur += 1; render()
     finally:
         termios.tcsetattr(fd, termios.TCSADRAIN, old)
 

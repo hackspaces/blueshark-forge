@@ -18,22 +18,52 @@ from .tui import read_line, run_interruptible
 
 DIM = "\033[2m"; B = "\033[1m"; CY = "\033[36m"; GR = "\033[32m"; YE = "\033[33m"; RD = "\033[31m"; MG = "\033[35m"; RST = "\033[0m"
 
-ICON = {"bash": "⚡", "read_file": "▸", "write_file": "✎", "edit_file": "✎", "list_files": "▸", "say": "▪"}
+ICON = {"bash": "⚡", "read_file": "▸", "write_file": "✎", "edit_file": "✎", "list_files": "▸",
+        "grep": "⌕", "glob": "⌕", "fleet_send": "✉", "say": "▪"}
 
 
 class Spinner:
+    """Animated spinner that shows elapsed time (and optional live suffix)."""
     def __init__(self, label="thinking"):
-        self.label = label; self._stop = False; self._t = None
+        self.label = label; self._stop = False; self._t = None; self._suffix = ""
+        self._start = None
+    def suffix(self, s):
+        self._suffix = s
     def __enter__(self):
+        self._start = time.monotonic()
         def spin():
             for c in itertools.cycle("⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"):
                 if self._stop: break
-                sys.stdout.write(f"\r{DIM}{c} {self.label}…{RST}\033[K"); sys.stdout.flush(); time.sleep(0.08)
+                el = time.monotonic() - self._start
+                t = f"{el:.0f}s" if el < 60 else f"{int(el//60)}m {int(el%60)}s"
+                extra = f" · {self._suffix}" if self._suffix else ""
+                sys.stdout.write(f"\r{MG}{c}{RST} {DIM}{self.label}… ({t}{extra}){RST}\033[K")
+                sys.stdout.flush(); time.sleep(0.09)
             sys.stdout.write("\r\033[K"); sys.stdout.flush()
         self._t = threading.Thread(target=spin, daemon=True); self._t.start(); return self
     def __exit__(self, *a):
         self._stop = True
         if self._t: self._t.join()
+
+
+def _render_diff(path, old, new, max_lines=40):
+    import difflib
+    old_l, new_l = old.splitlines(), new.splitlines()
+    sm = difflib.SequenceMatcher(a=old_l, b=new_l)
+    rows = []
+    for tag, i1, i2, j1, j2 in sm.get_opcodes():
+        if tag == "equal":
+            continue
+        rows += [(RD, "-", ln) for ln in old_l[i1:i2]]
+        rows += [(GR, "+", ln) for ln in new_l[j1:j2]]
+    add = sum(1 for c, s, _ in rows if s == "+")
+    rem = sum(1 for c, s, _ in rows if s == "-")
+    print(f"{DIM}  ┌ {path}{RST}  {GR}+{add}{RST} {RD}-{rem}{RST}")
+    for color, sign, line in rows[:max_lines]:
+        print(f"{DIM}  │{RST} {color}{sign} {line[:160]}{RST}")
+    if len(rows) > max_lines:
+        print(f"{DIM}  │ … {len(rows) - max_lines} more lines{RST}")
+    print(f"{DIM}  └{RST}")
 
 
 def _render_plan(plan):
@@ -85,6 +115,8 @@ class UI:
                 first = (k.get("text") or "").strip().splitlines()[:1]
                 if first: print(f"    {DIM}→ {first[0][:80]}{RST}")
             self.t0 = None
+        elif kind == "diff":
+            self._end_spin(); _render_diff(k.get("path", ""), k.get("old", ""), k.get("new", ""))
         elif kind == "escalate":
             self._end_spin(); print(f"  {MG}↑ stuck — escalating to a stronger local model: {k['model']}{RST}")
         elif kind == "inbox":
@@ -182,10 +214,20 @@ def run(backend, session, verbose=False, workspace=None):
     if hasattr(ladder[0], "warm"):
         with Spinner("loading model"):
             ladder[0].warm()
-    print(f"{DIM}Esc clears the line · Esc stops the agent mid-run · @file to include a file · /help · Ctrl-D to quit{RST}\n")
+    print(f"{DIM}Esc clears the line (or stops the agent mid-run) · @file to include a file · /help{RST}\n")
     history = []
+
+    def status_line():
+        try:
+            used, window = agent._fill()
+            pct = min(99, int(100 * used / window)) if window else 0
+        except Exception:
+            pct = 0
+        m = agent.backend.name.split(":", 1)[-1]
+        return f"  {m} · {pct}% context · Esc stops · /model /config /help"
+
     while True:
-        user = read_line(f"{GR}❯{RST} ", history)
+        user = read_line(f"{GR}❯{RST} ", history, status=status_line())
         if user is None:
             print(); break
         user = user.strip()
