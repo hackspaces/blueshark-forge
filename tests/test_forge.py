@@ -463,6 +463,41 @@ class TestRoster(unittest.TestCase):
         self.assertIn("claude", r)
 
 
+class TestFindSession(unittest.TestCase):
+    """Target matching quirks found in live use."""
+
+    def _with_peers(self, peers):
+        import contextlib
+        import json as _json
+        import unittest.mock as mock
+        tmp = tempfile.mkdtemp()
+        inbox = os.path.join(tmp, "inbox.json")
+        _write(inbox, _json.dumps(peers))
+        from forge import bridge
+        stack = contextlib.ExitStack()
+        stack.enter_context(mock.patch.object(bridge, "INBOX", inbox))
+        stack.enter_context(mock.patch("forge.session.registry", return_value=[]))  # isolate from real machine
+        return stack
+
+    def test_roster_display_format_works_as_target(self):
+        from forge import fleet
+        peers = [{"sessionId": "8fb90aba-1", "name": "ymp", "cwd": "/Users/ymp", "port": 1, "pid": os.getpid()},
+                 {"sessionId": "a617c126-2", "name": "ai-grader", "cwd": "/g", "port": 2, "pid": os.getpid()}]
+        with self._with_peers(peers):
+            for t in ("ymp(8fb90aba)", "ymp(8fb90aba, claude)", "ymp (8fb90aba)"):
+                hits = fleet.find_session(t)
+                self.assertEqual([h["sid"] for h in hits], ["8fb90aba-1"], t)
+
+    def test_sender_excluded_from_ambiguous_match(self):
+        from forge import fleet
+        peers = [{"sessionId": "claude-ymp", "name": "ymp", "cwd": "/Users/ymp", "port": 1, "pid": os.getpid()},
+                 {"sessionId": "forge-ymp", "name": "ymp", "cwd": "/Users/ymp", "port": 2, "pid": os.getpid()}]
+        with self._with_peers(peers):
+            self.assertEqual(len(fleet.find_session("ymp")), 2)                       # ambiguous...
+            hits = fleet.find_session("ymp", exclude_sid="forge-ymp")                 # ...unless you're one of them
+            self.assertEqual([h["sid"] for h in hits], ["claude-ymp"])
+
+
 class TestTuiHelpers(unittest.TestCase):
     """Pure helpers from the TUI: ANSI-aware clipping and raw-mode key decoding."""
 

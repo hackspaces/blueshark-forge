@@ -73,19 +73,22 @@ def _read_key(fd):
 
 class Screen:
     """A bottom-pinned terminal: the conversation scrolls in the top region while
-    a fixed footer (rule · prompt · status) stays anchored at the bottom — the way
-    Claude Code / htop-style TUIs do it, via a DECSTBM scroll region.
+    a fixed footer (activity · rule · prompt · status) stays anchored at the
+    bottom — the way Claude Code / htop-style TUIs do it, via a DECSTBM scroll
+    region. The activity row (the 'working…' spinner) sits ABOVE the input rule,
+    visually in the flow of the streamed output.
 
     All transcript output goes through `emit()`; the footer is painted with
     absolute positioning, wrapped in save/restore so it never disturbs the
     scroll cursor. Degrades to plain stdout when not a TTY."""
 
-    def __init__(self, footer=3):
+    def __init__(self, footer=4):
         self.footer = footer
         self.enabled = _supported()
         self._lock = threading.Lock()   # serialize stdout between the agent + the spinner
         self._redraw = None             # repaint hook, set while the editor is live
         self._entered = False
+        self._activity = ""             # the 'working…' line above the rule
         self._resize()
         if self.enabled:
             try:
@@ -137,22 +140,34 @@ class Screen:
     def _paint(self, prompt, text, status, cursor_col=None):
         base = self.h - self.footer + 1
         rule = f"{DIM}{'─' * self.w}{RST}"
-        rows = [rule, _clip(f"{prompt}{text}", self.w), _clip(f"{DIM}{status}{RST}", self.w)][:self.footer]
+        rows = [_clip(f"{DIM}{self._activity}{RST}", self.w), rule,
+                _clip(f"{prompt}{text}", self.w), _clip(f"{DIM}{status}{RST}", self.w)][-self.footer:]
         for i in range(self.footer):
             sys.stdout.write(f"\033[{base + i};1H\033[K")
             if i < len(rows):
                 sys.stdout.write(rows[i])
         if cursor_col is not None:
-            sys.stdout.write(f"\033[{base + 1};{cursor_col}H")
+            sys.stdout.write(f"\033[{base + self.footer - 2};{cursor_col}H")
         sys.stdout.flush()
 
     def set_status(self, status):
-        """Update just the footer status row (used by the running spinner)."""
+        """Update just the footer status row (the last footer line)."""
         if not self.enabled:
             return
         base = self.h - self.footer + 1
         with self._lock:
-            sys.stdout.write("\0337" + f"\033[{base + 2};1H\033[K{DIM}{status[:self.w]}{RST}" + "\0338")
+            sys.stdout.write("\0337" + f"\033[{base + self.footer - 1};1H\033[K{DIM}{status[:self.w]}{RST}" + "\0338")
+            sys.stdout.flush()
+
+    def set_activity(self, text):
+        """The 'working…' line — pinned just above the input rule, adjacent to
+        where output streams (not below the input)."""
+        self._activity = text
+        if not self.enabled or self.footer < 4:
+            return
+        base = self.h - self.footer + 1
+        with self._lock:
+            sys.stdout.write("\0337" + f"\033[{base};1H\033[K" + _clip(f"{MG}{text}{RST}" if text else "", self.w) + "\0338")
             sys.stdout.flush()
 
     def show_submitted(self, prompt, text):
@@ -249,7 +264,8 @@ class Screen:
 
 
 class FooterSpinner:
-    """Animate a spinner + elapsed time in the pinned footer's status row."""
+    """Animate the 'working…' spinner in the activity row — just above the
+    input rule, adjacent to the streaming output."""
     def __init__(self, screen, label="thinking"):
         self.screen = screen; self.label = label; self._stop = False; self._t = None
     def start(self):
@@ -261,13 +277,14 @@ class FooterSpinner:
                     break
                 el = time.monotonic() - start
                 t = f"{el:.0f}s" if el < 60 else f"{int(el // 60)}m {int(el % 60)}s"
-                self.screen.set_status(f"{c} {self.label}… ({t})   ·   Esc to stop")
+                self.screen.set_activity(f"{c} {self.label}… ({t})   ·   Esc to stop")
                 time.sleep(0.1)
         self._t = threading.Thread(target=spin, daemon=True); self._t.start(); return self
     def stop(self):
         self._stop = True
         if self._t:
             self._t.join()
+        self.screen.set_activity("")
 
 
 def run_interruptible(fn, stop_event, on_hint=None):

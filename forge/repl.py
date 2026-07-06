@@ -196,7 +196,7 @@ def _expand_ats(text, cwd):
 
 def run(backend, session, verbose=False, workspace=None):
     from .tui import Screen, FooterSpinner
-    screen = Screen(footer=3)
+    screen = Screen(footer=4)   # activity (working…) · rule · input · status
     ui = UI(screen.emit, verbose)
     ladder = backend if isinstance(backend, list) else [backend]
     agent = Agent(ladder, session, on_event=ui, workspace=workspace, autonomous=True)

@@ -74,13 +74,24 @@ def recent_work(sid, max_chars=9000):
 
 
 # ---- MESSAGE ----------------------------------------------------------------
-def find_session(target):
+def find_session(target, exclude_sid=None):
     """Match a target across BOTH fleets: forge sessions and Claude Code
     sessions (via the bridge). Forge entries have no 'kind'; claude peers
-    carry kind='claude'."""
+    carry kind='claude'. `exclude_sid` drops the sender's own session, so
+    "message ymp" from a session named ymp means the OTHER ymp."""
     from . import bridge
     live = sessmod.registry() + bridge.claude_peers()
-    t = target.lower()
+    if exclude_sid:
+        live = [e for e in live if e["sid"] != exclude_sid]
+    t = target.strip().lower()
+    # roster display format pasted back as a target: "name(sidprefix)" or
+    # "name(sidprefix, claude)" — honor the sid prefix inside the parens
+    m = re.match(r"^(.*?)\s*\(\s*([a-z0-9-]+)\s*(?:,[^)]*)?\)$", t)
+    if m:
+        by_sid = [e for e in live if e["sid"].lower().startswith(m.group(2))]
+        if by_sid:
+            return by_sid
+        t = m.group(1).strip() or t
     # exact session id wins (that's how the daemon addresses a session)
     exact = [e for e in live if e["sid"].lower() == t]
     if exact:
@@ -98,9 +109,10 @@ def roster():
 
 
 def send(target, text, sender="fleet", sender_cwd="", sender_sid=""):
-    hits = find_session(target)
+    hits = find_session(target, exclude_sid=sender_sid or None)
     if len(hits) != 1:
-        raise SystemExit(f"target '{target}' matched {len(hits)}; live: {roster()}")
+        raise SystemExit(f"target '{target}' matched {len(hits)} sessions — "
+                         f"use a session id prefix (e.g. '5fa56b39') to pick one; live: {roster()}")
     e = hits[0]
     if not e.get("port"):
         raise SystemExit(f"session {e['name']} has no reachable inbox")
