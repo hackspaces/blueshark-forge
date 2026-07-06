@@ -124,6 +124,19 @@ class UI:
         self._line(f"{DIM}  └{RST}")
 
 
+def _banner(models, ctx, cwd, ptype):
+    """A welcome banner with a small forge emblem, shown at the top on start."""
+    from . import __version__
+    logo = [f"{MG}▟██████▙{RST}", f"{MG} ▜████▛ {RST}", f"{MG}  ▀██▀  {RST}"]
+    info = [
+        f"{B}{MG}forge{RST} {DIM}v{__version__}{RST}",
+        f"{models}{DIM}{ctx}{RST}",
+        f"{DIM}{cwd}{ptype}{RST}",
+    ]
+    lines = ["", *(f"  {logo[i]}   {info[i]}" for i in range(3)), ""]
+    return "\n".join(lines) + "\n"
+
+
 def _ollama_models():
     try:
         out = subprocess.check_output(["ollama", "list"], text=True, timeout=10)
@@ -213,8 +226,8 @@ def run(backend, session, verbose=False, workspace=None):
 
     screen.enter()
     try:
-        screen.emit(f"{B}{MG}forge{RST} · {models}{ctx} · {DIM}{session.cwd}{ptype}{RST}\n")
-        screen.emit(f"{DIM}Esc clears the line (or stops the agent mid-run) · @file to include a file · /help{RST}\n\n")
+        screen.emit(_banner(models, ctx, session.cwd, ptype))
+        screen.emit(f"{DIM}  Esc clears the line (or stops the agent mid-run) · @file to include a file · /help{RST}\n\n")
         history = []
         while True:
             user = screen.prompt(f"{GR}❯{RST} ", history, status_line())

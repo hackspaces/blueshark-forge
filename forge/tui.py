@@ -48,8 +48,9 @@ class Screen:
         if not self.enabled:
             return
         self._resize()
+        sys.stdout.write("\033[2J")                           # clear the screen
         sys.stdout.write(f"\033[1;{self.h - self.footer}r")   # scroll region = everything above the footer
-        sys.stdout.write(f"\033[{self.h - self.footer};1H")   # park the cursor at the region's bottom
+        sys.stdout.write("\033[1;1H")                         # park the cursor at the TOP (content fills down)
         sys.stdout.flush()
 
     def exit(self):
