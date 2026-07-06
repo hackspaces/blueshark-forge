@@ -14,7 +14,7 @@ from .agent import Agent
 from .backends import make_backend, ForgeError
 from . import config as cfgmod
 from .util import slurp
-from .tui import read_line, run_interruptible
+from .tui import run_interruptible
 
 DIM = "\033[2m"; B = "\033[1m"; CY = "\033[36m"; GR = "\033[32m"; YE = "\033[33m"; RD = "\033[31m"; MG = "\033[35m"; RST = "\033[0m"
 
@@ -46,91 +46,82 @@ class Spinner:
         if self._t: self._t.join()
 
 
-def _render_diff(path, old, new, max_lines=40):
-    import difflib
-    old_l, new_l = old.splitlines(), new.splitlines()
-    sm = difflib.SequenceMatcher(a=old_l, b=new_l)
-    rows = []
-    for tag, i1, i2, j1, j2 in sm.get_opcodes():
-        if tag == "equal":
-            continue
-        rows += [(RD, "-", ln) for ln in old_l[i1:i2]]
-        rows += [(GR, "+", ln) for ln in new_l[j1:j2]]
-    add = sum(1 for c, s, _ in rows if s == "+")
-    rem = sum(1 for c, s, _ in rows if s == "-")
-    print(f"{DIM}  ┌ {path}{RST}  {GR}+{add}{RST} {RD}-{rem}{RST}")
-    for color, sign, line in rows[:max_lines]:
-        print(f"{DIM}  │{RST} {color}{sign} {line[:160]}{RST}")
-    if len(rows) > max_lines:
-        print(f"{DIM}  │ … {len(rows) - max_lines} more lines{RST}")
-    print(f"{DIM}  └{RST}")
 
 
-def _render_plan(plan):
-    print(f"{DIM}  ┌─ plan{RST}")
-    for item in plan:
-        s = item.strip()
-        if s.startswith("[x]"):
-            print(f"{DIM}  │{RST} {GR}✓{RST} {DIM}{s[3:].strip()}{RST}")
-        elif s.startswith("[~]"):
-            print(f"{DIM}  │{RST} {YE}▸{RST} {B}{s[3:].strip()}{RST}")
-        else:
-            print(f"{DIM}  │  {s.lstrip('[ ]').strip()}{RST}")
-    print(f"{DIM}  └─{RST}")
 
 
 class UI:
-    def __init__(self, verbose=False):
-        self.verbose = verbose; self.spin = None; self.t0 = None
+    """Renders agent events into the scrolling transcript via `emit`. The spinner
+    lives in the pinned footer (owned by run()), not here."""
+    def __init__(self, emit, verbose=False):
+        self.emit = emit; self.verbose = verbose; self.t0 = None
         self.streamed = False; self.said = False
     def new_turn(self):
         self.streamed = False; self.said = False
+    def _line(self, s=""):
+        self.emit(s + "\n")
     def __call__(self, kind, **k):
-        if kind == "thinking":
-            self.start_spin()
-        elif kind == "token":
-            self._end_spin()
+        if kind == "token":
             if not self.streamed:
-                print()  # blank line before the reply begins
-                self.streamed = True
-            print(k["text"], end="", flush=True)
+                self.emit("\n"); self.streamed = True
+            self.emit(k["text"])
         elif kind == "say":
             self.said = True
-            if self.streamed:
-                print("\n")
-            else:
-                self._end_spin(); print(f"\n{k.get('message','')}\n")
+            self.emit("\n" if self.streamed else f"\n{k.get('message','')}\n")
         elif kind == "plan":
-            self._end_spin(); _render_plan(k["plan"])
+            self._render_plan(k["plan"])
         elif kind == "action":
-            self._end_spin()
             ic = ICON.get(k["action"], "·"); detail = (k.get("detail") or "").replace("\n", " ")[:74]
-            print(f"  {CY}{ic}{RST} {k['action']} {DIM}{detail}{RST}", end="", flush=True)
+            self.emit(f"  {CY}{ic}{RST} {k['action']} {DIM}{detail}{RST}")
             self.t0 = time.time()
         elif kind == "observation":
             dt = f"{time.time()-self.t0:.1f}s" if self.t0 else ""
             mark = f"{GR}ok{RST}" if k.get("ok") else f"{RD}fail{RST}"
-            print(f"  {DIM}{dt}{RST} {mark}")
+            self._line(f"  {DIM}{dt}{RST} {mark}")
             if self.verbose:
                 first = (k.get("text") or "").strip().splitlines()[:1]
-                if first: print(f"    {DIM}→ {first[0][:80]}{RST}")
+                if first: self._line(f"    {DIM}→ {first[0][:80]}{RST}")
             self.t0 = None
         elif kind == "diff":
-            self._end_spin(); _render_diff(k.get("path", ""), k.get("old", ""), k.get("new", ""))
+            self._render_diff(k.get("path", ""), k.get("old", ""), k.get("new", ""))
         elif kind == "escalate":
-            self._end_spin(); print(f"  {MG}↑ stuck — escalating to a stronger local model: {k['model']}{RST}")
+            self._line(f"  {MG}↑ stuck — escalating to a stronger local model: {k['model']}{RST}")
         elif kind == "inbox":
-            self._end_spin(); print(f"  {YE}✉ {k['sender']}: {k['text'][:76]}{RST}")
-        elif kind == "compacting":
-            self.start_spin("compacting context")
+            self._line(f"  {YE}✉ {k['sender']}: {k['text'][:76]}{RST}")
         elif kind == "compact":
-            self._end_spin(); print(f"  {DIM}⟲ context compacted (now ~{k.get('tokens','?')} tokens){RST}")
+            self._line(f"  {DIM}⟲ context compacted{RST}")
         elif kind in ("malformed", "loop"):
-            self._end_spin(); print(f"  {DIM}· ({kind}, recovering){RST}")
-    def start_spin(self, label="thinking"):
-        self.spin = Spinner(label).__enter__()
-    def _end_spin(self):
-        if self.spin: self.spin.__exit__(); self.spin = None
+            self._line(f"  {DIM}· ({kind}, recovering){RST}")
+
+    def _render_plan(self, plan):
+        self._line(f"{DIM}  ┌─ plan{RST}")
+        for item in plan:
+            s = item.strip()
+            if s.startswith("[x]"):
+                self._line(f"{DIM}  │{RST} {GR}✓{RST} {DIM}{s[3:].strip()}{RST}")
+            elif s.startswith("[~]"):
+                self._line(f"{DIM}  │{RST} {YE}▸{RST} {B}{s[3:].strip()}{RST}")
+            else:
+                self._line(f"{DIM}  │  {s.lstrip('[ ]').strip()}{RST}")
+        self._line(f"{DIM}  └─{RST}")
+
+    def _render_diff(self, path, old, new, max_lines=40):
+        import difflib
+        old_l, new_l = old.splitlines(), new.splitlines()
+        sm = difflib.SequenceMatcher(a=old_l, b=new_l)
+        rows = []
+        for tag, i1, i2, j1, j2 in sm.get_opcodes():
+            if tag == "equal":
+                continue
+            rows += [(RD, "-", ln) for ln in old_l[i1:i2]]
+            rows += [(GR, "+", ln) for ln in new_l[j1:j2]]
+        add = sum(1 for c, s, _ in rows if s == "+"); rem = len(rows) - add
+        self._line(f"{DIM}  ┌ {path}{RST}  {GR}+{add}{RST} {RD}-{rem}{RST}")
+        for color, sign, line in rows[:max_lines]:
+            self._line(f"{DIM}  │{RST} {color}{sign} {line[:160]}{RST}")
+        if len(rows) > max_lines:
+            self._line(f"{DIM}  │ … {len(rows) - max_lines} more lines{RST}")
+        self._line(f"{DIM}  └{RST}")
 
 
 def _ollama_models():
@@ -141,42 +132,37 @@ def _ollama_models():
         return []
 
 
-def _menu_model(agent, history):
+def _menu_model(agent, screen, history):
     """/model — pick a new ladder from installed models. Persists to config."""
     models = _ollama_models()
     cur = " → ".join(b.name.split(":", 1)[-1] for b in agent.ladder)
-    print(f"{DIM}  current ladder: {cur}{RST}")
+    screen.emit(f"{DIM}  current ladder: {cur}{RST}\n")
     if not models:
-        print(f"{DIM}  (no ollama models found){RST}"); return
+        screen.emit(f"{DIM}  (no ollama models found){RST}\n"); return
     for i, m in enumerate(models, 1):
-        print(f"    {CY}{i}{RST} {m}")
-    print(f"{DIM}  type numbers cheap→strong (e.g. '1 3'), or a name, or blank to cancel{RST}")
-    pick = read_line(f"{GR}model›{RST} ", history)
+        screen.emit(f"    {CY}{i}{RST} {m}\n")
+    screen.emit(f"{DIM}  type numbers cheap→strong (e.g. '1 3'), a name, or blank to cancel{RST}\n")
+    pick = screen.prompt(f"{GR}model›{RST} ", history, "")
     if not pick or not pick.strip():
-        print(f"{DIM}  cancelled{RST}"); return
-    chosen = []
-    for tok in pick.split():
-        if tok.isdigit() and 1 <= int(tok) <= len(models):
-            chosen.append(models[int(tok) - 1])
-        else:
-            chosen.append(tok)
+        screen.emit(f"{DIM}  cancelled{RST}\n"); return
+    chosen = [models[int(t) - 1] if t.isdigit() and 1 <= int(t) <= len(models) else t for t in pick.split()]
     if not chosen:
         return
     agent.set_ladder([make_backend(m) for m in chosen])
     cfgmod.set_key("ladder", chosen)
-    print(f"{GR}  ✓ ladder → {' → '.join(chosen)}{RST}  {DIM}(saved to config){RST}")
+    screen.emit(f"{GR}  ✓ ladder → {' → '.join(chosen)}{RST}  {DIM}(saved){RST}\n")
 
 
-def _menu_config(agent):
+def _menu_config(agent, screen):
     """/config — show current settings."""
     cfg = cfgmod.load()
-    print(f"{DIM}  config ({cfgmod.PATH}):{RST}")
-    for k in ("ladder", "num_ctx", "keep_alive", "num_predict", "stuck_threshold"):
+    screen.emit(f"{DIM}  config ({cfgmod.PATH}):{RST}\n")
+    for k in ("engine", "ladder", "num_ctx", "keep_alive", "num_predict", "stuck_threshold"):
         v = cfg.get(k)
-        print(f"    {CY}{k}{RST}: {v if not isinstance(v, list) else ' → '.join(v)}")
+        screen.emit(f"    {CY}{k}{RST}: {v if not isinstance(v, list) else ' → '.join(v)}\n")
     m = cfg.get("machine", {})
     if m:
-        print(f"    {DIM}machine: {m.get('chip','')} · {m.get('ram_gb','?')}GB · {m.get('cores','?')} cores{RST}")
+        screen.emit(f"    {DIM}machine: {m.get('chip','')} · {m.get('ram_gb','?')}GB · {m.get('cores','?')} cores{RST}\n")
 
 
 def _expand_ats(text, cwd):
@@ -196,7 +182,9 @@ def _expand_ats(text, cwd):
 
 
 def run(backend, session, verbose=False, workspace=None):
-    ui = UI(verbose)
+    from .tui import Screen, FooterSpinner
+    screen = Screen(footer=3)
+    ui = UI(screen.emit, verbose)
     ladder = backend if isinstance(backend, list) else [backend]
     agent = Agent(ladder, session, on_event=ui, workspace=workspace, autonomous=True)
     ptype = ""
@@ -210,12 +198,9 @@ def run(backend, session, verbose=False, workspace=None):
         ctx = f" · {w//1024}K ctx" if w >= 1024 else ""
     except Exception:
         ctx = ""
-    print(f"{B}{MG}forge{RST} · {models}{ctx} · {DIM}{session.cwd}{ptype}{RST}")
-    if hasattr(ladder[0], "warm"):
+    if hasattr(ladder[0], "warm"):                 # warm before entering screen mode
         with Spinner("loading model"):
             ladder[0].warm()
-    print(f"{DIM}Esc clears the line (or stops the agent mid-run) · @file to include a file · /help{RST}\n")
-    history = []
 
     def status_line():
         try:
@@ -226,38 +211,49 @@ def run(backend, session, verbose=False, workspace=None):
         m = agent.backend.name.split(":", 1)[-1]
         return f"  {m} · {pct}% context · Esc stops · /model /config /help"
 
-    while True:
-        user = read_line(f"{GR}❯{RST} ", history, status=status_line())
-        if user is None:
-            print(); break
-        user = user.strip()
-        if not user:
-            continue
-        history.append(user)
-        if user in ("/exit", "/quit"):
-            break
-        if user == "/help":
-            print(f"{DIM}  Esc: clear line / stop agent · /model switch models · /config settings · /verbose · /plan · /cwd · /exit{RST}"); continue
-        if user in ("/model", "/models"):
-            _menu_model(agent, history); continue
-        if user == "/config":
-            _menu_config(agent); continue
-        if user == "/verbose":
-            ui.verbose = not ui.verbose; print(f"{DIM}  verbose {'on' if ui.verbose else 'off'}{RST}"); continue
-        if user == "/plan":
-            _render_plan(agent.plan) if agent.plan else print(f"{DIM}  (no plan yet){RST}"); continue
-        if user == "/cwd":
-            print(f"{DIM}  {session.cwd}{RST}"); continue
-        ui.new_turn()
-        agent.stop.clear()
-        def hint():
-            ui._end_spin(); print(f"\n{DIM}  stopping…{RST}")
-        try:
-            reply = run_interruptible(lambda: agent.send(_expand_ats(user, session.cwd)), agent.stop, on_hint=hint)
-        except ForgeError as e:
-            ui._end_spin(); print(f"\n  {RD}✗ {e}{RST}\n"); continue
-        ui._end_spin()
-        if reply == "(stopped)":
-            print(f"{DIM}  ⊘ stopped. what next?{RST}\n")
-        elif not ui.said:        # fallback (step limit / malformed): print the raw reply
-            print(f"\n{reply}\n")
+    screen.enter()
+    try:
+        screen.emit(f"{B}{MG}forge{RST} · {models}{ctx} · {DIM}{session.cwd}{ptype}{RST}\n")
+        screen.emit(f"{DIM}Esc clears the line (or stops the agent mid-run) · @file to include a file · /help{RST}\n\n")
+        history = []
+        while True:
+            user = screen.prompt(f"{GR}❯{RST} ", history, status_line())
+            if user is None:
+                break
+            user = user.strip()
+            if not user:
+                continue
+            history.append(user)
+            if user in ("/exit", "/quit"):
+                break
+            screen.emit(f"\n{GR}❯{RST} {user}\n")           # echo into the transcript
+            if user == "/help":
+                screen.emit(f"{DIM}  Esc: clear/stop · /model · /config · /verbose · /plan · /cwd · /exit{RST}\n"); continue
+            if user in ("/model", "/models"):
+                _menu_model(agent, screen, history); continue
+            if user == "/config":
+                _menu_config(agent, screen); continue
+            if user == "/verbose":
+                ui.verbose = not ui.verbose; screen.emit(f"{DIM}  verbose {'on' if ui.verbose else 'off'}{RST}\n"); continue
+            if user == "/plan":
+                (ui._render_plan(agent.plan) if agent.plan else screen.emit(f"{DIM}  (no plan yet){RST}\n")); continue
+            if user == "/cwd":
+                screen.emit(f"{DIM}  {session.cwd}{RST}\n"); continue
+
+            ui.new_turn()
+            agent.stop.clear()
+            screen.show_submitted(f"{GR}❯{RST} ", user)
+            spin = FooterSpinner(screen, "working").start()
+            reply = None
+            try:
+                reply = run_interruptible(lambda: agent.send(_expand_ats(user, session.cwd)), agent.stop)
+            except ForgeError as e:
+                screen.emit(f"\n  {RD}✗ {e}{RST}\n")
+            finally:
+                spin.stop()
+            if reply == "(stopped)":
+                screen.emit(f"{DIM}  ⊘ stopped. what next?{RST}\n")
+            elif reply is not None and not ui.said:        # fallback (step limit / malformed)
+                screen.emit(f"\n{reply}\n")
+    finally:
+        screen.exit()
