@@ -15,6 +15,10 @@ from .backends import make_backend
 from . import config as cfgmod
 from .tui import read_line, run_interruptible
 
+def _slurp(path):
+    with open(path, errors='replace') as f:
+        return f.read()
+
 DIM = "\033[2m"; B = "\033[1m"; CY = "\033[36m"; GR = "\033[32m"; YE = "\033[33m"; RD = "\033[31m"; MG = "\033[35m"; RST = "\033[0m"
 
 ICON = {"bash": "⚡", "read_file": "▸", "write_file": "✎", "edit_file": "✎", "list_files": "▸", "say": "▪"}
@@ -155,7 +159,7 @@ def _expand_ats(text, cwd):
         p = os.path.join(cwd, tok)
         if os.path.isfile(p):
             try:
-                body = open(p).read()[:8000]
+                body = _slurp(p)[:8000]
                 out += f"\n\n[contents of {tok}]\n{body}"
             except OSError:
                 pass

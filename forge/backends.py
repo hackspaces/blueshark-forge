@@ -11,7 +11,7 @@ reply types out live. Constrained decoding (schema) keeps small models reliable.
 Mac/Apple-Silicon tuning (env-overridable):
     FORGE_KEEP_ALIVE  keep the model resident between turns (default 30m — avoids
                       multi-second reloads; the single biggest local speedup)
-    FORGE_NUM_CTX     context window (default 8192)
+    FORGE_NUM_CTX     context-window cap (default 32768; setup sizes it to RAM)
     FORGE_NUM_PREDICT max tokens per turn (default 2048)
 Ollama uses Metal automatically. Set OLLAMA_FLASH_ATTENTION=1 in the environment
 for faster, lower-memory attention.

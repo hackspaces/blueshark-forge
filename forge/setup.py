@@ -9,6 +9,10 @@ import subprocess
 from . import config
 
 
+def _slurp(path):
+    with open(path, errors='replace') as f:
+        return f.read()
+
 def detect_machine():
     info = {"os": platform.system(), "arch": platform.machine(), "cores": os.cpu_count() or 0, "ram_gb": 0, "chip": ""}
     try:
@@ -16,7 +20,7 @@ def detect_machine():
             info["ram_gb"] = round(int(subprocess.check_output(["sysctl", "-n", "hw.memsize"])) / (1024**3))
             info["chip"] = subprocess.check_output(["sysctl", "-n", "machdep.cpu.brand_string"]).decode().strip()
         elif info["os"] == "Linux":
-            for line in open("/proc/meminfo"):
+            for line in _slurp("/proc/meminfo").splitlines():
                 if line.startswith("MemTotal"):
                     info["ram_gb"] = round(int(line.split()[1]) / (1024**2))
                     break

@@ -137,3 +137,14 @@ routes to a capable local model (qwen-coder class) for reliable checking.
 Next: streaming output, richer TUI, tool sandboxing, more backends (vLLM/MLX,
 Anthropic), and training a model native to forge's protocol — the flywheel where
 forge's own trajectories teach the model to be best *in forge*.
+
+## Development
+
+```bash
+python -m unittest discover -s tests    # run the test suite (stdlib, no deps)
+```
+
+Tests cover the harness invariants (read-before-edit, path confinement, edit
+exact/fuzzy matching), the tools (read/write/edit/grep/glob with offset + honest
+truncation), fleet, config, and adversarial edge cases (absolute-path escapes,
+traversal, missing files, malformed model output). Contributions welcome.

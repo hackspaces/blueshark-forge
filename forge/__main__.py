@@ -17,6 +17,10 @@ from . import session as sessmod
 from . import config as cfgmod
 
 
+def _slurp(path):
+    with open(path, errors='replace') as f:
+        return f.read()
+
 def _default_model():
     return os.environ.get("FORGE_MODEL") or ",".join(cfgmod.get("ladder", ["gemma2:9b"]))
 
@@ -97,7 +101,7 @@ def _daemon_running():
     if not os.path.exists(pidf):
         return None
     try:
-        pid = int(open(pidf).read())
+        pid = int(_slurp(pidf))
         os.kill(pid, 0)
         return pid
     except (OSError, ValueError):
@@ -161,7 +165,7 @@ def cmd_receipts(args):
     f = os.path.expanduser("~/.forge/verdicts.jsonl")
     if not os.path.exists(f):
         print("no verdicts yet."); return
-    for line in open(f).read().splitlines()[-args.n:]:
+    for line in _slurp(f).splitlines()[-args.n:]:
         try:
             d = json.loads(line)
         except json.JSONDecodeError:

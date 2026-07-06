@@ -20,6 +20,10 @@ import urllib.request
 from . import session as sessmod
 from .backends import make_backend
 
+def _slurp(path):
+    with open(path, errors='replace') as f:
+        return f.read()
+
 FORGE = os.path.expanduser("~/.forge")
 STATE = os.path.join(FORGE, "state"); os.makedirs(STATE, exist_ok=True)
 RECEIPTS = os.path.join(FORGE, "verdicts.jsonl")
@@ -125,7 +129,7 @@ def _seed(cwd):
         p = os.path.join(cwd, name)
         if os.path.exists(p):
             try:
-                manifest += f"\n--- {name} ---\n" + open(p).read()[:1500]
+                manifest += f"\n--- {name} ---\n" + _slurp(p)[:1500]
             except OSError:
                 pass
     return f"Repository files:\n{ls}\n{manifest}"
@@ -146,7 +150,7 @@ def detect_test_cmd(cwd):
     mk = os.path.join(cwd, "Makefile")
     if os.path.exists(mk):
         try:
-            if re.search(r"^test:", open(mk).read(), re.M):
+            if re.search(r"^test:", _slurp(mk), re.M):
                 return "make test"
         except OSError:
             pass
@@ -221,7 +225,7 @@ def learnings(cwd):
     if not os.path.exists(p):
         return []
     out = []
-    for line in open(p):
+    for line in _slurp(p).splitlines(keepends=True):
         try:
             d = json.loads(line)
             if d.get("fact"):

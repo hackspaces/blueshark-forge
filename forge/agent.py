@@ -98,6 +98,7 @@ class Agent:
             self.messages.append({"role": "assistant", "content": '{"thought":"Oriented in the workspace. Ready.","action":"say","message":"Ready."}'})
         self.head_len = len(self.messages)  # system (+ workspace) — never compacted away
         self.plan = []
+        self.read_files = set()  # abs paths read this session — enforces read-before-edit
         self.stop = threading.Event()  # set from the UI (Esc) to interrupt mid-run
 
     def set_ladder(self, ladder):
@@ -251,10 +252,25 @@ class Agent:
                     recent.clear()
                     continue
 
+                # read-before-edit: never edit or overwrite an EXISTING file the model
+                # hasn't actually read — this forces it to work from real content, not a
+                # guess (the exact failure mode that made a weak model hallucinate code).
+                if kind in ("edit_file", "write_file"):
+                    fp = os.path.realpath(os.path.join(self.session.cwd, act.get("path", "")))
+                    if os.path.exists(fp) and fp not in self.read_files:
+                        obs = (f"Blocked: read {act.get('path')} before editing or overwriting it — "
+                               "work from its actual current content, not memory. Use read_file first.")
+                        self.on_event("action", action=kind, detail=act.get("path", ""))
+                        self.on_event("observation", text=obs, ok=False)
+                        self.messages.append({"role": "user", "content": f"⚠ {obs}"})
+                        continue
+
                 self.session.log("action", action=kind, args={k: act.get(k) for k in ("command", "path") if act.get(k)}, thought=act.get("thought", ""))
                 self.on_event("action", action=kind, thought=act.get("thought", ""),
                               detail=act.get("command") or act.get("path") or "")
                 obs, ok = execute(act, self.session.cwd)
+                if ok and kind in ("read_file", "write_file") and act.get("path"):
+                    self.read_files.add(os.path.realpath(os.path.join(self.session.cwd, act["path"])))
                 self.session.log("observation", text=obs[:4000], ok=ok)
                 self.on_event("observation", text=obs, ok=ok)
 
