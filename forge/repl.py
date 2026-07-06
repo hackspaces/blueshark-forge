@@ -241,7 +241,8 @@ def run(backend, session, verbose=False, workspace=None):
                 break
             screen.emit(f"\n{GR}❯{RST} {user}\n")           # echo into the transcript
             if user == "/help":
-                screen.emit(f"{DIM}  Esc: clear/stop · /model · /config · /verbose · /plan · /cwd · /exit{RST}\n"); continue
+                screen.emit(f"{DIM}  Esc: clear/stop · ↑↓ history · Ctrl-A/E home/end · Ctrl-U/K/W kill{RST}\n")
+                screen.emit(f"{DIM}  /model · /config · /verbose · /plan · /cwd · /exit{RST}\n"); continue
             if user in ("/model", "/models"):
                 _menu_model(agent, screen, history); continue
             if user == "/config":

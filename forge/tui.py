@@ -1,11 +1,13 @@
-"""Terminal UX: a raw-mode line editor drawn in a bordered box (Esc clears the
-line, arrows, history) and an interrupt watcher so Esc stops the agent mid-run.
+"""Terminal UX: a bottom-pinned screen (DECSTBM scroll region) with a raw-mode
+line editor in the footer (Esc clears, arrows, Home/End, history, readline-style
+Ctrl keys, UTF-8 input) and an interrupt watcher so Esc stops the agent mid-run.
 Dependency-free (termios). Falls back to plain input() when not a TTY."""
 import itertools
 import os
 import re
 import select
 import shutil
+import signal
 import sys
 import termios
 import threading
@@ -14,6 +16,7 @@ import tty
 DIM = "\033[2m"; GR = "\033[32m"; MG = "\033[35m"; RST = "\033[0m"
 
 ESC, CTRL_C, CTRL_D, CR, LF, BS1, BS2 = b"\x1b", b"\x03", b"\x04", b"\r", b"\n", b"\x7f", b"\x08"
+CTRL_A, CTRL_E, CTRL_K, CTRL_U, CTRL_W = b"\x01", b"\x05", b"\x0b", b"\x15", b"\x17"
 _ANSI = re.compile(r"\033\[[0-9;]*m")
 
 
@@ -23,6 +26,49 @@ def _supported():
 
 def _vis(s):
     return len(_ANSI.sub("", s))
+
+
+def _clip(s, width):
+    """Truncate to `width` visible columns, keeping ANSI codes intact."""
+    out, n, i = [], 0, 0
+    while i < len(s):
+        m = _ANSI.match(s, i)
+        if m:
+            out.append(m.group()); i = m.end(); continue
+        if n >= width:
+            return "".join(out) + RST
+        out.append(s[i]); n += 1; i += 1
+    return "".join(out)
+
+
+def _read_key(fd):
+    """Read one keypress: bytes for a control key or a whole escape sequence,
+    str for a decoded (possibly multi-byte) printable character, b"" on EOF."""
+    ch = os.read(fd, 1)
+    if not ch:
+        return b""
+    if ch == ESC:
+        r, _, _ = select.select([fd], [], [], 0.02)
+        if not r:
+            return ESC                                    # bare Esc
+        seq = os.read(fd, 1)
+        if seq != b"[":
+            return ESC + seq                              # Alt-<key> — callers ignore
+        while len(seq) < 8:                               # CSI: params, then a final byte
+            c = os.read(fd, 1)
+            if not c:
+                break
+            seq += c
+            if c.isalpha() or c == b"~":
+                break
+        return ESC + seq
+    b0 = ch[0]
+    if b0 < 0x20 or b0 == 0x7F:
+        return ch                                         # control byte
+    n = 2 if 0xC0 <= b0 < 0xE0 else 3 if 0xE0 <= b0 < 0xF0 else 4 if 0xF0 <= b0 < 0xF8 else 1
+    if n > 1:
+        ch += os.read(fd, n - 1)                          # UTF-8 continuation bytes
+    return ch.decode("utf-8", "ignore")
 
 
 class Screen:
@@ -38,11 +84,32 @@ class Screen:
         self.footer = footer
         self.enabled = _supported()
         self._lock = threading.Lock()   # serialize stdout between the agent + the spinner
+        self._redraw = None             # repaint hook, set while the editor is live
+        self._entered = False
         self._resize()
+        if self.enabled:
+            try:
+                signal.signal(signal.SIGWINCH, self._winch)
+            except (ValueError, OSError):                 # not the main thread
+                pass
 
     def _resize(self):
         size = shutil.get_terminal_size((80, 24))
         self.w, self.h = size.columns, size.lines
+
+    def _winch(self, *_):
+        """Terminal resized: re-pin the scroll region to the new height and
+        repaint the footer (otherwise it drifts into the transcript)."""
+        self._resize()
+        if not self._entered:
+            return
+        sys.stdout.write("\0337" + f"\033[1;{self.h - self.footer}r" + "\0338")
+        sys.stdout.flush()
+        if self._redraw:
+            try:
+                self._redraw()
+            except Exception:
+                pass
 
     def enter(self):
         if not self.enabled:
@@ -52,10 +119,12 @@ class Screen:
         sys.stdout.write(f"\033[1;{self.h - self.footer}r")   # scroll region = everything above the footer
         sys.stdout.write("\033[1;1H")                         # park the cursor at the TOP (content fills down)
         sys.stdout.flush()
+        self._entered = True
 
     def exit(self):
         if not self.enabled:
             return
+        self._entered = False
         sys.stdout.write("\033[r")                            # release the scroll region
         sys.stdout.write(f"\033[{self.h};1H\n")
         sys.stdout.flush()
@@ -68,7 +137,7 @@ class Screen:
     def _paint(self, prompt, text, status, cursor_col=None):
         base = self.h - self.footer + 1
         rule = f"{DIM}{'─' * self.w}{RST}"
-        rows = [rule, f"{prompt}{text}", f"{DIM}{status}{RST}"][:self.footer]
+        rows = [rule, _clip(f"{prompt}{text}", self.w), _clip(f"{DIM}{status}{RST}", self.w)][:self.footer]
         for i in range(self.footer):
             sys.stdout.write(f"\033[{base + i};1H\033[K")
             if i < len(rows):
@@ -97,7 +166,9 @@ class Screen:
 
     def prompt(self, prompt, history, status=""):
         """Read one line in the pinned footer (raw-mode editor). Esc clears; ↑/↓
-        history; ←/→ move; Enter submits; Ctrl-C clears then exits; Ctrl-D exits."""
+        history; ←/→/Home/End move; Delete deletes forward; Ctrl-A/E home/end;
+        Ctrl-U/K/W kill line-start/line-end/word; Enter submits; Ctrl-C clears
+        then exits; Ctrl-D exits."""
         if not self.enabled:
             try:
                 return input(_ANSI.sub("", prompt))
@@ -110,53 +181,68 @@ class Screen:
         sys.stdout.write("\0337")   # save the scroll-region cursor for the duration of editing
 
         def draw():
-            self._resize()
             text = "".join(buf)
             avail = max(4, self.w - plen - 1)
             start = max(0, cur - avail) if cur > avail else 0
             self._paint(prompt, text[start:start + avail], status, cursor_col=1 + plen + (cur - start))
 
+        self._redraw = draw
         try:
             tty.setraw(fd)
             draw()
             while True:
-                ch = os.read(fd, 1)
-                if ch in (CR, LF):
-                    return "".join(buf)
-                if ch == CTRL_D:
+                key = _read_key(fd)
+                if isinstance(key, str):                     # printable (incl. multi-byte)
+                    if key and key.isprintable():
+                        buf.insert(cur, key); cur += 1; draw()
+                    continue
+                if not key or key == CTRL_D:                 # EOF / Ctrl-D
                     return None
-                if ch == CTRL_C:
+                if key in (CR, LF):
+                    return "".join(buf)
+                if key == CTRL_C:
                     if buf:
                         buf, cur = [], 0; draw(); continue
                     return None
-                if ch == ESC:
-                    r, _, _ = select.select([fd], [], [], 0.02)
-                    if not r:
-                        buf, cur = [], 0; draw(); continue
-                    seq = os.read(fd, 2)
-                    if seq == b"[A" and history and hidx > 0:
-                        if hidx == len(history): saved = "".join(buf)
-                        hidx -= 1; buf = list(history[hidx]); cur = len(buf); draw()
-                    elif seq == b"[B" and hidx < len(history):
-                        hidx += 1
-                        buf = list(history[hidx]) if hidx < len(history) else list(saved)
-                        cur = len(buf); draw()
-                    elif seq == b"[C" and cur < len(buf):
-                        cur += 1; draw()
-                    elif seq == b"[D" and cur > 0:
-                        cur -= 1; draw()
-                    continue
-                if ch in (BS1, BS2):
+                if key == ESC:                               # bare Esc → clear
+                    buf, cur = [], 0; draw(); continue
+                if key in (BS1, BS2):
                     if cur > 0:
                         del buf[cur - 1]; cur -= 1; draw()
                     continue
-                try:
-                    c = ch.decode("utf-8", "ignore")
-                except Exception:
-                    continue
-                if c and c.isprintable():
-                    buf.insert(cur, c); cur += 1; draw()
+                if key == CTRL_A:
+                    cur = 0; draw(); continue
+                if key == CTRL_E:
+                    cur = len(buf); draw(); continue
+                if key == CTRL_U:
+                    del buf[:cur]; cur = 0; draw(); continue
+                if key == CTRL_K:
+                    del buf[cur:]; draw(); continue
+                if key == CTRL_W:
+                    j = cur
+                    while j > 0 and buf[j - 1] == " ": j -= 1
+                    while j > 0 and buf[j - 1] != " ": j -= 1
+                    del buf[j:cur]; cur = j; draw(); continue
+                seq = key[1:]                                # CSI sequence, ESC stripped
+                if seq == b"[A" and history and hidx > 0:
+                    if hidx == len(history): saved = "".join(buf)
+                    hidx -= 1; buf = list(history[hidx]); cur = len(buf); draw()
+                elif seq == b"[B" and hidx < len(history):
+                    hidx += 1
+                    buf = list(history[hidx]) if hidx < len(history) else list(saved)
+                    cur = len(buf); draw()
+                elif seq == b"[C" and cur < len(buf):
+                    cur += 1; draw()
+                elif seq == b"[D" and cur > 0:
+                    cur -= 1; draw()
+                elif seq in (b"[H", b"[1~"):
+                    cur = 0; draw()
+                elif seq in (b"[F", b"[4~"):
+                    cur = len(buf); draw()
+                elif seq == b"[3~" and cur < len(buf):
+                    del buf[cur]; draw()
         finally:
+            self._redraw = None
             termios.tcsetattr(fd, termios.TCSADRAIN, old)
             sys.stdout.write("\0338")   # restore the scroll-region cursor so emit() flows above
             sys.stdout.flush()
@@ -182,94 +268,6 @@ class FooterSpinner:
         self._stop = True
         if self._t:
             self._t.join()
-
-
-def read_line(prompt, history, status=""):
-    """Read one line, drawn in a rounded box with an optional dim status line
-    above it. Esc clears (or, mid-run, stops); ↑/↓ history; ←/→ move; Enter
-    submits; Ctrl-C clears then exits; Ctrl-D exits. Returns the string or None."""
-    if not _supported():
-        try:
-            return input(_ANSI.sub("", prompt))
-        except EOFError:
-            return None
-    fd = sys.stdin.fileno()
-    old = termios.tcgetattr(fd)
-    buf, cur, hidx, saved = [], 0, len(history), ""
-    drawn = [False]
-
-    if status:
-        print(f"{DIM}{status}{RST}")
-
-    def render():
-        W = max(24, shutil.get_terminal_size((80, 24)).columns)
-        plen = _vis(prompt)
-        avail = max(4, W - 4 - plen)
-        text = "".join(buf)
-        start = max(0, cur - avail) if cur > avail else 0
-        vis = text[start:start + avail]
-        vcur = cur - start
-        top = "╭" + "─" * (W - 2) + "╮"
-        content = f"│ {prompt}{vis}"
-        mid = content + " " * max(0, W - 1 - _vis(content)) + "│"
-        bot = "╰" + "─" * (W - 2) + "╯"
-        if drawn[0]:
-            sys.stdout.write("\r\033[2A")          # up to the top border
-        sys.stdout.write(f"\r\033[K{DIM}{top}\r\n\033[K{RST}{mid}{DIM}\r\n\033[K{bot}{RST}")
-        drawn[0] = True
-        sys.stdout.write("\033[1A\r")              # back up to the input line
-        col = 2 + plen + vcur
-        if col:
-            sys.stdout.write(f"\033[{col}C")
-        sys.stdout.flush()
-
-    def finish():
-        sys.stdout.write("\033[1B\r\n"); sys.stdout.flush()   # move below the box
-
-    try:
-        tty.setraw(fd)
-        render()
-        while True:
-            ch = os.read(fd, 1)
-            if ch in (CR, LF):
-                finish(); return "".join(buf)
-            if ch == CTRL_D:
-                finish(); return None
-            if ch == CTRL_C:
-                if buf:
-                    buf, cur = [], 0; render(); continue
-                finish(); return None
-            if ch == ESC:
-                r, _, _ = select.select([fd], [], [], 0.02)
-                if not r:
-                    buf, cur = [], 0; render(); continue      # bare Esc → clear
-                seq = os.read(fd, 2)
-                if seq == b"[A":
-                    if history and hidx > 0:
-                        if hidx == len(history): saved = "".join(buf)
-                        hidx -= 1; buf = list(history[hidx]); cur = len(buf); render()
-                elif seq == b"[B":
-                    if hidx < len(history):
-                        hidx += 1
-                        buf = list(history[hidx]) if hidx < len(history) else list(saved)
-                        cur = len(buf); render()
-                elif seq == b"[C":
-                    if cur < len(buf): cur += 1; render()
-                elif seq == b"[D":
-                    if cur > 0: cur -= 1; render()
-                continue
-            if ch in (BS1, BS2):
-                if cur > 0:
-                    del buf[cur - 1]; cur -= 1; render()
-                continue
-            try:
-                c = ch.decode("utf-8", "ignore")
-            except Exception:
-                continue
-            if c and c.isprintable():
-                buf.insert(cur, c); cur += 1; render()
-    finally:
-        termios.tcsetattr(fd, termios.TCSADRAIN, old)
 
 
 def run_interruptible(fn, stop_event, on_hint=None):
@@ -300,6 +298,12 @@ def run_interruptible(fn, stop_event, on_hint=None):
             if not r:
                 continue
             ch = os.read(fd, 1)
+            if ch == ESC:
+                r, _, _ = select.select([fd], [], [], 0.02)
+                if r:                       # escape *sequence* (arrow key etc) — drain, ignore
+                    while select.select([fd], [], [], 0)[0]:
+                        os.read(fd, 32)
+                    continue
             if ch in (ESC, CTRL_C):
                 if not hinted and on_hint:
                     on_hint()

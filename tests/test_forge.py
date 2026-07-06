@@ -336,5 +336,48 @@ class TestConfigEdge(unittest.TestCase):
         os.remove(bad)
 
 
+class TestTuiHelpers(unittest.TestCase):
+    """Pure helpers from the TUI: ANSI-aware clipping and raw-mode key decoding."""
+
+    def test_clip_plain(self):
+        from forge.tui import _clip
+        self.assertEqual(_clip("hello", 10), "hello")
+        self.assertEqual(_clip("hello world", 5), "hello\033[0m")
+
+    def test_clip_preserves_ansi(self):
+        from forge.tui import _clip, _vis
+        s = "\033[32mgreen\033[0m and more"
+        out = _clip(s, 7)
+        self.assertEqual(_vis(out), 7)
+        self.assertIn("\033[32m", out)          # color codes survive, don't count
+        self.assertEqual(_clip(s, 99), s)       # no truncation → untouched
+
+    def _feed(self, data):
+        from forge.tui import _read_key
+        r, w = os.pipe()
+        try:
+            os.write(w, data)
+            keys = []
+            for _ in range(16):
+                import select as _select
+                if not _select.select([r], [], [], 0)[0]:
+                    break
+                keys.append(_read_key(r))
+            return keys
+        finally:
+            os.close(r); os.close(w)
+
+    def test_read_key_ascii_and_utf8(self):
+        self.assertEqual(self._feed(b"a"), ["a"])
+        self.assertEqual(self._feed("é".encode()), ["é"])     # 2-byte UTF-8
+        self.assertEqual(self._feed("✓".encode()), ["✓"])     # 3-byte UTF-8
+
+    def test_read_key_control_and_sequences(self):
+        self.assertEqual(self._feed(b"\x01"), [b"\x01"])              # Ctrl-A
+        self.assertEqual(self._feed(b"\x1b[A"), [b"\x1b[A"])          # arrow up
+        self.assertEqual(self._feed(b"\x1b[3~"), [b"\x1b[3~"])        # Delete: whole seq, no stray ~
+        self.assertEqual(self._feed(b"\x1b[3~x"), [b"\x1b[3~", "x"])  # nothing leaks into input
+
+
 if __name__ == "__main__":
     unittest.main()
