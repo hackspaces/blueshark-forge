@@ -1,4 +1,5 @@
 #!/bin/zsh
-export PYTHONPATH="$HOME/forge:$PYTHONPATH"
-export PYTHONSAFEPATH=1   # don't let the target repo's files shadow stdlib/forge imports
+# dev launcher (pip install gives you `forge` directly). Runs from the repo checkout.
+DIR="${0:A:h}"
+export PYTHONPATH="$DIR:$PYTHONPATH"
 exec python3 -m forge "$@"

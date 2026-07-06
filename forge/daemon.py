@@ -2,6 +2,7 @@
 live forge session: TRUST (verify done-claims) + COORDINATE (file collisions) +
 LEARN (harvest & share facts). Model-agnostic; the checker/extractor model is
 configurable (defaults to a small local one)."""
+import hashlib
 import json
 import os
 import sys
@@ -9,26 +10,25 @@ import time
 
 from . import session as sessmod
 from . import fleet
+from .util import slurp
 
 STATE = fleet.STATE
 
 
 def _load(f, d):
     try:
-        return json.load(open(os.path.join(STATE, f)))
+        return json.loads(slurp(os.path.join(STATE, f)))
     except (OSError, json.JSONDecodeError):
         return d
 
 
 def _save(f, v):
-    json.dump(v, open(os.path.join(STATE, f), "w"))
+    with open(os.path.join(STATE, f), "w") as fh:
+        json.dump(v, fh)
 
 
 def _hash(s):
-    h = 0
-    for c in s:
-        h = (h * 31 + ord(c)) & 0xFFFFFFFF
-    return str(h)
+    return hashlib.md5(s.encode("utf-8", "replace")).hexdigest()
 
 
 def log(msg):

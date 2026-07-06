@@ -7,11 +7,7 @@ import shutil
 import subprocess
 
 from . import config
-
-
-def _slurp(path):
-    with open(path, errors='replace') as f:
-        return f.read()
+from .util import slurp
 
 def detect_machine():
     info = {"os": platform.system(), "arch": platform.machine(), "cores": os.cpu_count() or 0, "ram_gb": 0, "chip": ""}
@@ -20,7 +16,7 @@ def detect_machine():
             info["ram_gb"] = round(int(subprocess.check_output(["sysctl", "-n", "hw.memsize"])) / (1024**3))
             info["chip"] = subprocess.check_output(["sysctl", "-n", "machdep.cpu.brand_string"]).decode().strip()
         elif info["os"] == "Linux":
-            for line in _slurp("/proc/meminfo").splitlines():
+            for line in slurp("/proc/meminfo").splitlines():
                 if line.startswith("MemTotal"):
                     info["ram_gb"] = round(int(line.split()[1]) / (1024**2))
                     break
@@ -83,46 +79,102 @@ def _have_model(name):
         return False
 
 
-def run(auto=False, keep_models=None):
+def _ask_engine():
+    print("  How do you run models?")
+    print("    1) Ollama — local, laptop-friendly, auto-manages models  (default)")
+    print("    2) An OpenAI-compatible server — vLLM · llama.cpp · MLX · LM Studio · TGI · SGLang · cloud API")
+    print("       (you give the URL + model names; for a workstation/cluster with big models, or remote inference)")
+    try:
+        return "ollama" if input("  [1/2]: ").strip() != "2" else "server"
+    except EOFError:
+        return "ollama"
+
+
+def _ask_server(url, models, api_key):
+    from .backends import ENGINE_URLS
+    print("\n  Which server? (vllm / llamacpp / mlx / lmstudio / tgi / sglang / openai)")
+    try:
+        eng = (input("  engine [openai]: ").strip() or "openai").lower()
+    except EOFError:
+        eng = "openai"
+    default_url = ENGINE_URLS.get(eng, "http://localhost:8000/v1")
+    if not url:
+        try:
+            url = input(f"  base URL [{default_url}]: ").strip() or default_url
+        except EOFError:
+            url = default_url
+    if not models:
+        try:
+            models = [m.strip() for m in input("  model name(s), cheap→strong, comma-separated: ").split(",") if m.strip()]
+        except EOFError:
+            models = []
+    if api_key is None:
+        try:
+            api_key = input("  API key (blank for none): ").strip()
+        except EOFError:
+            api_key = ""
+    return eng, url, models, api_key
+
+
+def run(auto=False, keep_models=None, engine=None, url=None, api_key=None, models=None):
     print("forge setup\n")
     hw = detect_machine()
-    print(f"  machine: {hw['chip'] or hw['arch']} · {hw['ram_gb']}GB RAM · {hw['cores']} cores · {hw['os']}")
+    print(f"  machine: {hw['chip'] or hw['arch']} · {hw['ram_gb']}GB RAM · {hw['cores']} cores · {hw['os']}\n")
 
+    if engine is None:
+        engine = "ollama" if auto else _ask_engine()
+    if engine == "server":
+        engine, url, models, api_key = _ask_server(url, models, api_key)
+
+    if engine == "ollama":
+        return _setup_ollama(hw, auto, models or keep_models)
+    return _setup_server(hw, engine, url, models, api_key)
+
+
+def _setup_ollama(hw, auto, keep_models):
     ok, msg = _ollama_ok()
     if not ok:
-        print(f"\n  ✗ {msg}")
+        print(f"  ✗ {msg}")
         return 1
-
     ladder, label = recommend(hw["ram_gb"])
     if keep_models:
         ladder = keep_models
+    print(f"  engine:  ollama (local)")
     print(f"  tier:    {label}")
     print(f"  ladder:  {' → '.join(ladder)}  (fast → strong, escalates when stuck)\n")
-
     if not auto:
         try:
             ans = input("  pull these models and save config? [Y/n] ").strip().lower()
         except EOFError:
             ans = "y"
         if ans and ans not in ("y", "yes"):
-            print("  aborted.")
-            return 1
-
+            print("  aborted."); return 1
     for m in ladder:
         if _have_model(m):
-            print(f"  ✓ {m} already present")
-            continue
+            print(f"  ✓ {m} already present"); continue
         print(f"  ↓ pulling {m} …")
-        r = subprocess.run(["ollama", "pull", m])
-        if r.returncode != 0:
+        if subprocess.run(["ollama", "pull", m]).returncode != 0:
             print(f"  ✗ failed to pull {m} (name may differ on your Ollama — edit config.json). Continuing.")
-
     cfg = config.load()
-    cfg["ladder"] = ladder
-    cfg["num_ctx"] = num_ctx_for(hw["ram_gb"])
-    cfg["machine"] = hw
+    cfg.update({"engine": "ollama", "base_url": "", "api_key": "",
+                "ladder": ladder, "num_ctx": num_ctx_for(hw["ram_gb"]), "machine": hw})
     config.save(cfg)
-    print(f"\n  ✓ config written to {config.PATH}")
-    print(f"  ✓ context window sized to {cfg['num_ctx']} tokens for {hw['ram_gb']}GB")
+    print(f"\n  ✓ config written to {config.PATH}  ·  window {cfg['num_ctx']} tokens")
     print(f"  ✓ run `forge` to start (ladder: {' → '.join(ladder)})")
+    return 0
+
+
+def _setup_server(hw, engine, url, models, api_key):
+    from .backends import ENGINE_URLS
+    url = url or ENGINE_URLS.get(engine, "http://localhost:8000/v1")
+    if not models:
+        print("  ✗ no model names given. Re-run and provide at least one model your server serves."); return 1
+    cfg = config.load()
+    cfg.update({"engine": engine, "base_url": url, "api_key": api_key or "",
+                "ladder": models, "num_ctx": max(num_ctx_for(hw["ram_gb"]), 16384), "machine": hw})
+    config.save(cfg)
+    print(f"\n  ✓ engine: {engine}  ·  {url}")
+    print(f"  ✓ ladder: {' → '.join(models)}")
+    print(f"  ✓ config written to {config.PATH}")
+    print(f"  ✓ run `forge` to start (make sure your server is up)")
     return 0

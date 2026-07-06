@@ -262,6 +262,67 @@ class TestEdgeCases(unittest.TestCase):
         self.assertEqual(r, "done")
 
 
+class TestInboxAuth(unittest.TestCase):
+    def test_inbox_requires_token(self):
+        import urllib.request
+        import urllib.error
+        s = sm.Session("authtest" + os.urandom(3).hex(), tempfile.mkdtemp(), "m", name="a")
+        s.start_inbox()
+        port = s.port
+        # no token → 403
+        req = urllib.request.Request(f"http://127.0.0.1:{port}/", data=b"hi", headers={"X-Forge-From": "x"})
+        with self.assertRaises(urllib.error.HTTPError) as cm:
+            urllib.request.urlopen(req, timeout=3)
+        self.assertEqual(cm.exception.code, 403)
+        # correct token → delivered
+        req = urllib.request.Request(f"http://127.0.0.1:{port}/", data=b"hi", headers={"X-Forge-Token": s.token})
+        urllib.request.urlopen(req, timeout=3).read()
+        self.assertEqual(s.drain()[0]["text"], "hi")
+
+
+class TestEngineRouting(unittest.TestCase):
+    def test_routing(self):
+        self.assertIsInstance(make_backend("m", engine="ollama"), OllamaBackend)
+        b = make_backend("m", engine="vllm")
+        self.assertIsInstance(b, OpenAICompatBackend)
+        self.assertIn(":8000", b.url)
+        b2 = make_backend("m", engine="openai", base_url="http://cluster:9/v1")
+        self.assertEqual(b2.url, "http://cluster:9/v1")
+        # an explicit prefix always wins over the configured engine
+        self.assertIsInstance(make_backend("ollama:m", engine="openai"), OllamaBackend)
+
+
+class TestStreamingUnicode(unittest.TestCase):
+    def test_partial_message_handles_unicode_escapes(self):
+        from forge.agent import _partial_message
+        raw = '{"action":"say","message":"caf\\u00e9 \\u2713 done"}'
+        self.assertEqual(_partial_message(raw), "café ✓ done")
+
+    def test_partial_message_incomplete_stream(self):
+        from forge.agent import _partial_message
+        self.assertEqual(_partial_message('{"message":"hel'), "hel")  # mid-stream, no closing quote
+
+
+class TestCollisionGuard(unittest.TestCase):
+    def test_edited_files_includes_edit_file(self):
+        from forge import fleet
+        sid = "collide" + os.urandom(3).hex()
+        _write(os.path.join(sm.SESSIONS, f"{sid}.jsonl"),
+               '{"type":"action","action":"edit_file","args":{"path":"a.py"}}\n')
+        try:
+            files = fleet.edited_files(sid, "/repo")
+            self.assertIn(os.path.normpath("/repo/a.py"), files)
+        finally:
+            os.remove(os.path.join(sm.SESSIONS, f"{sid}.jsonl"))
+
+
+class TestGrepConfinement(unittest.TestCase):
+    def test_grep_path_escape_blocked(self):
+        d = tempfile.mkdtemp()
+        _, ok = execute({"action": "grep", "pattern": "x", "path": "/etc"}, d)
+        self.assertFalse(ok)
+
+
 class TestConfigEdge(unittest.TestCase):
     def test_corrupt_config_falls_back_to_defaults(self):
         from forge import config

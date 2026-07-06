@@ -27,6 +27,16 @@ forge
 Apple Silicon → `qwen3-coder:30b → qwen3.6:35b-a3b`). Switch models any time from
 the TUI with `/model`. Everything runs locally.
 
+
+### Not just Ollama
+
+`forge setup` also configures **any OpenAI-compatible engine** — vLLM, llama.cpp,
+MLX, LM Studio, TGI, SGLang, or a cloud API — so laptops and clusters both work:
+
+```bash
+forge setup --engine vllm --url http://your-server:8000/v1 --models "Qwen/Qwen2.5-Coder-32B-Instruct"
+```
+
 ## Why
 
 Claude Code, Codex, and the rest are excellent, but each locks you to one
@@ -137,6 +147,25 @@ routes to a capable local model (qwen-coder class) for reliable checking.
 Next: streaming output, richer TUI, tool sandboxing, more backends (vLLM/MLX,
 Anthropic), and training a model native to forge's protocol — the flywheel where
 forge's own trajectories teach the model to be best *in forge*.
+
+
+## Security & trust model
+
+forge runs on **your** machine with **your** privileges — treat it like any coding
+assistant that can edit files and run commands.
+
+- The **file tools** (`read/write/edit/grep/glob`) are confined to the working
+  directory. The **`bash` tool is intentionally *not* sandboxed** — it runs
+  arbitrary shell commands as you, on purpose (that's what a coding agent needs).
+  Run forge in repos you trust, or use OS-level sandboxing for untrusted code.
+- The **fleet inbox** (session-to-session messaging) is localhost-only and
+  **token-authenticated**: only real forge sessions (which can read the private
+  `~/.forge/registry.json`, mode 0600) can message each other. `~/.forge` is 0700.
+- The **autopilot** (`forge up`) runs a repo's own test command to verify "done"
+  claims. It does this on an isolated copy, but it *does* execute the project's
+  test script — only run `forge up` over repos you trust.
+
+Found a security issue? Please open an issue (or email the maintainer).
 
 ## Development
 

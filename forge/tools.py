@@ -146,7 +146,9 @@ def execute(action, cwd):
             pat = action.get("pattern", "")
             if not pat:
                 return "grep needs a `pattern` (regex to search in file contents)", False
-            where = action.get("path", ".")
+            where = _resolve(cwd, action.get("path", "."))   # confine to the workspace, like read_file
+            if not where:
+                return "path escapes the workspace — search inside the project", False
             tool = "rg -n --no-heading" if _which("rg") else "grep -rn"
             out, _ = _run(f"{tool} -e {_q(pat)} {_q(where)}", cwd)
             return out, True   # no matches is a valid result, not a failure

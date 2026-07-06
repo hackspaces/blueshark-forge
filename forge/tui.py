@@ -94,11 +94,14 @@ def run_interruptible(fn, stop_event, on_hint=None):
     if not _supported():
         return fn()
     result = [None]
+    err = [None]
     done = threading.Event()
 
     def work():
         try:
             result[0] = fn()
+        except BaseException as e:  # capture, re-raise on the caller's thread
+            err[0] = e
         finally:
             done.set()
 
@@ -121,4 +124,6 @@ def run_interruptible(fn, stop_event, on_hint=None):
     finally:
         termios.tcsetattr(fd, termios.TCSADRAIN, old)
         done.wait(timeout=5)
+    if err[0] is not None:
+        raise err[0]
     return result[0]

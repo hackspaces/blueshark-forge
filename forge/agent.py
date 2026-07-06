@@ -16,7 +16,7 @@ import os
 import re
 import threading
 
-from .backends import NUM_CTX
+from . import backends
 from .tools import ACTION_SCHEMA, TOOL_HELP, execute
 
 STUCK_AT = int(os.environ.get("FORGE_STUCK_THRESHOLD", "7"))  # failures before escalating a rung
@@ -39,13 +39,23 @@ def _partial_message(raw):
     if not m:
         return None
     i, out = m.end(), []
-    esc = {"n": "\n", "t": "\t", '"': '"', "\\": "\\", "/": "/", "r": "\r"}
+    esc = {"n": "\n", "t": "\t", '"': '"', "\\": "\\", "/": "/", "r": "\r", "b": "\b", "f": "\f"}
     while i < len(raw):
         c = raw[i]
         if c == "\\":
             if i + 1 >= len(raw):
                 break
-            out.append(esc.get(raw[i + 1], raw[i + 1]))
+            nxt = raw[i + 1]
+            if nxt == "u":                       # \uXXXX unicode escape
+                if i + 6 > len(raw):
+                    break                        # incomplete escape mid-stream; wait
+                try:
+                    out.append(chr(int(raw[i + 2:i + 6], 16)))
+                    i += 6
+                    continue
+                except ValueError:
+                    pass
+            out.append(esc.get(nxt, nxt))
             i += 2
             continue
         if c == '"':
@@ -73,11 +83,6 @@ FLEET: you are one of several forge sessions on this machine. A line like "[flee
 AUTONOMOUS = """
 
 BE AUTONOMOUS — this is the core of how you work. When the user asks for something, DO it end to end: make the reasonable choice yourself (pick the file, read it, make the change), use your tools, verify the result, and report what you actually did. Do NOT ask for permission or confirmation to take normal steps. Do NOT stop just to narrate what you are about to do — do it, then tell them the outcome. If the user says "any/you pick/you decide", that means choose and proceed immediately. Only come back to the user before finishing when you hit a genuine blocker you cannot resolve yourself, a real ambiguity where guessing would waste real work, or an action that is destructive or irreversible. A request like "read a file and add a comment" should end with the comment added and verified, not with a question."""
-
-# Compact when the window is ~60% full. Budget in chars (≈4 chars/token) so it
-# scales with whatever num_ctx the model is configured for.
-_COMPACT_AT = int(NUM_CTX * 4 * 0.60)
-
 
 class Agent:
     def __init__(self, backend, session, max_steps=60, on_event=None, autonomous=False,
@@ -112,7 +117,7 @@ class Agent:
         """(tokens_used, window) for the current model. Uses the EXACT prompt-token
         count from the last response and the model's REAL context window when the
         backend reports them; falls back to a char estimate before the first call."""
-        window = self.backend.effective_ctx() if hasattr(self.backend, "effective_ctx") else NUM_CTX
+        window = self.backend.effective_ctx() if hasattr(self.backend, "effective_ctx") else backends.ctx_cap()
         used = getattr(self.backend, "last_prompt_tokens", 0)
         if not used:  # no real count yet (first turn) — estimate from chars
             used = sum(len(m["content"]) for m in self.messages) // 4
@@ -244,7 +249,8 @@ class Agent:
                     self.messages.append({"role": "user", "content": f"Observation:\n{obs}"})
                     continue
 
-                sig = f"{kind}:{act.get('command') or act.get('path') or ''}"
+                # include offset so paging one big file (same path, new range) isn't seen as a loop
+                sig = f"{kind}:{act.get('command') or act.get('path') or act.get('pattern') or ''}:{act.get('offset', '')}"
                 recent.append(sig)
                 if recent[-3:].count(sig) >= 3:
                     self.on_event("loop")

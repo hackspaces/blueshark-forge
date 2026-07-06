@@ -11,13 +11,10 @@ import time
 import subprocess
 
 from .agent import Agent
-from .backends import make_backend
+from .backends import make_backend, ForgeError
 from . import config as cfgmod
+from .util import slurp
 from .tui import read_line, run_interruptible
-
-def _slurp(path):
-    with open(path, errors='replace') as f:
-        return f.read()
 
 DIM = "\033[2m"; B = "\033[1m"; CY = "\033[36m"; GR = "\033[32m"; YE = "\033[33m"; RD = "\033[31m"; MG = "\033[35m"; RST = "\033[0m"
 
@@ -159,7 +156,7 @@ def _expand_ats(text, cwd):
         p = os.path.join(cwd, tok)
         if os.path.isfile(p):
             try:
-                body = _slurp(p)[:8000]
+                body = slurp(p)[:8000]
                 out += f"\n\n[contents of {tok}]\n{body}"
             except OSError:
                 pass
@@ -213,7 +210,10 @@ def run(backend, session, verbose=False, workspace=None):
         agent.stop.clear()
         def hint():
             ui._end_spin(); print(f"\n{DIM}  stopping…{RST}")
-        reply = run_interruptible(lambda: agent.send(_expand_ats(user, session.cwd)), agent.stop, on_hint=hint)
+        try:
+            reply = run_interruptible(lambda: agent.send(_expand_ats(user, session.cwd)), agent.stop, on_hint=hint)
+        except ForgeError as e:
+            ui._end_spin(); print(f"\n  {RD}✗ {e}{RST}\n"); continue
         ui._end_spin()
         if reply == "(stopped)":
             print(f"{DIM}  ⊘ stopped. what next?{RST}\n")

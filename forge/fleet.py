@@ -18,11 +18,8 @@ import time
 import urllib.request
 
 from . import session as sessmod
+from .util import slurp
 from .backends import make_backend
-
-def _slurp(path):
-    with open(path, errors='replace') as f:
-        return f.read()
 
 FORGE = os.path.expanduser("~/.forge")
 STATE = os.path.join(FORGE, "state"); os.makedirs(STATE, exist_ok=True)
@@ -59,7 +56,7 @@ def last_say(sid):
 def edited_files(sid, cwd):
     files = set()
     for r in _records(sid):
-        if r.get("type") == "action" and r.get("action") == "write_file":
+        if r.get("type") == "action" and r.get("action") in ("write_file", "edit_file"):
             p = (r.get("args") or {}).get("path")
             if p:
                 files.add(os.path.normpath(os.path.join(cwd, p)))
@@ -96,9 +93,14 @@ def send(target, text, sender="fleet"):
     e = hits[0]
     if not e.get("port"):
         raise SystemExit(f"session {e['name']} has no reachable inbox")
-    req = urllib.request.Request(f"http://127.0.0.1:{e['port']}/", data=text.encode(),
-                                 headers={"X-Forge-From": sender})
-    urllib.request.urlopen(req, timeout=5).read()
+    headers = {"X-Forge-From": sender}
+    if e.get("token"):
+        headers["X-Forge-Token"] = e["token"]   # authenticate to the peer's inbox
+    req = urllib.request.Request(f"http://127.0.0.1:{e['port']}/", data=text.encode(), headers=headers)
+    try:
+        urllib.request.urlopen(req, timeout=5).read()
+    except urllib.error.URLError as ex:
+        raise SystemExit(f"couldn't deliver to {e['name']}: {ex}")
     return e
 
 
@@ -129,7 +131,7 @@ def _seed(cwd):
         p = os.path.join(cwd, name)
         if os.path.exists(p):
             try:
-                manifest += f"\n--- {name} ---\n" + _slurp(p)[:1500]
+                manifest += f"\n--- {name} ---\n" + slurp(p)[:1500]
             except OSError:
                 pass
     return f"Repository files:\n{ls}\n{manifest}"
@@ -142,7 +144,7 @@ def detect_test_cmd(cwd):
     pj = os.path.join(cwd, "package.json")
     if os.path.exists(pj):
         try:
-            scripts = json.load(open(pj)).get("scripts", {})
+            scripts = json.loads(slurp(pj)).get("scripts", {})
             if scripts.get("test") and "no test specified" not in scripts["test"]:
                 return "npm test --silent"
         except (OSError, json.JSONDecodeError):
@@ -150,7 +152,7 @@ def detect_test_cmd(cwd):
     mk = os.path.join(cwd, "Makefile")
     if os.path.exists(mk):
         try:
-            if re.search(r"^test:", _slurp(mk), re.M):
+            if re.search(r"^test:", slurp(mk), re.M):
                 return "make test"
         except OSError:
             pass
@@ -175,8 +177,9 @@ def verify(claim, cwd, model):
 
     tmp = tempfile.mkdtemp(prefix="forge-verify-")
     try:
-        subprocess.run(f"rsync -a --exclude .git --exclude node_modules '{cwd}'/ '{tmp}'/",
-                       shell=True, timeout=120)
+        # argv form (no shell) — a repo path containing quotes can't inject
+        subprocess.run(["rsync", "-a", "--exclude", ".git", "--exclude", "node_modules",
+                        cwd.rstrip("/") + "/", tmp + "/"], timeout=120)
         nm = os.path.join(cwd, "node_modules")
         if os.path.isdir(nm):
             try:
@@ -225,7 +228,7 @@ def learnings(cwd):
     if not os.path.exists(p):
         return []
     out = []
-    for line in _slurp(p).splitlines(keepends=True):
+    for line in slurp(p).splitlines(keepends=True):
         try:
             d = json.loads(line)
             if d.get("fact"):

@@ -11,15 +11,14 @@ import os
 import sys
 import time
 import uuid
+import signal
 
-from .backends import make_backend
+from . import __version__
+
+from .backends import make_backend, ForgeError
 from . import session as sessmod
+from .util import slurp, dump
 from . import config as cfgmod
-
-
-def _slurp(path):
-    with open(path, errors='replace') as f:
-        return f.read()
 
 def _default_model():
     return os.environ.get("FORGE_MODEL") or ",".join(cfgmod.get("ladder", ["gemma2:9b"]))
@@ -42,9 +41,15 @@ def _workspace_ctx(cwd):
 
 
 def _make_ladder(spec):
-    """`--model a,b,c` = a local model ladder (cheapest→strongest); forge starts
-    on `a` and escalates a rung whenever it gets stuck. A single model = no ladder."""
-    return [make_backend(s.strip()) for s in spec.split(",") if s.strip()]
+    """`--model a,b,c` = a model ladder (cheapest→strongest); forge starts on `a`
+    and escalates a rung when stuck. Bare model names route to the configured
+    engine (ollama by default; vLLM/llama.cpp/etc. after `forge setup`)."""
+    cfg = cfgmod.load()
+    eng = cfg.get("engine", "ollama")
+    url = cfg.get("base_url") or None
+    key = cfg.get("api_key") or None
+    return [make_backend(s.strip(), engine=eng, base_url=url, api_key=key)
+            for s in spec.split(",") if s.strip()]
 
 
 def cmd_chat(args):
@@ -92,6 +97,8 @@ def cmd_run(args):
         reply = agent.send(args.task)
         if not state["said"]:
             print(f"\n{reply}")
+    except ForgeError as e:
+        print(f"\n✗ {e}", file=sys.stderr); s.deregister(); sys.exit(1)
     finally:
         s.deregister()
 
@@ -101,7 +108,7 @@ def _daemon_running():
     if not os.path.exists(pidf):
         return None
     try:
-        pid = int(_slurp(pidf))
+        pid = int(slurp(pidf))
         os.kill(pid, 0)
         return pid
     except (OSError, ValueError):
@@ -143,11 +150,10 @@ def cmd_up(args):
     if _daemon_running():
         print(f"autopilot already up (pid {_daemon_running()})"); return
     os.makedirs(os.path.expanduser("~/.forge/state"), exist_ok=True)
-    log = open(os.path.expanduser("~/.forge/forged.log"), "a")
-    p = subprocess.Popen([sys.executable, "-m", "forge.daemon", args.model, str(args.interval)],
-                         stdout=log, stderr=log, start_new_session=True,
-                         env={**os.environ, "PYTHONPATH": os.path.expanduser("~/forge")})
-    open(os.path.expanduser("~/.forge/state/forged.pid"), "w").write(str(p.pid))
+    with open(os.path.expanduser("~/.forge/forged.log"), "a") as log:
+        p = subprocess.Popen([sys.executable, "-m", "forge.daemon", args.model, str(args.interval)],
+                             stdout=log, stderr=log, start_new_session=True)  # own process group
+    dump(os.path.expanduser("~/.forge/state/forged.pid"), str(p.pid))
     time.sleep(1)
     print(f"forge autopilot up (pid {p.pid}) — TRUST + COORDINATE + LEARN, checker model {args.model}")
 
@@ -156,7 +162,11 @@ def cmd_down(args):
     pid = _daemon_running()
     pidf = os.path.expanduser("~/.forge/state/forged.pid")
     if pid:
-        os.kill(pid, 15); os.remove(pidf); print("autopilot stopped")
+        try:
+            os.killpg(os.getpgid(pid), signal.SIGTERM)   # kill the daemon AND its verify subprocesses
+        except OSError:
+            os.kill(pid, signal.SIGTERM)
+        os.remove(pidf); print("autopilot stopped")
     else:
         print("not running")
 
@@ -165,7 +175,7 @@ def cmd_receipts(args):
     f = os.path.expanduser("~/.forge/verdicts.jsonl")
     if not os.path.exists(f):
         print("no verdicts yet."); return
-    for line in _slurp(f).splitlines()[-args.n:]:
+    for line in slurp(f).splitlines()[-args.n:]:
         try:
             d = json.loads(line)
         except json.JSONDecodeError:
@@ -192,6 +202,7 @@ def main():
     ap.add_argument("--dir", default=os.getcwd())
     ap.add_argument("--name", default=None)
     ap.add_argument("--verbose", action="store_true")
+    ap.add_argument("--version", action="version", version=f"forge {__version__}")
     sub = ap.add_subparsers(dest="cmd")
 
     p_run = sub.add_parser("run", help="one-shot task")
@@ -214,13 +225,19 @@ def main():
     p_ln = sub.add_parser("learnings", help="facts learned in a repo")
     p_ln.add_argument("dir", nargs="?", default=os.getcwd())
 
-    p_setup = sub.add_parser("setup", help="detect hardware, pull the right models, write config")
-    p_setup.add_argument("--auto", action="store_true", help="no prompts")
+    p_setup = sub.add_parser("setup", help="detect hardware, choose an engine, pull/point at models, write config")
+    p_setup.add_argument("--auto", action="store_true", help="no prompts (Ollama, RAM-sized ladder)")
+    p_setup.add_argument("--engine", help="ollama | vllm | llamacpp | mlx | lmstudio | tgi | sglang | openai")
+    p_setup.add_argument("--url", help="base URL for an OpenAI-compatible engine")
+    p_setup.add_argument("--api-key", dest="api_key", help="API key for the engine (if needed)")
+    p_setup.add_argument("--models", help="comma-separated model names, cheap→strong (for non-ollama engines)")
 
     args = ap.parse_args()
     if args.cmd == "setup":
         from . import setup as setupmod
-        sys.exit(setupmod.run(auto=args.auto))
+        models = [m.strip() for m in args.models.split(",")] if args.models else None
+        sys.exit(setupmod.run(auto=args.auto, engine=args.engine, url=args.url,
+                              api_key=args.api_key, models=models))
     dispatch = {"run": cmd_run, "status": cmd_status, "send": cmd_send, "up": cmd_up,
                 "down": cmd_down, "receipts": cmd_receipts, "learnings": cmd_learnings}
     (dispatch.get(args.cmd) or cmd_chat)(args)

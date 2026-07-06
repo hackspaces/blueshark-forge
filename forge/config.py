@@ -7,6 +7,9 @@ import os
 PATH = os.path.expanduser("~/.forge/config.json")
 
 DEFAULTS = {
+    "engine": "ollama",     # ollama | openai | vllm | llamacpp | mlx | lmstudio | tgi | sglang
+    "base_url": "",         # for non-ollama engines (an OpenAI-compatible endpoint)
+    "api_key": "",          # optional, for remote/authenticated endpoints
     "ladder": ["gemma2:9b", "qwen2.5-coder:7b"],   # overwritten by `forge setup`
     "num_ctx": 8192,
     "keep_alive": "30m",

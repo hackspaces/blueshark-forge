@@ -6,16 +6,44 @@ Every forge session:
   - runs a localhost inbox HTTP server so other sessions / the daemon can inject
     messages, which the agent loop picks up between steps.
 """
+import contextlib
 import json
+import secrets
 import os
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
+try:
+    import fcntl
+except ImportError:  # non-Unix; locking becomes a no-op
+    fcntl = None
+
 FORGE = os.path.expanduser("~/.forge")
 SESSIONS = os.path.join(FORGE, "sessions")
 REGISTRY = os.path.join(FORGE, "registry.json")
+_LOCK = os.path.join(FORGE, "registry.lock")
 os.makedirs(SESSIONS, exist_ok=True)
+try:
+    os.chmod(FORGE, 0o700)   # transcripts + tokens are private
+except OSError:
+    pass
+
+
+@contextlib.contextmanager
+def _registry_lock():
+    """Serialize the registry read-modify-write across processes, so concurrent
+    sessions don't clobber each other's entries."""
+    if fcntl is None:
+        yield
+        return
+    f = open(_LOCK, "w")
+    try:
+        fcntl.flock(f, fcntl.LOCK_EX)
+        yield
+    finally:
+        fcntl.flock(f, fcntl.LOCK_UN)
+        f.close()
 
 
 def _load_registry():
@@ -38,6 +66,7 @@ def _save_registry(entries):
     tmp = REGISTRY + f".{os.getpid()}"
     with open(tmp, "w") as f:
         json.dump(entries, f, indent=1)
+    os.chmod(tmp, 0o600)          # holds per-session inbox tokens — keep it private
     os.replace(tmp, REGISTRY)
 
 
@@ -50,6 +79,7 @@ class Session:
         self.path = os.path.join(SESSIONS, f"{sid}.jsonl")
         self.status = "idle"
         self.port = None
+        self.token = secrets.token_hex(16)   # gates the inbox against other local processes
         self._inbox = []
         self._lock = threading.Lock()
 
@@ -83,9 +113,18 @@ class Session:
                     self.send_response(404); self.end_headers()
 
             def do_POST(self):
-                n = int(self.headers.get("Content-Length", 0))
+                # authenticate: only holders of this session's token (i.e. real forge
+                # sessions, which can read the 0600 registry) may inject messages.
+                if self.headers.get("X-Forge-Token", "") != session.token:
+                    self.send_response(403); self.end_headers(); self.wfile.write(b"forbidden"); return
+                try:
+                    n = int(self.headers.get("Content-Length", 0))
+                except (TypeError, ValueError):
+                    self.send_response(400); self.end_headers(); return
+                if n < 0 or n > 1_000_000:            # bound the read
+                    self.send_response(413); self.end_headers(); return
                 body = self.rfile.read(n).decode("utf-8", "replace")
-                sender = self.headers.get("X-Forge-From", "peer")
+                sender = "".join(c for c in self.headers.get("X-Forge-From", "peer") if c.isalnum() or c in "-_.")[:64]
                 session.push(sender, body)
                 self.send_response(200); self.end_headers(); self.wfile.write(b"ok")
 
@@ -95,22 +134,23 @@ class Session:
 
     # ---- registry ----
     def register(self):
-        entries = [e for e in _load_registry() if e.get("pid") != os.getpid() and _pid_alive(e.get("pid", -1))]
-        entries.append({
-            "sid": self.sid, "cwd": self.cwd, "name": self.name, "model": self.model,
-            "pid": os.getpid(), "port": self.port, "status": self.status,
-            "startedAt": time.time(),
-        })
-        _save_registry(entries)
+        with _registry_lock():
+            entries = [e for e in _load_registry() if e.get("pid") != os.getpid() and _pid_alive(e.get("pid", -1))]
+            entries.append({
+                "sid": self.sid, "cwd": self.cwd, "name": self.name, "model": self.model,
+                "pid": os.getpid(), "port": self.port, "status": self.status,
+                "token": self.token, "startedAt": time.time(),
+            })
+            _save_registry(entries)
 
     def set_status(self, status):
         self.status = status
         self.register()
 
     def deregister(self):
-        entries = [e for e in _load_registry() if e.get("pid") != os.getpid()]
         try:
-            _save_registry(entries)
+            with _registry_lock():
+                _save_registry([e for e in _load_registry() if e.get("pid") != os.getpid()])
         except OSError:
             pass
 
