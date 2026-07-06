@@ -7,34 +7,102 @@ each other's work, coordinate, and share what they learn.
 
 Not tied to any vendor. Runs on your machine, on your models.
 
-## Quick start
+[![PyPI](https://img.shields.io/pypi/v/blueshark-forge)](https://pypi.org/project/blueshark-forge/)
+
+---
+
+## Install
+
+**Requirements:** Python 3.10+ and an inference engine (Ollama is the easy default).
 
 ```bash
-# 1. install Ollama (https://ollama.com) and make sure it's running
-# 2. install forge
-pipx install blueshark-forge          # or: pip install blueshark-forge
+# 1. install forge
+pipx install blueshark-forge          # recommended (isolated); or: pip install blueshark-forge
 
-# 3. let it configure itself for THIS machine
-#    (detects your RAM/chip, picks a model ladder, pulls the models, writes config)
-forge setup
-
-# 4. go — open it in any repo and talk to it
-cd your-project
-forge
+# 2. install an engine to run models locally — Ollama is the simplest
+#    macOS/Linux:  https://ollama.com  (download, then it runs in the background)
+#    check it's up:  ollama --version
 ```
 
-`forge setup` sizes the model ladder to your hardware automatically (e.g. 48GB
-Apple Silicon → `qwen3-coder:30b → qwen3.6:35b-a3b`). Switch models any time from
-the TUI with `/model`. Everything runs locally.
-
-
-### Not just Ollama
-
-`forge setup` also configures **any OpenAI-compatible engine** — vLLM, llama.cpp,
-MLX, LM Studio, TGI, SGLang, or a cloud API — so laptops and clusters both work:
+## Set up (once per machine)
 
 ```bash
-forge setup --engine vllm --url http://your-server:8000/v1 --models "Qwen/Qwen2.5-Coder-32B-Instruct"
+forge setup
+```
+
+This inspects your machine and configures forge for it:
+- detects your **RAM / chip / cores**,
+- picks a **model ladder** sized to your hardware (e.g. 8GB → a 3B; 16GB → 9B;
+  48GB Apple Silicon → `qwen3-coder:30b → qwen3.6`),
+- **pulls those models** via Ollama,
+- sizes the **context window** to your RAM,
+- writes it all to `~/.forge/config.json`.
+
+Non-interactive: `forge setup --auto`.
+
+### Using something other than Ollama
+
+forge speaks the OpenAI-compatible protocol that **vLLM, llama.cpp, MLX, LM Studio,
+TGI, SGLang, and cloud APIs** all serve — great for a workstation/cluster or remote
+inference. Choose it interactively in `forge setup`, or configure directly:
+
+```bash
+# point at a vLLM server (or any OpenAI-compatible endpoint)
+forge setup --engine vllm \
+  --url http://your-server:8000/v1 \
+  --models "Qwen/Qwen2.5-Coder-32B-Instruct"
+
+# a cloud API
+forge setup --engine openai --url https://api.openai.com/v1 \
+  --api-key sk-... --models "gpt-4o-mini,gpt-4o"
+```
+
+Engines: `ollama` (default) · `vllm` · `llamacpp` · `mlx` · `lmstudio` · `tgi` ·
+`sglang` · `openai`. Set `OPENAI_API_KEY` in your env instead of `--api-key` if you prefer.
+
+## Use it
+
+```bash
+cd your-project
+forge                       # interactive chat, oriented in this repo
+```
+
+Then just talk to it — it already knows your files, git state, and machine:
+
+```
+❯ what does this project do?
+❯ read @src/auth.js and explain the login flow
+❯ fix the failing tests
+❯ add a --dry-run flag to the CLI and update the README
+```
+
+It works autonomously: it picks the files, makes the changes, runs the tests to
+verify, and reports back — only asking when it genuinely needs you.
+
+**In the chat:**
+- `Esc` — clear the input line, or (mid-run) **stop the agent**
+- `@path` — pull a file's contents into your message
+- `/model` — switch models live · `/config` — show settings · `/plan` — current plan
+- `Ctrl-D` — quit
+
+**One-shot (non-interactive), great for scripts:**
+
+```bash
+forge run "fix the type errors in src/ and run the build"
+```
+
+## Commands
+
+```
+forge                       chat with an agent in the current repo
+forge run "<task>"          run one task to completion, autonomously
+forge setup                 detect hardware / choose engine / write config
+forge status                show every live forge session and what it's doing
+forge send <target> <msg>   message another running session
+forge up  /  forge down     start / stop the fleet autopilot (verify + coordinate + learn)
+forge receipts              trust audit trail — verdicts on "done" claims
+forge learnings [dir]       durable facts forge has learned about a repo
+forge --version
 ```
 
 ## Why
@@ -126,27 +194,31 @@ same fleet system first prototyped on Claude Code, now native and vendor-free.
 
 ## Layout
 ```
-~/forge/forge/
-  backends.py   model-agnostic backends
-  tools.py      tools + the constrained action schema
-  session.py    transcript · registry · inbox · ephemeral sessions
-  agent.py      the agent loop (harness brain) + levers
-  repl.py       interactive chat
+forge/
+  backends.py   model-agnostic backends (Ollama + OpenAI-compatible) + routing
+  tools.py      tools (bash/read/write/edit/grep/glob/fleet_send) + action schema
+  agent.py      the agent loop (harness brain) + levers + context management
+  workspace.py  workspace + machine awareness (file tree, project type, git, tools)
+  session.py    transcript · registry · token-authed inbox · locking
+  repl.py       interactive chat + slash menus
+  tui.py        raw-mode line editor (Esc to clear/stop) + interrupt watcher
   fleet.py      verify · coordinate · learn · message primitives
   daemon.py     forged — the autopilot loop
+  config.py     per-machine config (~/.forge/config.json)
+  setup.py      the installer (hardware detection, engine choice, model pulls)
   __main__.py   the CLI
-~/.forge/       runtime: sessions/ · registry.json · learn/ · verdicts.jsonl
+~/.forge/       runtime: sessions/ · registry.json · learn/ · verdicts.jsonl (mode 0700)
 ```
 
-## Status
+## Development
 
-Working: the agentic terminal (chat + run), model-agnostic backends, the harness
-levers, and the native fleet layer (send/verify/guard/learn + daemon). Verifier
-routes to a capable local model (qwen-coder class) for reliable checking.
+```bash
+git clone https://github.com/hackspaces/blueshark-forge && cd blueshark-forge
+python -m unittest discover -s tests    # 34 tests, stdlib only, no deps
+./forge-cli                             # run from the checkout without installing
+```
 
-Next: streaming output, richer TUI, tool sandboxing, more backends (vLLM/MLX,
-Anthropic), and training a model native to forge's protocol — the flywheel where
-forge's own trajectories teach the model to be best *in forge*.
+CI runs the suite on every push across Python 3.10–3.13. Contributions welcome.
 
 
 ## Security & trust model
@@ -167,13 +239,8 @@ assistant that can edit files and run commands.
 
 Found a security issue? Please open an issue (or email the maintainer).
 
-## Development
+## Contributing
 
-```bash
-python -m unittest discover -s tests    # run the test suite (stdlib, no deps)
-```
-
-Tests cover the harness invariants (read-before-edit, path confinement, edit
-exact/fuzzy matching), the tools (read/write/edit/grep/glob with offset + honest
-truncation), fleet, config, and adversarial edge cases (absolute-path escapes,
-traversal, missing files, malformed model output). Contributions welcome.
+See [CONTRIBUTING.md](CONTRIBUTING.md). In short: fork, branch, add tests, open a
+PR against `main`. `main` is protected — changes land through reviewed PRs with
+green CI, not direct pushes.
