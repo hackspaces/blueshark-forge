@@ -5,9 +5,8 @@ on:
 jobs:
   pypi:
     runs-on: ubuntu-latest
-    environment: pypi
     permissions:
-      id-token: write   # trusted publishing (OIDC) — no API token needed
+      id-token: write   # PyPI trusted publishing (OIDC) — no API token to manage
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
