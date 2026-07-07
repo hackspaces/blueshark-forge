@@ -4,6 +4,7 @@ The schema is the contract every model output is forced to match — a small mod
 cannot emit a malformed or hallucinated call. It also carries the agent's living
 PLAN, which keeps long-horizon work coherent (the single biggest quality lever for
 weaker models: hold the plan in the harness, not in the model's head)."""
+import json
 import os
 import shlex
 import shutil
@@ -205,6 +206,98 @@ def _resolve(cwd, path):
     return full
 
 
+def _external_check(cmd, text, path):
+    """Run an external syntax checker (bash -n, node --check) on CANDIDATE text
+    written to a temp file with the real extension — the real file is never
+    touched. Returns "" on pass, the first error line (with the temp path
+    rewritten to the real basename) on failure, or None if the check can't run."""
+    import tempfile
+    fd, tmp = tempfile.mkstemp(suffix=os.path.splitext(path)[1])
+    try:
+        with os.fdopen(fd, "w") as f:
+            f.write(text)
+        r = subprocess.run(cmd + [tmp], capture_output=True, text=True, timeout=3)
+        if r.returncode == 0:
+            return ""
+        msg = ((r.stderr or "") + (r.stdout or "")).strip().splitlines()
+        line = msg[0] if msg else f"exit {r.returncode}"
+        return line.replace(tmp, os.path.basename(path))
+    except (subprocess.TimeoutExpired, OSError, ValueError):
+        return None
+    finally:
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+
+
+# config files that legitimately use JSONC (comments / trailing commas) — strict json.loads would wrongly reject them
+_JSONC_NAMES = ("tsconfig.json", "jsconfig.json", "devcontainer.json")
+
+
+def _syntax_error(path, text):
+    """Check CANDIDATE file content before it's written, per extension. Returns
+    None if no checker applies, "" if a check ran and PASSED, or a human error
+    string if it FAILED. Wrapped so it can NEVER raise into execute()."""
+    ext = os.path.splitext(path)[1].lower()
+    try:
+        if ext == ".py":
+            try:
+                compile(text, path, "exec")
+                return ""
+            except SyntaxError as e:   # IndentationError subclasses SyntaxError
+                return f"{e.msg} at line {e.lineno}: {(e.text or '').strip()}"
+        if ext == ".json":
+            jsonc = os.path.basename(path) in _JSONC_NAMES or ".vscode" in path.replace("\\", "/").split("/")
+            if jsonc or not text.strip():   # JSONC config, or an empty placeholder — don't strict-parse
+                return None
+            try:
+                json.loads(text)
+                return ""
+            except ValueError as e:
+                return str(e)
+        if ext == ".toml":
+            try:
+                import tomllib          # 3.11+ only; py3.10 has no stdlib toml
+            except ModuleNotFoundError:
+                return None
+            try:
+                tomllib.loads(text)
+                return ""
+            except Exception as e:
+                return str(e)
+        if ext in (".sh", ".bash") and _which("bash"):
+            return _external_check(["bash", "-n"], text, path)
+        if ext in (".js", ".mjs", ".cjs") and _which("node"):
+            return _external_check(["node", "--check"], text, path)
+        return None
+    except Exception:
+        return None
+
+
+def _gate(path, newtext, oldtext):
+    """Decide whether to refuse a write/edit. Returns (err, block): err is
+    _syntax_error(path, newtext) verbatim (for the observation tail); block is
+    True ONLY on a valid→invalid regression — newtext fails a check that the
+    current on-disk content (oldtext, or None for a new file) passes. A file that
+    is ALREADY broken can still be saved with partial progress, so multi-error
+    files and merge conflicts can be repaired one hunk at a time."""
+    err = _syntax_error(path, newtext)
+    if not err:                                      # candidate is clean, or no checker applies
+        return err, False
+    if oldtext is not None and _syntax_error(path, oldtext):
+        return err, False                            # was already broken → don't block partial progress
+    return err, True                                 # valid (or new) → invalid → block
+
+
+def _syntax_tail(err):
+    """Observation suffix: '' when no checker ran, ', syntax OK' when it passed,
+    ', still has errors — <msg>' when we saved a file that is still broken."""
+    if err == "":
+        return ", syntax OK"
+    return f", still has errors — {err}" if err else ""
+
+
 def execute(action, cwd, stop=None):
     """Run one action. Returns (observation, ok). `stop` interrupts a running
     bash command when the user hits Esc."""
@@ -267,10 +360,19 @@ def execute(action, cwd, stop=None):
             p = _resolve(cwd, action.get("path", ""))
             if not p:
                 return "path escapes the workspace — use a path inside the project", False
+            content = action.get("content", "")
+            prev = None
+            if os.path.isfile(p):                 # only a valid→invalid regression is refused; an
+                with open(p, errors="replace") as f:   # already-broken file can be saved with partial progress
+                    prev = f.read()
+            err, block = _gate(p, content, prev)  # check the CANDIDATE — never touch the real file on failure
+            if block:
+                return (f"that content would make {action['path']} invalid — {err}. "
+                        "The file was NOT written. Fix it and retry.", False)
             os.makedirs(os.path.dirname(p) or ".", exist_ok=True)
             with open(p, "w") as f:
-                f.write(action.get("content", ""))
-            return f"wrote {action['path']} ({len(action.get('content',''))} bytes)", True
+                f.write(content)
+            return f"wrote {action['path']} ({len(content)} bytes)" + _syntax_tail(err), True
         if a == "edit_file":
             p = _resolve(cwd, action.get("path", ""))
             if not p:
@@ -283,19 +385,24 @@ def execute(action, cwd, stop=None):
             if not old:
                 return f"edit failed: provide the `old` snippet to replace.", False
             n = text.count(old)
-            if n == 1:
-                with open(p, "w") as f:
-                    f.write(text.replace(old, new, 1))
-                return f"edited {action['path']} (exact)", True
             if n > 1:
                 return f"edit failed: `old` appears {n} times — add surrounding context to make it unique.", False
-            # exact miss → whitespace-tolerant match (small models rarely reproduce indentation exactly)
-            newtext, ok, how = _fuzzy_replace(text, old, new)
-            if ok:
-                with open(p, "w") as f:
-                    f.write(newtext)
-                return f"edited {action['path']} ({how})", True
-            return f"edit failed: `old` not found in {action['path']} ({how}). Read the file and copy the EXACT text, or use write_file to rewrite it.", False
+            if n == 1:
+                newtext, how = text.replace(old, new, 1), "exact"
+            else:
+                # exact miss → whitespace-tolerant match (small models rarely reproduce indentation exactly)
+                newtext, matched, how = _fuzzy_replace(text, old, new)
+                if not matched:
+                    return f"edit failed: `old` not found in {action['path']} ({how}). Read the file and copy the EXACT text, or use write_file to rewrite it.", False
+            # check the CANDIDATE text before writing — a failing edit never touches the file, but
+            # a file that's ALREADY broken can be repaired one hunk at a time (block only valid→invalid)
+            err, block = _gate(p, newtext, text)
+            if block:
+                return (f"that edit would make {action['path']} invalid — {err}. "
+                        "The file was NOT changed. Fix the snippet and retry.", False)
+            with open(p, "w") as f:
+                f.write(newtext)
+            return f"edited {action['path']} ({how})" + _syntax_tail(err), True
         return f"(unknown action: {a})", False
     except Exception as e:
         return f"(error running {a}: {e})", False

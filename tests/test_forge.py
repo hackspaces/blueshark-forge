@@ -13,7 +13,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from forge import session as sm            # noqa: E402
 from forge.agent import Agent              # noqa: E402
 from forge.backends import make_backend, OllamaBackend, OpenAICompatBackend  # noqa: E402
-from forge.tools import execute, _fuzzy_replace  # noqa: E402
+from forge.tools import execute, _fuzzy_replace, _syntax_error, _which  # noqa: E402
 
 
 def _write(p, s):
@@ -93,6 +93,149 @@ class TestTools(unittest.TestCase):
         out, ok = execute({"action": "glob", "pattern": "*.py"}, self.d)
         self.assertTrue(ok)
         self.assertIn("x.py", out)
+
+
+class TestSyntaxGate(unittest.TestCase):
+    """P1.1 — check-before-write: a write/edit that would leave the file
+    syntactically broken is refused in the SAME observation, file untouched."""
+
+    def setUp(self):
+        self.d = tempfile.mkdtemp()
+
+    def test_write_invalid_py_blocked_and_not_created(self):
+        out, ok = execute({"action": "write_file", "path": "bad.py", "content": "def f(:\n    pass\n"}, self.d)
+        self.assertFalse(ok)
+        self.assertIn("invalid", out)
+        self.assertIn("NOT written", out)
+        self.assertFalse(os.path.exists(os.path.join(self.d, "bad.py")), "invalid file was created!")
+
+    def test_write_valid_py_reports_syntax_ok(self):
+        out, ok = execute({"action": "write_file", "path": "ok.py", "content": "def f():\n    return 1\n"}, self.d)
+        self.assertTrue(ok)
+        self.assertIn("syntax OK", out)
+        self.assertEqual(_read(os.path.join(self.d, "ok.py")), "def f():\n    return 1\n")
+
+    def test_edit_introducing_syntax_error_blocked_and_unchanged(self):
+        good = "def f():\n    return 1\n"
+        _write(os.path.join(self.d, "e.py"), good)
+        out, ok = execute({"action": "edit_file", "path": "e.py", "old": "    return 1", "new": "    return 1)"}, self.d)
+        self.assertFalse(ok)
+        self.assertIn("NOT changed", out)
+        self.assertEqual(_read(os.path.join(self.d, "e.py")), good, "file was mutated despite failed check!")
+
+    def test_edit_valid_py_reports_syntax_ok(self):
+        _write(os.path.join(self.d, "e.py"), "x = 1\n")
+        out, ok = execute({"action": "edit_file", "path": "e.py", "old": "x = 1", "new": "x = 2"}, self.d)
+        self.assertTrue(ok)
+        self.assertIn("syntax OK", out)
+        self.assertIn("x = 2", _read(os.path.join(self.d, "e.py")))
+
+    def test_write_invalid_json_blocked(self):
+        out, ok = execute({"action": "write_file", "path": "c.json", "content": '{"a": 1,}'}, self.d)
+        self.assertFalse(ok)
+        self.assertIn("invalid", out)
+        self.assertFalse(os.path.exists(os.path.join(self.d, "c.json")))
+
+    def test_write_valid_json_reports_syntax_ok(self):
+        out, ok = execute({"action": "write_file", "path": "c.json", "content": '{"a": 1}'}, self.d)
+        self.assertTrue(ok)
+        self.assertIn("syntax OK", out)
+
+    def test_unknown_extension_no_syntax_check(self):
+        out, ok = execute({"action": "write_file", "path": "notes.txt", "content": "def f(:\n"}, self.d)
+        self.assertTrue(ok)                 # no checker applies to .txt
+        self.assertNotIn("syntax OK", out)
+
+    def test_syntax_error_helper_dispatch(self):
+        self.assertIsNone(_syntax_error("a.txt", "def f(:\n"))       # no checker
+        self.assertEqual(_syntax_error("a.py", "x = 1\n"), "")       # ran + passed
+        self.assertTrue(_syntax_error("a.py", "def f(:\n"))          # ran + failed → error string
+        self.assertEqual(_syntax_error("a.json", '{"a":1}'), "")
+        self.assertTrue(_syntax_error("a.json", "{,}"))
+
+    @unittest.skipUnless(_which("bash"), "bash not available")
+    def test_invalid_bash_blocked(self):
+        out, ok = execute({"action": "write_file", "path": "s.sh", "content": "if then fi\n"}, self.d)
+        self.assertFalse(ok)
+        self.assertIn("invalid", out)
+        self.assertFalse(os.path.exists(os.path.join(self.d, "s.sh")))
+
+    @unittest.skipUnless(_which("bash"), "bash not available")
+    def test_valid_bash_reports_syntax_ok(self):
+        out, ok = execute({"action": "write_file", "path": "s.sh", "content": "echo hi\n"}, self.d)
+        self.assertTrue(ok)
+        self.assertIn("syntax OK", out)
+
+    @unittest.skipUnless(_which("node"), "node not available")
+    def test_invalid_js_blocked(self):
+        out, ok = execute({"action": "write_file", "path": "a.js", "content": "function(\n"}, self.d)
+        self.assertFalse(ok)
+        self.assertIn("invalid", out)
+
+    def test_toml_check_when_available(self):
+        try:
+            import tomllib  # noqa: F401
+        except ModuleNotFoundError:
+            self.skipTest("tomllib is 3.11+; py3.10 has no stdlib toml checker")
+        out, ok = execute({"action": "write_file", "path": "p.toml", "content": "a = = 1\n"}, self.d)
+        self.assertFalse(ok)
+        self.assertIn("invalid", out)
+        out, ok = execute({"action": "write_file", "path": "p.toml", "content": "a = 1\n"}, self.d)
+        self.assertTrue(ok)
+        self.assertIn("syntax OK", out)
+
+    def test_edit_repairs_broken_file_one_hunk_at_a_time(self):
+        # a pre-existing file with TWO syntax errors; fixing one must persist even
+        # though the result is still broken (block only valid→invalid, not any-invalid)
+        broken = "def f(:\n    return 1\n\ndef g(:\n    return 2\n"
+        _write(os.path.join(self.d, "broken.py"), broken)
+        out, ok = execute({"action": "edit_file", "path": "broken.py", "old": "def f(:", "new": "def f():"}, self.d)
+        self.assertTrue(ok, "edit that REDUCES errors on an already-broken file must be allowed")
+        self.assertIn("still has errors", out)
+        saved = _read(os.path.join(self.d, "broken.py"))
+        self.assertIn("def f():", saved)                     # progress persisted
+        self.assertIn("def g(:", saved)                      # second error still there
+        # now fix the second error → fully valid, reports syntax OK
+        out, ok = execute({"action": "edit_file", "path": "broken.py", "old": "def g(:", "new": "def g():"}, self.d)
+        self.assertTrue(ok)
+        self.assertIn("syntax OK", out)
+
+    def test_write_saves_partial_progress_on_broken_file(self):
+        _write(os.path.join(self.d, "broken.py"), "def f(:\n    return 1\n\ndef g(:\n    return 2\n")
+        out, ok = execute({"action": "write_file", "path": "broken.py",
+                           "content": "def f():\n    return 1\n\ndef g(:\n    return 2\n"}, self.d)
+        self.assertTrue(ok, "overwriting an already-broken file with a less-broken version must be allowed")
+        self.assertIn("still has errors", out)
+        self.assertIn("def f():", _read(os.path.join(self.d, "broken.py")))
+
+    def test_new_invalid_file_still_blocked_after_gate_change(self):
+        # regression guard: the valid→invalid gate must NOT open a hole for brand-new invalid files
+        out, ok = execute({"action": "write_file", "path": "fresh.py", "content": "def f(:\n"}, self.d)
+        self.assertFalse(ok)
+        self.assertIn("NOT written", out)
+        self.assertFalse(os.path.exists(os.path.join(self.d, "fresh.py")))
+
+    def test_jsonc_config_with_comments_allowed(self):
+        content = '{\n  // editor settings\n  "compilerOptions": {"strict": true,}\n}\n'
+        out, ok = execute({"action": "write_file", "path": "tsconfig.json", "content": content}, self.d)
+        self.assertTrue(ok, "tsconfig.json legitimately uses JSONC comments/trailing commas")
+        self.assertEqual(_read(os.path.join(self.d, "tsconfig.json")), content)
+        # a .json under .vscode/ is JSONC too
+        out, ok = execute({"action": "write_file", "path": ".vscode/settings.json",
+                           "content": '{\n  // ok\n  "a": 1,\n}\n'}, self.d)
+        self.assertTrue(ok)
+
+    def test_empty_json_placeholder_allowed(self):
+        out, ok = execute({"action": "write_file", "path": "data.json", "content": ""}, self.d)
+        self.assertTrue(ok, "creating an empty placeholder .json must be allowed")
+        self.assertTrue(os.path.exists(os.path.join(self.d, "data.json")))
+
+    def test_plain_json_still_strict(self):
+        # the JSONC allowlist must not weaken the check for ordinary .json files
+        out, ok = execute({"action": "write_file", "path": "data.json", "content": '{"a": 1,}'}, self.d)
+        self.assertFalse(ok)
+        self.assertIn("invalid", out)
+        self.assertFalse(os.path.exists(os.path.join(self.d, "data.json")))
 
 
 class TestReadBeforeEdit(unittest.TestCase):
