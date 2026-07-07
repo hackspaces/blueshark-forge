@@ -161,12 +161,15 @@ class TestLeverGating(unittest.TestCase):
         self.assertIn("[current plan]", joined)
 
     def test_schema_lever_controls_constrained_decoding(self):
-        """schema present → ACTION_SCHEMA is passed; absent → None."""
-        from forge.tools import ACTION_SCHEMA
+        """schema lever on → the P5.1 per-action grammar (anyOf of the legal action
+        variants) is passed; off → None."""
+        from forge.tools import build_schema, ALL_ACTIONS
         d = tempfile.mkdtemp()
         b_on = RecordingBackend(SAY)
         Agent(b_on, sm.EphemeralSession(d, "s"), max_steps=2, levers=None).send("go")
-        self.assertIs(b_on.schema, ACTION_SCHEMA)
+        # auto mode, no allow-list → every action is legal this step
+        self.assertIn("anyOf", b_on.schema)
+        self.assertEqual(b_on.schema, build_schema(set(ALL_ACTIONS), "auto"))
         b_off = RecordingBackend(SAY)
         Agent(b_off, sm.EphemeralSession(d, "s"), max_steps=2, levers=frozenset()).send("go")
         self.assertIsNone(b_off.schema)

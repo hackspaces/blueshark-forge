@@ -21,7 +21,8 @@ import time
 from . import __version__
 from . import backends
 from .ledger import Ledger
-from .tools import ACTION_SCHEMA, TOOL_HELP, execute, shape, error_hint
+from .tools import (ACTION_SCHEMA, ACTION_VARIANTS, ALL_ACTIONS, TOOL_HELP,
+                    build_schema, required_fields, execute, shape, error_hint)
 
 STUCK_AT = int(os.environ.get("FORGE_STUCK_THRESHOLD", "7"))  # failures before escalating a rung
 TRACE_V = 1  # P3.1 schema version stamped on every meta/step/compact/loop/malformed record
@@ -766,10 +767,44 @@ class Agent:
         end = start + old.count("\n")
         return any(a <= start and end <= b for a, b in e.spans)
 
-    def _generate(self, prompt):
+    def _legal_actions(self):
+        """P5.1: the actions LEGAL to emit right now — all actions, minus the
+        mutating ones in plan mode, intersected with self.allowed. Drives the
+        per-step action grammar so an illegal action is grammatically
+        unrepresentable (not merely rejected post-hoc)."""
+        legal = set(ALL_ACTIONS)
+        if self.mode == "plan":
+            legal -= set(self.MUTATING)
+        if self.allowed is not None:
+            legal &= set(self.allowed)
+        return legal
+
+    def _missing_required(self, kind, act):
+        """P5.1: the required fields (beyond thought/action) an action left out or
+        blank — the fields its grammar variant forces. fleet_send (its no-message
+        form lists sessions) and say (an empty message just ends the turn) are
+        exempt, so only a genuinely-unexecutable action is flagged."""
+        if kind in ("fleet_send", "say"):
+            return []
+        out = []
+        for f in required_fields(kind):
+            v = act.get(f)
+            # empty string counts as missing (matches the old pathless check), except
+            # `new`: an empty replacement is a legal deletion.
+            if v is None or (isinstance(v, str) and not v and f != "new"):
+                out.append(f)
+        return out
+
+    def _generate(self, prompt, schema=None):
         """Stream the model's action. When it turns out to be a `say`, emit the
-        message text live (token by token) via on_event('token')."""
-        schema = ACTION_SCHEMA if self._lv("schema") else None
+        message text live (token by token) via on_event('token'). `schema` overrides
+        the per-step grammar (P5.1 uses it to force a single action's variant on a
+        missing-required resend); otherwise the legal-action grammar is built here."""
+        if self._lv("schema"):
+            if schema is None:
+                schema = build_schema(self._legal_actions(), self.mode)
+        else:
+            schema = None
         if not hasattr(self.backend, "stream"):
             return self.backend.chat(prompt, schema=schema)
         raw, emitted, is_say = "", 0, False
@@ -789,6 +824,46 @@ class Agent:
             if not raw:
                 raise
         return raw
+
+    def _alias_path(self, act):
+        """P3.2 alias_repair: fill a missing `path` from a small model's aliases
+        (filename/file/…). No-op unless the alias_repair lever is on."""
+        if self._lv("alias_repair") and act.get("action") in ("read_file", "write_file", "edit_file") and not act.get("path"):
+            for alias in ("filename", "file", "filepath", "file_path", "name"):
+                if isinstance(act.get(alias), str) and act[alias]:
+                    act["path"] = act[alias]
+                    break
+
+    def _resend_variant(self, act, kind, pin, step, missing, trace):
+        """P5.1: a parsed action dropped a required field. Rather than burning a
+        whole step on a text nudge, re-ask ONCE with ONLY this action's variant
+        grammar-forced (const action + its required fields) plus a one-line hint for
+        advisory engines. The resend is logged as its own `model` record so replay
+        stays 1:1 with the backend calls. Returns the (possibly-corrected) act, its
+        kind, and its still-missing required fields."""
+        variant = ACTION_VARIANTS.get(kind)
+        if variant is None:
+            return act, kind, missing
+        hint = (f"Your `{kind}` action was missing required field(s): "
+                f"{', '.join('`' + m + '`' for m in missing)}. "
+                f"Resend the SAME {kind} action as ONE complete JSON object.")
+        self.messages.append({"role": "user", "content": hint})
+        prompt = self.messages + ([pin] if pin else [])
+        raw2 = self._generate(prompt, schema=variant)
+        self.session.log("model", v=TRACE_V, raw=raw2, tier=self.tier,
+                         prompt_tokens=getattr(self.backend, "last_prompt_tokens", 0))
+        try:
+            act2 = json.loads(raw2)
+        except json.JSONDecodeError:
+            return act, kind, missing           # unparseable resend → old text-nudge fallback
+        if not isinstance(act2, dict):
+            return act, kind, missing
+        self.messages.append({"role": "assistant", "content": raw2})
+        self._tag_last({"kind": "assistant", "action": act2.get("action"), "step": step})
+        self._alias_path(act2)
+        kind2 = act2.get("action")
+        trace["resent"] = True
+        return act2, kind2, self._missing_required(kind2, act2)
 
     def _absorb_inbox(self):
         for m in self.session.drain():
@@ -1113,16 +1188,32 @@ class Agent:
                         self.messages.append({"role": "user", "content": f"⚠ {blocked}"})
                         continue
 
-                    # small models sometimes name the path field differently, or drop it —
-                    # normalize aliases, and reject pathless file actions with an exact fix
-                    # (an empty path must never fall through: it used to resolve to the cwd
-                    # and hit the read-before-edit guard with a nonsense message).
-                    if self._lv("alias_repair") and kind in ("read_file", "write_file", "edit_file") and not act.get("path"):
-                        for alias in ("filename", "file", "filepath", "file_path", "name"):
-                            if isinstance(act.get(alias), str) and act[alias]:
-                                act["path"] = act[alias]
-                                break
-                    if kind in ("read_file", "write_file", "edit_file") and not act.get("path"):
+                    # P5.1 state-dependent grammar: small models drop required fields
+                    # (bash without command, edit_file without old/new, a pathless
+                    # read/write/edit — sometimes just misnamed as filename/file/…).
+                    # First normalize path aliases (P3.2 alias_repair lever). Then, when
+                    # constrained decoding is on, rather than burning a step on a text
+                    # nudge, re-ask ONCE with ONLY this action's variant grammar-forced —
+                    # so the resend is constrained to be complete. Only if the resend is
+                    # ALSO incomplete (advisory engine) do we fall back to the text nudge.
+                    self._alias_path(act)
+                    if self._lv("schema"):
+                        missing = self._missing_required(kind, act)
+                        if missing:
+                            act, kind, missing = self._resend_variant(act, kind, pin, step, missing, trace)
+                        if missing:
+                            obs = (f"'{kind}' is missing required field(s): "
+                                   f"{', '.join('`' + m + '`' for m in missing)}. Re-send the SAME action "
+                                   "as one complete JSON object with those fields included.")
+                            trace["ok"] = False
+                            self.on_event("action", action=kind, detail="(incomplete)")
+                            self.on_event("observation", text=obs, ok=False)
+                            self.session.log("action", action=kind, args={"invalid": "missing fields", "missing": missing},
+                                             thought=act.get("thought", ""))
+                            self.messages.append({"role": "user", "content": f"⚠ {obs}"})
+                            continue
+                    elif kind in ("read_file", "write_file", "edit_file") and not act.get("path"):
+                        # bare mode (schema lever off): the original pathless-only nudge.
                         obs = (f"'{kind}' is missing its `path` field. Re-send the SAME action as one JSON object "
                                f'with the file path included, e.g. {{"action":"{kind}","path":"dir/file.go", ...}}.')
                         trace["ok"] = False

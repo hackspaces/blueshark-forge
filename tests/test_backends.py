@@ -249,5 +249,128 @@ class TestForgeError(unittest.TestCase):
         self.assertIn("Can't reach", str(cm.exception))
 
 
+class _ReadResp:
+    """A context-manager HTTP response whose read() returns fixed JSON bytes."""
+    def __init__(self, payload):
+        self._payload = payload if isinstance(payload, (bytes, bytearray)) else json.dumps(payload).encode()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+    def read(self):
+        return self._payload
+
+
+_COMPLETION = {"choices": [{"message": {"content": "OK"}}], "usage": {"prompt_tokens": 9}}
+
+
+class TestSchemaDialect(unittest.TestCase):
+    """P5.1 schema-dialect negotiation for OpenAI-compat engines. No network — a fake
+    _open dispatches on the request body so a fixture 400 stands in for a server that
+    rejects response_format, and the dialect ladder is exercised deterministically."""
+
+    def setUp(self):
+        from forge import config
+        self._orig_set, self._orig_get = config.set_key, config.get
+        self.persisted = {}
+        config.set_key = lambda k, v: self.persisted.__setitem__(k, v)
+        config.get = lambda k, d=None: None          # no previously-cached dialect
+
+    def tearDown(self):
+        from forge import config
+        config.set_key, config.get = self._orig_set, self._orig_get
+
+    def _backend(self, dispatch):
+        b = OpenAICompatBackend("m", "https://h/v1")
+        b._schema_dialect = None                     # force negotiation
+        b._open = lambda req, timeout=600: dispatch(json.loads(req.data.decode()))
+        return b
+
+    def test_body_dialects(self):
+        b = OpenAICompatBackend("m", "https://h/v1")
+        schema = {"type": "object"}
+        self.assertIn("response_format", b._body([], schema, 0.0, False, "response_format"))
+        self.assertEqual(b._body([], schema, 0.0, False, "guided_json")["guided_json"], schema)
+        self.assertEqual(b._body([], schema, 0.0, False, "json_schema")["json_schema"], schema)
+        none_body = b._body([], schema, 0.0, False, "none")
+        for k in ("response_format", "guided_json", "json_schema"):
+            self.assertNotIn(k, none_body)
+
+    def test_negotiation_falls_back_to_guided_json(self):
+        calls = []
+        def dispatch(body):
+            if "response_format" in body:
+                calls.append("response_format")
+                raise backends.ForgeError("https://h/v1 returned HTTP 400: unknown parameter response_format")
+            if "guided_json" in body:
+                calls.append("guided_json")
+                return _ReadResp(_COMPLETION)
+            calls.append("none")
+            return _ReadResp(_COMPLETION)
+        b = self._backend(dispatch)
+        out = b.chat([{"role": "user", "content": "hi"}], schema={"type": "object"})
+        self.assertEqual(out, "OK")
+        self.assertEqual(calls, ["response_format", "guided_json"])
+        self.assertEqual(b._schema_dialect, "guided_json")
+        self.assertEqual(self.persisted.get("schema_dialect"), "guided_json")
+        self.assertEqual(b.last_prompt_tokens, 9)
+
+    def test_negotiation_first_dialect_wins(self):
+        def dispatch(body):
+            self.assertIn("response_format", body)   # accepted on the first try, never downgrades
+            return _ReadResp(_COMPLETION)
+        b = self._backend(dispatch)
+        b.chat([{"role": "user", "content": "hi"}], schema={"type": "object"})
+        self.assertEqual(b._schema_dialect, "response_format")
+        self.assertEqual(self.persisted.get("schema_dialect"), "response_format")
+
+    def test_negotiation_all_reject_falls_to_none(self):
+        seen = []
+        def dispatch(body):
+            for k in ("response_format", "guided_json", "json_schema"):
+                if k in body:
+                    seen.append(k)
+                    raise backends.ForgeError(f"https://h/v1 returned HTTP 400: bad {k}")
+            seen.append("none")
+            return _ReadResp(_COMPLETION)            # 'none' carries no schema → must open
+        b = self._backend(dispatch)
+        out = b.chat([{"role": "user", "content": "hi"}], schema={"type": "object"})
+        self.assertEqual(out, "OK")
+        self.assertEqual(seen, ["response_format", "guided_json", "json_schema", "none"])
+        self.assertEqual(b._schema_dialect, "none")
+        self.assertEqual(self.persisted.get("schema_dialect"), "none")
+
+    def test_non_schema_400_propagates(self):
+        def dispatch(body):
+            raise backends.ForgeError("https://h/v1 returned HTTP 400: context length exceeded")
+        b = self._backend(dispatch)
+        with self.assertRaises(backends.ForgeError):
+            b.chat([{"role": "user", "content": "hi"}], schema={"type": "object"})
+        self.assertIsNone(b._schema_dialect)         # a real error caches nothing
+
+    def test_cached_dialect_skips_negotiation(self):
+        calls = []
+        def dispatch(body):
+            calls.append([k for k in ("response_format", "guided_json", "json_schema") if k in body])
+            return _ReadResp(_COMPLETION)
+        b = self._backend(dispatch)
+        b._schema_dialect = "guided_json"            # already resolved
+        b.chat([{"role": "user", "content": "hi"}], schema={"type": "object"})
+        self.assertEqual(calls, [["guided_json"]])   # one call, guided_json only
+
+    def test_no_schema_never_negotiates(self):
+        calls = []
+        def dispatch(body):
+            calls.append(body)
+            return _ReadResp(_COMPLETION)
+        b = self._backend(dispatch)
+        b.chat([{"role": "user", "content": "hi"}])  # schema=None
+        self.assertEqual(len(calls), 1)
+        self.assertIsNone(b._schema_dialect)         # unresolved — nothing to probe
+
+
 if __name__ == "__main__":
     unittest.main()

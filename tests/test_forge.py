@@ -1276,7 +1276,9 @@ class TestPathlessFileActions(unittest.TestCase):
         name = "s"
         def __init__(self, replies):
             self.replies = list(replies)
+            self.schemas = []           # P5.1: the schema requested for each call
         def chat(self, m, schema=None, temperature=0.0):
+            self.schemas.append(schema)
             return self.replies.pop(0)
 
     def test_filename_alias_is_honored(self):
@@ -1291,19 +1293,40 @@ class TestPathlessFileActions(unittest.TestCase):
         with open(os.path.join(d, "go/http_server.go")) as f:
             self.assertEqual(f.read(), "package main\n")
 
-    def test_missing_path_gets_instructive_error(self):
+    def test_missing_required_resends_with_variant(self):
+        """P5.1: a write_file missing its `path` is not a wasted step — the harness
+        re-asks with ONLY the write_file variant grammar-forced; the completed resend
+        writes the file. The variant schema (const write_file) is what was requested."""
+        import json as _json
+        d = tempfile.mkdtemp()
+        b = self.Scripted([
+            _json.dumps({"thought": "t", "action": "write_file", "content": "package main\n"}),
+            _json.dumps({"thought": "t", "action": "write_file", "path": "m.go", "content": "package main\n"}),
+            _json.dumps({"thought": "t", "action": "say", "message": "ok"}),
+        ])
+        Agent(b, sm.EphemeralSession(d, "s"), max_steps=5).send("make it")
+        with open(os.path.join(d, "m.go")) as f:
+            self.assertEqual(f.read(), "package main\n")
+        # the resend (2nd call) was constrained to the write_file variant only
+        from forge.tools import ACTION_VARIANTS
+        self.assertEqual(b.schemas[1], ACTION_VARIANTS["write_file"])
+
+    def test_missing_required_falls_back_to_text_nudge(self):
+        """When even the grammar-forced resend is still incomplete (advisory engine),
+        the harness falls back to the instructive text nudge — no nonsense block."""
         import json as _json
         d = tempfile.mkdtemp()
         events = []
         b = self.Scripted([
             _json.dumps({"thought": "t", "action": "write_file", "content": "package main\n"}),
+            _json.dumps({"thought": "t", "action": "write_file", "content": "still no path\n"}),
             _json.dumps({"thought": "t", "action": "say", "message": "ok"}),
         ])
         a = Agent(b, sm.EphemeralSession(d, "s"), max_steps=5,
                   on_event=lambda kind, **k: events.append((kind, k)))
         a.send("make it")
         obs = [k.get("text", "") for kind, k in events if kind == "observation"]
-        self.assertTrue(any("missing its `path`" in t for t in obs), obs)
+        self.assertTrue(any("missing required field(s): `path`" in t for t in obs), obs)
         self.assertFalse(any("Blocked: read" in t for t in obs), obs)   # the old nonsense block
 
     def test_dir_path_does_not_trigger_read_guard(self):
@@ -1316,6 +1339,99 @@ class TestPathlessFileActions(unittest.TestCase):
         ])
         Agent(b, sm.EphemeralSession(d, "s"), max_steps=5).send("go")
         self.assertTrue(os.path.exists(os.path.join(d, "pkg/x.go")))
+
+
+class TestActionGrammar(unittest.TestCase):
+    """P5.1 state-dependent action grammar: per-action variants with the right
+    required fields, and a per-step legal-action narrowing (mutating actions gone
+    from the grammar in plan mode / when self.allowed excludes them)."""
+
+    def test_variants_carry_per_action_required_fields(self):
+        from forge.tools import ACTION_VARIANTS, required_fields
+        cases = {
+            "bash": ["command"],
+            "read_file": ["path"],
+            "write_file": ["path", "content"],
+            "edit_file": ["path", "old", "new"],
+            "grep": ["pattern"],
+            "glob": ["pattern"],
+            "list_files": [],
+        }
+        for action, req in cases.items():
+            v = ACTION_VARIANTS[action]
+            self.assertEqual(v["properties"]["action"], {"const": action})
+            self.assertEqual(v["required"], ["thought", "action"] + req)
+            self.assertEqual(required_fields(action), req)
+            self.assertFalse(v["additionalProperties"])
+            # `plan` and `note` are OPTIONAL in every variant — a plan/note update
+            # must ride any action and must never be forced.
+            self.assertIn("plan", v["properties"])
+            self.assertIn("note", v["properties"])
+            self.assertNotIn("plan", v["required"])
+            self.assertNotIn("note", v["required"])
+
+    def test_variant_advertises_only_its_own_fields(self):
+        from forge.tools import ACTION_VARIANTS
+        # a bash variant cannot legally carry edit fields; edit_file cannot carry command
+        self.assertNotIn("old", ACTION_VARIANTS["bash"]["properties"])
+        self.assertNotIn("command", ACTION_VARIANTS["edit_file"]["properties"])
+        self.assertIn("command", ACTION_VARIANTS["bash"]["properties"])
+
+    def test_build_schema_full_set_is_anyof_of_variants(self):
+        from forge.tools import build_schema, ACTION_VARIANTS, ALL_ACTIONS
+        s = build_schema(set(ALL_ACTIONS), "auto")
+        self.assertIn("anyOf", s)
+        consts = [v["properties"]["action"]["const"] for v in s["anyOf"]]
+        self.assertEqual(consts, list(ALL_ACTIONS))          # canonical enum order
+        self.assertEqual(s["anyOf"][0], ACTION_VARIANTS["bash"])
+
+    def test_build_schema_single_action_is_bare_variant(self):
+        from forge.tools import build_schema, ACTION_VARIANTS
+        # one legal action → the single variant, NOT an anyOf-of-one (root anyOf is
+        # exactly what OpenAI strict mode rejects).
+        self.assertEqual(build_schema({"say"}, "auto"), ACTION_VARIANTS["say"])
+
+    def test_build_schema_empty_falls_back_to_flat(self):
+        from forge.tools import build_schema, ACTION_SCHEMA
+        self.assertIs(build_schema(set(), "auto"), ACTION_SCHEMA)
+
+    def test_plan_mode_legal_excludes_mutating(self):
+        d = tempfile.mkdtemp()
+        a = Agent(ScriptBackend([]), sm.EphemeralSession(d, "s"))
+        a.mode = "plan"
+        legal = a._legal_actions()
+        for mut in ("bash", "write_file", "edit_file", "fleet_send"):
+            self.assertNotIn(mut, legal)
+        for ro in ("read_file", "list_files", "grep", "glob", "say"):
+            self.assertIn(ro, legal)
+
+    def test_allowed_intersects_legal(self):
+        d = tempfile.mkdtemp()
+        a = Agent(ScriptBackend([]), sm.EphemeralSession(d, "s"), allowed={"read_file", "say"})
+        self.assertEqual(a._legal_actions(), {"read_file", "say"})
+
+    def test_plan_mode_grammar_passed_to_backend(self):
+        """End-to-end: in plan mode the schema handed to the backend is the anyOf of
+        the read-only variants — no bash/write/edit const anywhere in it."""
+        import json as _json
+        from forge.tools import build_schema
+        d = tempfile.mkdtemp()
+
+        class Rec:
+            name = "rec"
+            def __init__(self):
+                self.schema = None
+            def stream(self, m, schema=None, temperature=0.0):
+                self.schema = schema
+                yield _json.dumps({"thought": "t", "action": "say", "message": "here is the plan"})
+        b = Rec()
+        a = Agent(b, sm.EphemeralSession(d, "s"), max_steps=2)
+        a.mode = "plan"
+        a.send("plan it")
+        consts = [v["properties"]["action"]["const"] for v in b.schema["anyOf"]]
+        self.assertNotIn("bash", consts)
+        self.assertNotIn("edit_file", consts)
+        self.assertEqual(b.schema, build_schema(a._legal_actions(), "plan"))
 
 
 class TestBackgroundBash(unittest.TestCase):

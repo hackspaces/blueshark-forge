@@ -185,12 +185,26 @@ class OllamaBackend:
 
 
 class OpenAICompatBackend:
+    # P5.1 schema-dialect ladder. json_schema constrained decoding is spelled
+    # differently per engine; we probe them in order on the first schema-carrying
+    # call and cache the winner. response_format (OpenAI / most) → guided_json (vLLM)
+    # → json_schema (llama.cpp) → none (advisory-free; warn once).
+    _SCHEMA_DIALECTS = ("response_format", "guided_json", "json_schema", "none")
+
     def __init__(self, model, url="https://api.openai.com/v1", key=None):
         self.model = model
         self.url = url.rstrip("/")
         self.key = key or os.environ.get("OPENAI_API_KEY", "")
         self.name = f"openai:{model}"
         self.last_prompt_tokens = 0
+        # A previously-negotiated dialect for this endpoint (persisted in config) skips
+        # re-probing; None means "not yet resolved — negotiate on first schema call".
+        try:
+            from . import config
+            d = config.get("schema_dialect") or None
+        except Exception:
+            d = None
+        self._schema_dialect = d if d in self._SCHEMA_DIALECTS else None
 
     def context_window(self):
         return int(os.environ.get("FORGE_REMOTE_CTX", "128000"))  # most modern APIs; override if needed
@@ -198,17 +212,66 @@ class OpenAICompatBackend:
     def effective_ctx(self):
         return min(self.context_window(), ctx_cap() * 8)  # remote windows are large; cap generously
 
-    def _body(self, messages, schema, temperature, stream):
+    def _apply_dialect(self, body, schema, dialect):
+        """Attach `schema` to the request body in the given engine dialect. 'none'
+        (or an unknown dialect) attaches nothing — the model runs unconstrained."""
+        if not schema:
+            return body
+        if dialect == "response_format":
+            # strict:False — our action schema has optional fields (command/path/…),
+            # which OpenAI strict mode forbids (it also rejects a root anyOf). Non-strict
+            # json_schema still guides vLLM/llama.cpp/LM Studio/OpenAI toward valid JSON.
+            body["response_format"] = {"type": "json_schema",
+                                       "json_schema": {"name": "action", "schema": schema, "strict": False}}
+        elif dialect == "guided_json":
+            body["guided_json"] = schema          # vLLM
+        elif dialect == "json_schema":
+            body["json_schema"] = schema          # llama.cpp server
+        return body
+
+    def _body(self, messages, schema, temperature, stream, dialect=None):
         body = {"model": self.model, "messages": messages, "temperature": temperature, "stream": stream}
         if stream:
             body["stream_options"] = {"include_usage": True}
-        if schema:
-            # strict:False — our action schema has optional fields (command/path/…),
-            # which OpenAI strict mode forbids. Non-strict json_schema still guides
-            # vLLM/llama.cpp/LM Studio/OpenAI toward valid JSON.
-            body["response_format"] = {"type": "json_schema",
-                                       "json_schema": {"name": "action", "schema": schema, "strict": False}}
+        self._apply_dialect(body, schema, dialect or self._schema_dialect or "response_format")
         return body
+
+    def _set_dialect(self, dialect):
+        """Cache a negotiated dialect on the instance and persist it to config so
+        later processes skip the probe. Warn once when we land on 'none'."""
+        self._schema_dialect = dialect
+        if dialect == "none":
+            import sys
+            print(f"[forge] {self.url}: this engine did not accept any json_schema dialect; "
+                  "running WITHOUT constrained decoding (outputs may be less reliable).", file=sys.stderr)
+        try:
+            from . import config
+            config.set_key("schema_dialect", dialect)
+        except Exception:
+            pass
+
+    def _open_schema(self, messages, schema, temperature, stream):
+        """Open the request, negotiating the schema dialect on the FIRST schema-carrying
+        call. Each candidate is tried in turn; a 400 that names response_format/
+        json_schema/guided_json downgrades to the next; any other failure propagates.
+        The first candidate that opens becomes the cached dialect (the negotiation IS
+        the real call — no wasted request)."""
+        if not schema or self._schema_dialect is not None:
+            return self._open(self._req(self._body(messages, schema, temperature, stream)))
+        last = None
+        for d in self._SCHEMA_DIALECTS:
+            try:
+                r = self._open(self._req(self._body(messages, schema, temperature, stream, d)))
+            except ForgeError as e:
+                msg = str(e)
+                if "400" in msg and ("response_format" in msg or "json_schema" in msg or "guided_json" in msg):
+                    last = e
+                    continue                      # a schema-dialect rejection → try the next
+                raise                             # a real failure (auth/unreachable/…) → surface it
+            self._set_dialect(d)
+            return r
+        if last:                                  # unreachable: 'none' carries no schema and must open
+            raise last
 
     def _req(self, body):
         return urllib.request.Request(
@@ -227,7 +290,7 @@ class OpenAICompatBackend:
             raise ForgeError(f"Can't reach the inference server at {self.url}. Is it running and is the URL correct?")
 
     def chat(self, messages, schema=None, temperature=0.0):
-        with self._open(self._req(self._body(messages, schema, temperature, False))) as r:
+        with self._open_schema(messages, schema, temperature, False) as r:
             resp = json.loads(r.read())
         if resp.get("usage", {}).get("prompt_tokens"):
             self.last_prompt_tokens = resp["usage"]["prompt_tokens"]
@@ -237,7 +300,7 @@ class OpenAICompatBackend:
             raise ForgeError(f"Unexpected response from {self.url}: {str(resp)[:200]}")
 
     def stream(self, messages, schema=None, temperature=0.0):
-        with self._open(self._req(self._body(messages, schema, temperature, True))) as r:
+        with self._open_schema(messages, schema, temperature, True) as r:
             for chunk, usage in iter_sse(r):
                 if chunk:
                     yield chunk

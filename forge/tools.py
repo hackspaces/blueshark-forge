@@ -53,6 +53,97 @@ ACTION_SCHEMA = {
     "required": ["thought", "action"],
 }
 
+# P5.1 state-dependent action grammar. The flat ACTION_SCHEMA above can only ever
+# require `thought`+`action`, so a grammar-forced model can still emit bash without
+# a command or edit_file without old/new. ACTION_VARIANTS turns each action into its
+# OWN single-object schema: a const `action` + only that action's required fields +
+# only its legal properties (additionalProperties:false). build_schema() assembles
+# an anyOf of the variants that are LEGAL this step — mutating actions dropped in
+# plan mode / when self.allowed excludes them — so the illegal/incomplete action is
+# grammatically unrepresentable on engines that honor the grammar (Ollama/llama.cpp/
+# vLLM). The flat schema stays as the fallback for unknown engines.
+ALL_ACTIONS = tuple(ACTION_SCHEMA["properties"]["action"]["enum"])
+
+# Fields REQUIRED for each action, beyond the always-required thought+action. `plan`,
+# `thought`, `note` stay OPTIONAL in every variant (a plan/note update rides any
+# action, and must never be forced). fleet_send keeps only `target` required because
+# a fleet_send with no message (or target "list") is the read-only session listing.
+_REQUIRED_FIELDS = {
+    "bash":       ["command"],
+    "read_file":  ["path"],
+    "write_file": ["path", "content"],
+    "edit_file":  ["path", "old", "new"],
+    "list_files": [],
+    "grep":       ["pattern"],
+    "glob":       ["pattern"],
+    "fleet_send": ["target"],
+    "say":        ["message"],
+}
+
+# The fields (beyond the common ones) each action may legally carry — so a variant
+# advertises ONLY its own inputs and additionalProperties:false makes a foreign
+# field (bash carrying `old`, edit_file carrying `command`) ungrammatical.
+_COMMON_FIELDS = ("plan", "thought", "action", "note")
+_ACTION_FIELDS = {
+    "bash":       ("command", "background"),
+    "read_file":  ("path", "offset", "limit", "outline"),
+    "write_file": ("path", "content"),
+    "edit_file":  ("path", "old", "new"),
+    "list_files": ("path",),
+    "grep":       ("pattern", "path", "context"),
+    "glob":       ("pattern",),
+    "fleet_send": ("target", "message"),
+    "say":        ("message",),
+}
+
+
+def required_fields(action):
+    """The fields (beyond thought/action) the grammar forces for `action`."""
+    return list(_REQUIRED_FIELDS.get(action, []))
+
+
+def _variant(action):
+    """The single-object schema for one action: const action + its own fields, with
+    only that action's required fields forced. plan/thought/note stay optional."""
+    props = {"action": {"const": action}}
+    for f in _COMMON_FIELDS:
+        if f != "action":
+            props[f] = ACTION_SCHEMA["properties"][f]
+    for f in _ACTION_FIELDS.get(action, ()):
+        props[f] = ACTION_SCHEMA["properties"][f]
+    return {
+        "type": "object",
+        "properties": props,
+        "required": ["thought", "action"] + required_fields(action),
+        "additionalProperties": False,
+    }
+
+
+ACTION_VARIANTS = {a: _variant(a) for a in ALL_ACTIONS}
+
+
+def build_schema(legal_actions=None, mode="auto"):
+    """The action grammar for THIS step: an anyOf of the legal action variants.
+
+    `legal_actions` is the set the caller narrowed to (all actions, minus the
+    mutating ones in plan mode, intersected with an allow-list). Order follows the
+    canonical enum. A single legal action returns just that variant (an anyOf-of-one
+    is pointless, and a root anyOf is what OpenAI strict mode rejects). With nothing
+    legal, falls back to the flat ACTION_SCHEMA. `mode` is accepted for caller/telemetry
+    intent; the narrowing itself is already reflected in `legal_actions`."""
+    if legal_actions is None:
+        actions = list(ALL_ACTIONS)
+    else:
+        legal = set(legal_actions)
+        actions = [a for a in ALL_ACTIONS if a in legal]
+    if not actions:
+        return ACTION_SCHEMA
+    variants = [ACTION_VARIANTS[a] for a in actions]
+    if len(variants) == 1:
+        return variants[0]
+    return {"anyOf": variants}
+
+
 TOOL_HELP = """Each turn, output ONE JSON action. Maintain a `plan` (todo list) and keep it updated as you work.
 Optionally set `note` to pin a durable fact worth keeping: where something lives, a command that works, a decision made (survives compaction).
 Actions:

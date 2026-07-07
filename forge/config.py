@@ -10,6 +10,7 @@ DEFAULTS = {
     "engine": "ollama",     # ollama | openai | vllm | llamacpp | mlx | lmstudio | tgi | sglang
     "base_url": "",         # for non-ollama engines (an OpenAI-compatible endpoint)
     "api_key": "",          # optional, for remote/authenticated endpoints
+    "schema_dialect": "",   # P5.1 negotiated json_schema dialect for OpenAI-compat engines (auto-probed)
     "ladder": ["gemma2:9b", "qwen2.5-coder:7b"],   # overwritten by `forge setup`
     "num_ctx": 8192,
     "keep_alive": "30m",
