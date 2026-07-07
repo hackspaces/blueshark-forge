@@ -98,7 +98,7 @@ Small, independent fixes that stop the harness silently lying to the model or to
 
 ### P1.2 · One observation-shaping pipeline: end the 4k/12k split brain, keep tails, and make offloads reachable
 
-**Status: open · Impact 4/5 · Effort S · Depends on: none**
+**Status: done · Impact 4/5 · Effort S · Depends on: none** · note: added tools.shape(text,budget,note) head+marker+TAIL truncation with notes re-attached after the cut; _maybe_offload now returns (preview,note) and writes full text under <cwd>/.forge/output (auto .gitignore '*') so read_file/grep can follow the pointer; bg logs moved there too; agent.py derives one obs budget (~8% of effective_ctx, cap 12000) for both the transcript log and the fed-back message — both obs[:4000] slices gone.
 
 **What.** Replace the two conflicting truncation layers with a single tools.shape(obs, notes, budget) used everywhere: budget derived from backend.effective_ctx() (e.g. min(12000 chars, ~8% of window)); truncation keeps head + TAIL with an explicit '[… N chars omitted from the middle …]' marker; harness notes (the offload pointer, '[showing lines X-Y of N]') are re-attached AFTER the cut so they can never be sliced off. Move the offload dir to <cwd>/.forge/output (auto-gitignored) so the model's own read_file/grep can actually follow the pointer it is given.
 

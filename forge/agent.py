@@ -17,7 +17,7 @@ import re
 import threading
 
 from . import backends
-from .tools import ACTION_SCHEMA, TOOL_HELP, execute
+from .tools import ACTION_SCHEMA, TOOL_HELP, execute, shape
 
 STUCK_AT = int(os.environ.get("FORGE_STUCK_THRESHOLD", "7"))  # failures before escalating a rung
 
@@ -128,6 +128,15 @@ class Agent:
         if not used:  # no real count yet (first turn) — estimate from chars
             used = sum(len(m["content"]) for m in self.messages) // 4
         return used, window
+
+    def _obs_budget(self):
+        """One char budget for a single observation, derived from the model's REAL
+        window: ~8% of it (4 chars/token), hard-capped at 12000. This ends the old
+        4000/12000 split-brain — one budget, used for both the transcript log and
+        the message fed back to the model, so nothing is ever cut mid-content
+        without a visible marker and no pointer outlives its budget."""
+        window = self.backend.effective_ctx() if hasattr(self.backend, "effective_ctx") else backends.ctx_cap()
+        return min(12000, int(window * 4 * 0.08))
 
     def _compact(self):
         """At ~70% of the model's real window, SUMMARIZE the older middle turns
@@ -368,13 +377,14 @@ class Agent:
                 self.on_event("action", action=kind, thought=act.get("thought", ""),
                               detail=act.get("command") or act.get("path") or act.get("pattern") or "")
                 obs, ok = execute(act, self.session.cwd, stop=self.stop)
+                budget = self._obs_budget()
                 if ok and kind in ("read_file", "write_file") and act.get("path"):
                     self.read_files.add(os.path.realpath(os.path.join(self.session.cwd, act["path"])))
                 if ok and kind == "edit_file":
                     self.on_event("diff", path=act.get("path", ""), old=act.get("old", ""), new=act.get("new", ""))
                 elif ok and kind == "write_file":
                     self.on_event("diff", path=act.get("path", ""), old=before, new=act.get("content", ""))
-                self.session.log("observation", text=obs[:4000], ok=ok)
+                self.session.log("observation", text=shape(obs, budget), ok=ok)
                 self.on_event("observation", text=obs, ok=ok)
 
                 tag = ""
@@ -408,7 +418,7 @@ class Agent:
                         self.session.log("assistant", text=stuck)
                         self.on_event("say", message=stuck)
                         return stuck
-                self.messages.append({"role": "user", "content": f"{tag}Observation:\n{obs[:4000]}"})
+                self.messages.append({"role": "user", "content": f"{tag}Observation:\n{shape(obs, budget)}"})
 
             return "(hit the step limit — ask me to continue)"
         finally:

@@ -85,22 +85,58 @@ def _fuzzy_replace(text, old, new):
 
 
 MAX_OUTPUT = 12000  # chars kept inline; larger output is saved to a file with a preview
-_OVERFLOW_DIR = os.path.expanduser("~/.forge/output")
 
 
-def _maybe_offload(text, label):
-    """Keep big outputs out of context: save the full text to a file and return a
-    preview + path the model can grep/read, instead of dumping (or silently truncating)."""
+def shape(text, budget, note=""):
+    """Fit `text` to a char budget WITHOUT silently dropping the tail, then append
+    `note` verbatim AFTER the cut so a harness pointer/summary can NEVER be sliced
+    off. If it fits, return it unchanged (plus any note). If not, keep a HEAD
+    (~60% of budget) + an explicit '[… N chars omitted …]' marker + a TAIL
+    (remaining budget). TAIL-retention is mandatory: errors, test summaries and
+    pointers live at the END of output, so head-only truncation is the worst
+    possible policy for a coding agent."""
+    if len(text) <= budget:
+        return text + note
+    head = int(budget * 0.6)
+    tail = budget - head
+    omitted = len(text) - head - tail
+    marker = f"\n[… {omitted} chars omitted from the middle …]\n"
+    return text[:head] + marker + text[len(text) - tail:] + note
+
+
+def overflow_dir(cwd):
+    """Where big outputs and background logs live: <cwd>/.forge/output — INSIDE the
+    workspace so the model's own read_file/grep (confined to cwd by _resolve) can
+    follow the pointer it is handed. On first creation, drop a .gitignore ('*') so
+    the whole .forge dir stays out of version control."""
+    d = os.path.join(cwd, ".forge", "output")
+    if not os.path.isdir(d):
+        os.makedirs(d, exist_ok=True)
+        gi = os.path.join(cwd, ".forge", ".gitignore")
+        if not os.path.exists(gi):
+            try:
+                with open(gi, "w") as f:
+                    f.write("*\n")
+            except OSError:
+                pass
+    return d
+
+
+def _maybe_offload(text, label, cwd):
+    """Keep big outputs out of context: save the FULL text to a file under
+    <cwd>/.forge/output and return (preview, note) — the preview is shape()'d, the
+    note is a pointer the model can read_file/grep. The note is returned SEPARATELY
+    (not baked in) so the caller re-attaches it AFTER any further truncation."""
     if len(text) <= MAX_OUTPUT:
-        return text
-    os.makedirs(_OVERFLOW_DIR, exist_ok=True)
+        return text, ""
+    d = overflow_dir(cwd)
     import hashlib
-    fn = os.path.join(_OVERFLOW_DIR, f"{label}-{hashlib.md5(text.encode()).hexdigest()[:8]}.txt")
+    fn = os.path.join(d, f"{label}-{hashlib.md5(text.encode()).hexdigest()[:8]}.txt")
     with open(fn, "w") as f:
         f.write(text)
-    head = text[:MAX_OUTPUT]
-    return (f"{head}\n\n[... output truncated: {len(text)} chars total. Full output saved to {fn} — "
-            f"read a range or grep it for what you need.]")
+    note = (f"\n[... output truncated: {len(text)} chars total. Full output saved to {fn} — "
+            f"read a range or grep it.]")
+    return shape(text, MAX_OUTPUT), note
 
 
 # ---- background processes (servers, watchers) --------------------------------
@@ -113,8 +149,7 @@ _BG_TRAILING_AMP = __import__("re").compile(r"(?<![&|])&\s*$")
 
 def _run_background(cmd, cwd):
     import time
-    os.makedirs(_OVERFLOW_DIR, exist_ok=True)
-    log = os.path.join(_OVERFLOW_DIR, f"bg-{len(_BG_PROCS) + 1}-{os.getpid()}.log")
+    log = os.path.join(overflow_dir(cwd), f"bg-{len(_BG_PROCS) + 1}-{os.getpid()}.log")
     lf = open(log, "w")
     p = subprocess.Popen(cmd, cwd=cwd, shell=True, stdout=lf, stderr=subprocess.STDOUT,
                          start_new_session=True)
@@ -174,7 +209,8 @@ def _run(cmd, cwd, timeout=None, stop=None):
     out = (out or "").strip()
     ok = p.returncode == 0
     body = out if out else f"(no output, exit {p.returncode})"
-    return _maybe_offload(body, "bash"), ok
+    preview, note = _maybe_offload(body, "bash", cwd)
+    return preview + note, ok
 
 
 def _kill_group(p, signal):
@@ -351,11 +387,13 @@ def execute(action, cwd, stop=None):
             limit = max(1, int(action.get("limit", 800)))
             chunk = lines[offset - 1: offset - 1 + limit]
             body = "".join(chunk)
-            note = ""
+            range_note = ""
             if offset > 1 or offset - 1 + limit < total:
                 shown_to = min(offset - 1 + limit, total)
-                note = f"\n[showing lines {offset}-{shown_to} of {total}. Use offset/limit to read more.]"
-            return _maybe_offload(body, "read") + note, True
+                range_note = f"\n[showing lines {offset}-{shown_to} of {total}. Use offset/limit to read more.]"
+            preview, off_note = _maybe_offload(body, "read", cwd)
+            # both notes ride at the TAIL so they survive any further shape() truncation
+            return preview + off_note + range_note, True
         if a == "write_file":
             p = _resolve(cwd, action.get("path", ""))
             if not p:

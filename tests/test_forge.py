@@ -13,7 +13,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from forge import session as sm            # noqa: E402
 from forge.agent import Agent              # noqa: E402
 from forge.backends import make_backend, OllamaBackend, OpenAICompatBackend  # noqa: E402
-from forge.tools import execute, _fuzzy_replace, _syntax_error, _which  # noqa: E402
+from forge.tools import (execute, _fuzzy_replace, _syntax_error, _which,  # noqa: E402
+                         shape, overflow_dir, _maybe_offload, MAX_OUTPUT)
 
 
 def _write(p, s):
@@ -407,6 +408,100 @@ class TestEdgeCases(unittest.TestCase):
         r = a.send("message nobody")
         # the failed send is reported but the agent continues to completion
         self.assertEqual(r, "done")
+
+
+class TestObservationShaping(unittest.TestCase):
+    """P1.2 — one observation-shaping pipeline. shape() truncates head+TAIL with an
+    explicit marker (never silent, never head-only), harness notes/pointers ride the
+    tail so they can NEVER be sliced off, and offloads land under <cwd>/.forge/output
+    where the model's own read_file/grep can actually reach them."""
+
+    def setUp(self):
+        self.d = tempfile.mkdtemp()
+
+    def test_shape_passes_short_text_through(self):
+        self.assertEqual(shape("hello", 100), "hello")
+        # a note on short text is still appended (a read-range note must always show)
+        self.assertEqual(shape("hello", 100, note="\n[note]"), "hello\n[note]")
+
+    def test_shape_keeps_head_and_tail_with_marker(self):
+        text = "HEAD" + ("x" * 6000) + "TAIL"
+        out = shape(text, 2000)
+        self.assertLess(len(out), len(text))
+        self.assertIn("omitted from the middle", out)     # explicit marker — never silent
+        self.assertTrue(out.startswith("HEAD"))           # head retained
+        self.assertTrue(out.endswith("TAIL"))             # TAIL retained — errors/summaries live here
+
+    def test_shape_note_always_survives_truncation(self):
+        text = "z" * 20000
+        note = "\n[... output truncated. Full output saved to /w/.forge/output/x.txt]"
+        out = shape(text, 2000, note=note)
+        self.assertTrue(out.endswith(note))               # pointer is re-attached AFTER the cut
+        self.assertIn("omitted from the middle", out)
+        self.assertLess(len(out), len(text))
+
+    def test_midsize_observation_not_cut_without_a_marker(self):
+        # the core silent-truncation bug: a ~6000-char observation must never be cut
+        # mid-content with no marker. Either it fits, or the cut is explicit.
+        body = "".join(f"line{i:04d}-payload " for i in range(700))  # ~14k chars
+        out = shape(body, 4000)
+        self.assertIn("omitted from the middle", out)
+        self.assertTrue(out.startswith("line0000"))       # nothing before the head is lost silently
+
+    def test_offload_writes_under_cwd_and_read_file_can_reach_it(self):
+        big = "".join(f"row {i}\n" for i in range(3000))   # well over MAX_OUTPUT
+        self.assertGreater(len(big), MAX_OUTPUT)
+        preview, note = _maybe_offload(big, "bash", self.d)
+        self.assertIn("saved to", note)                    # literal phrase kept
+        outdir = os.path.join(self.d, ".forge", "output")
+        files = os.listdir(outdir)
+        self.assertEqual(len(files), 1)                    # full text saved to exactly one file
+        # the model can follow the pointer with its OWN read_file (confined to cwd)
+        rel = os.path.join(".forge", "output", files[0])
+        body, ok = execute({"action": "read_file", "path": rel, "limit": 5}, self.d)
+        self.assertTrue(ok)
+        self.assertIn("row 0", body)                       # got the real content back
+
+    def test_offload_pointer_survives_the_agent_budget_shape(self):
+        # the exact dead-code bug: the pointer used to sit past char ~12000, then
+        # obs[:4000] sliced it off. Now it rides the tail, so a smaller agent budget
+        # applied on top still keeps it.
+        big = "".join(f"row {i}\n" for i in range(3000))
+        preview, note = _maybe_offload(big, "bash", self.d)
+        obs = preview + note
+        shaped = shape(obs, 4000)                          # agent re-shapes to its budget
+        self.assertIn("saved to", shaped)                  # pointer NOT sliced off
+        self.assertIn("omitted from the middle", shaped)
+
+    def test_read_range_note_survives_offload_and_shape(self):
+        _write(os.path.join(self.d, "big.txt"), "".join("x" * 48 + f"{i}\n" for i in range(3000)))
+        out, ok = execute({"action": "read_file", "path": "big.txt", "offset": 1, "limit": 2000}, self.d)
+        self.assertTrue(ok)
+        self.assertIn("saved to", out)                     # a big read offloads too
+        self.assertIn("showing lines 1-2000 of 3000", out)
+        shaped = shape(out, 4000)                          # agent budget on top
+        self.assertIn("showing lines 1-2000 of 3000", shaped)   # range note NOT sliced off
+
+    def test_forge_dir_is_gitignored(self):
+        d = overflow_dir(self.d)
+        self.assertTrue(os.path.isdir(d))
+        gi = os.path.join(self.d, ".forge", ".gitignore")
+        self.assertTrue(os.path.exists(gi))
+        self.assertEqual(_read(gi).strip(), "*")
+
+    def test_obs_budget_derives_from_window_and_caps_at_12000(self):
+        class Small:
+            name = "s"
+            def effective_ctx(self): return 8192
+            def chat(self, *a, **k): return '{"thought":"x","action":"say","message":"done"}'
+        class Huge:
+            name = "h"
+            def effective_ctx(self): return 1_000_000
+            def chat(self, *a, **k): return '{"thought":"x","action":"say","message":"done"}'
+        small = Agent(Small(), sm.EphemeralSession(self.d, "s"))
+        huge = Agent(Huge(), sm.EphemeralSession(self.d, "h"))
+        self.assertEqual(small._obs_budget(), int(8192 * 4 * 0.08))   # ~8% of the real window
+        self.assertEqual(huge._obs_budget(), 12000)                  # hard-capped, no split-brain
 
 
 class TestInboxAuth(unittest.TestCase):
