@@ -14,7 +14,6 @@ from .agent import Agent
 from .backends import make_backend, ForgeError
 from . import config as cfgmod
 from .util import slurp
-from .tui import run_interruptible
 
 DIM = "\033[2m"; B = "\033[1m"; CY = "\033[36m"; GR = "\033[32m"; YE = "\033[33m"; RD = "\033[31m"; MG = "\033[35m"; RST = "\033[0m"
 
@@ -245,8 +244,16 @@ def _expand_ats(text, cwd):
     return out
 
 
+MODES = ("auto", "plan", "manual")
+MODE_HINT = {
+    "auto":   "acts freely, no questions",
+    "plan":   "read-only — investigates and presents a plan",
+    "manual": "asks before every mutating action (y / a=always / n)",
+}
+
+
 def run(backend, session, verbose=False, workspace=None):
-    from .tui import Screen, FooterSpinner
+    from .tui import Screen, FooterSpinner, ApprovalGate
     screen = Screen()           # activity (working…) · boxed 2-line input · status
     ui = UI(screen.emit, verbose, width=lambda: screen.w)
     ladder = backend if isinstance(backend, list) else [backend]
@@ -266,6 +273,9 @@ def run(backend, session, verbose=False, workspace=None):
         with Spinner("loading model"):
             ladder[0].warm()
 
+    gate = ApprovalGate()
+    agent.approve = lambda desc: gate.request(desc, agent.stop)
+
     def status_line():
         try:
             used, window = agent._fill()
@@ -273,58 +283,93 @@ def run(backend, session, verbose=False, workspace=None):
         except Exception:
             pct = 0
         m = agent.backend.name.split(":", 1)[-1]
-        return f"  {m} · {pct}% context · Esc stops · /model /config /help"
+        return f"  {agent.mode} mode (shift+tab cycles) · {m} · {pct}% context · /help"
 
     screen.enter()
     try:
-        _run_loop(screen, ui, agent, session, status_line, models, ctx, ptype)
+        _run_loop(screen, ui, agent, session, status_line, gate, models, ctx, ptype)
     except KeyboardInterrupt:
         pass                                   # clean exit, never a traceback
     finally:
         screen.exit()
 
 
-def _run_loop(screen, ui, agent, session, status_line, models, ctx, ptype):
+def _set_mode(agent, screen, mode):
+    agent.mode = mode
+    screen.emit(f"{MG}  ⏵ {mode} mode{RST} {DIM}— {MODE_HINT[mode]}{RST}\n")
+
+
+def _run_loop(screen, ui, agent, session, status_line, gate, models, ctx, ptype):
     from .tui import FooterSpinner
     screen.emit(_banner(models, ctx, session.cwd, ptype))
-    screen.emit(f"{DIM}  Esc clears the line (or stops the agent mid-run) · @file to include a file · /help{RST}\n\n")
+    screen.emit(f"{DIM}  Esc clears/stops · shift+tab: auto/plan/manual · type while it works to queue · /help{RST}\n\n")
     history = []
+    pending = []                                        # messages queued for the NEXT turn
+
+    def cycle_mode():
+        _set_mode(agent, screen, MODES[(MODES.index(agent.mode) + 1) % len(MODES)])
+
     while True:
-        user = screen.prompt(f"{GR}❯{RST} ", history, status_line())
-        if user is None:
-            break
-        user = user.strip()
-        if not user:
-            continue
-        history.append(user)
-        if user in ("/exit", "/quit"):
-            break
-        screen.emit(f"\n{GR}❯{RST} {user}\n")           # echo into the transcript
-        if user == "/help":
-            screen.emit(f"{DIM}  Esc: clear/stop · ↑↓ history · Ctrl-A/E home/end · Ctrl-U/K/W kill{RST}\n")
-            screen.emit(f"{DIM}  /model · /config · /verbose · /plan · /cwd · /exit{RST}\n"); continue
-        if user in ("/model", "/models"):
-            _menu_model(agent, screen, history); continue
-        if user == "/config":
-            _menu_config(agent, screen); continue
-        if user == "/verbose":
-            ui.verbose = not ui.verbose; screen.emit(f"{DIM}  verbose {'on' if ui.verbose else 'off'}{RST}\n"); continue
-        if user == "/plan":
-            (ui._render_plan(agent.plan) if agent.plan else screen.emit(f"{DIM}  (no plan yet){RST}\n")); continue
-        if user == "/cwd":
-            screen.emit(f"{DIM}  {session.cwd}{RST}\n"); continue
+        if pending:
+            user = pending.pop(0)
+            screen.emit(f"\n{GR}❯{RST} {user} {DIM}(queued){RST}\n")
+        else:
+            user = screen.prompt(f"{GR}❯{RST} ", history, status_line, on_mode=cycle_mode)
+            if user is None:
+                break
+            user = user.strip()
+            if not user:
+                continue
+            history.append(user)
+            if user in ("/exit", "/quit"):
+                break
+            screen.emit(f"\n{GR}❯{RST} {user}\n")       # echo into the transcript
+            if user == "/help":
+                screen.emit(f"{DIM}  Esc: clear/stop · ↑↓ history · Ctrl-A/E home/end · Ctrl-U/K/W kill · shift+tab: mode{RST}\n")
+                screen.emit(f"{DIM}  modes — auto: {MODE_HINT['auto']} · plan: {MODE_HINT['plan']} · manual: {MODE_HINT['manual']}{RST}\n")
+                screen.emit(f"{DIM}  while working: type + Enter queues a message the agent absorbs between steps{RST}\n")
+                screen.emit(f"{DIM}  /mode [auto|plan|manual] · /model · /config · /verbose · /plan · /cwd · /exit{RST}\n"); continue
+            if user.startswith("/mode"):
+                arg = user.split(None, 1)[1].strip().lower() if " " in user else ""
+                if arg in MODES:
+                    _set_mode(agent, screen, arg)
+                else:
+                    screen.emit(f"{DIM}  {agent.mode} mode — /mode auto|plan|manual (or shift+tab){RST}\n")
+                continue
+            if user in ("/model", "/models"):
+                _menu_model(agent, screen, history); continue
+            if user == "/config":
+                _menu_config(agent, screen); continue
+            if user == "/verbose":
+                ui.verbose = not ui.verbose; screen.emit(f"{DIM}  verbose {'on' if ui.verbose else 'off'}{RST}\n"); continue
+            if user == "/plan":
+                (ui._render_plan(agent.plan) if agent.plan else screen.emit(f"{DIM}  (no plan yet){RST}\n")); continue
+            if user == "/cwd":
+                screen.emit(f"{DIM}  {session.cwd}{RST}\n"); continue
 
         ui.new_turn()
         agent.stop.clear()
-        screen.show_submitted(f"{GR}❯{RST} ", user)
-        spin = FooterSpinner(screen, "working").start()
+
+        def queue_msg(txt):
+            history.append(txt)
+            session.push("user", txt)                   # absorbed between agent steps
+            screen.emit(f"{DIM}  ⧉ queued: {txt[:90]}{RST}\n")
+
+        spin = FooterSpinner(screen, "working", gate=gate).start()
         reply = None
         try:
-            reply = run_interruptible(lambda: agent.send(_expand_ats(user, session.cwd)), agent.stop)
+            reply = screen.attend(lambda u=user: agent.send(_expand_ats(u, session.cwd)),
+                                  agent.stop, f"{GR}❯{RST} ", history,
+                                  status=status_line, on_queue=queue_msg, gate=gate)
         except ForgeError as e:
             screen.emit(f"\n  {RD}✗ {e}{RST}\n")
         finally:
             spin.stop()
+        for m in session.drain():                       # queued but not absorbed → next turn
+            if m["from"] == "user":
+                pending.append(m["text"])
+            else:                                       # fleet msg: leave for the next turn
+                session.push(m["from"], m["text"])
         if reply == "(stopped)":
             screen.emit(f"{DIM}  ⊘ stopped. what next?{RST}\n")
         elif reply is not None and not ui.said:        # fallback (step limit / malformed)

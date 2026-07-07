@@ -498,6 +498,98 @@ class TestFindSession(unittest.TestCase):
             self.assertEqual([h["sid"] for h in hits], ["claude-ymp"])
 
 
+class TestApprovalGate(unittest.TestCase):
+    def test_request_answer_across_threads(self):
+        import threading
+        from forge.tui import ApprovalGate
+        gate = ApprovalGate()
+        got = []
+        t = threading.Thread(target=lambda: got.append(gate.request("bash rm -rf junk")))
+        t.start()
+        for _ in range(50):
+            if gate.pending():
+                break
+            import time as _t; _t.sleep(0.01)
+        self.assertEqual(gate.pending(), "bash rm -rf junk")
+        self.assertTrue(gate.answer("always"))
+        t.join(timeout=5)
+        self.assertEqual(got, ["always"])
+        self.assertIsNone(gate.pending())
+
+    def test_stop_event_resolves_to_no(self):
+        import threading
+        from forge.tui import ApprovalGate
+        gate = ApprovalGate()
+        stop = threading.Event(); stop.set()
+        self.assertEqual(gate.request("bash x", stop_event=stop), "no")
+
+
+class TestModeGate(unittest.TestCase):
+    def _agent(self, mode, approve=None, approvals=()):
+        a = Agent.__new__(Agent)
+        a.mode = mode
+        a.approvals = set(approvals)
+        a.approve = approve or (lambda d: "yes")
+        return a
+
+    def test_auto_never_gates(self):
+        a = self._agent("auto", approve=lambda d: self.fail("should not ask"))
+        self.assertIsNone(a._gate("bash", {"action": "bash", "command": "rm -rf /"}))
+
+    def test_plan_blocks_mutating_allows_readonly(self):
+        a = self._agent("plan")
+        self.assertIn("plan mode", a._gate("bash", {"action": "bash", "command": "ls"}))
+        self.assertIn("plan mode", a._gate("edit_file", {"action": "edit_file", "path": "x"}))
+        self.assertIsNone(a._gate("read_file", {"action": "read_file", "path": "x"}))
+        self.assertIsNone(a._gate("fleet_send", {"action": "fleet_send", "target": "list"}))
+
+    def test_manual_yes_no_always(self):
+        asked = []
+        a = self._agent("manual", approve=lambda d: asked.append(d) or "no")
+        self.assertIn("DECLINED", a._gate("bash", {"action": "bash", "command": "git push"}))
+        self.assertEqual(asked, ["bash git push"])
+        a = self._agent("manual", approve=lambda d: "yes")
+        self.assertIsNone(a._gate("edit_file", {"action": "edit_file", "path": "f.py"}))
+        import unittest.mock as mock
+        a = self._agent("manual", approve=lambda d: "always")
+        with mock.patch("forge.config.set_key") as sk:
+            self.assertIsNone(a._gate("bash", {"action": "bash", "command": "git status"}))
+        self.assertIn("bash:git", a.approvals)
+        sk.assert_called_once()
+        # now pre-approved: approve callback must not be consulted again
+        a.approve = lambda d: self.fail("already approved")
+        self.assertIsNone(a._gate("bash", {"action": "bash", "command": "git diff"}))
+
+    def test_approval_key_granularity(self):
+        a = self._agent("manual")
+        self.assertEqual(a._approval_key({"action": "bash", "command": "git push origin"}), "bash:git")
+        self.assertEqual(a._approval_key({"action": "edit_file", "path": "x"}), "edit_file")
+
+
+class TestLineEditor(unittest.TestCase):
+    def test_editing_basics(self):
+        from forge.tui import LineEditor
+        ed = LineEditor()
+        for c in "helo":
+            ed.handle(c)
+        ed.handle(b"\x1b[D")            # left
+        ed.handle("l")
+        self.assertEqual(ed.text(), "hello")
+        ed.handle(b"\x05")              # ctrl-e end
+        ed.handle(b"\x17")              # ctrl-w kills the word
+        self.assertEqual(ed.text(), "")
+
+    def test_history_navigation(self):
+        from forge.tui import LineEditor
+        ed = LineEditor(["first", "second"])
+        ed.handle(b"\x1b[A")
+        self.assertEqual(ed.text(), "second")
+        ed.handle(b"\x1b[A")
+        self.assertEqual(ed.text(), "first")
+        ed.handle(b"\x1b[B"); ed.handle(b"\x1b[B")
+        self.assertEqual(ed.text(), "")
+
+
 class TestRenderWrap(unittest.TestCase):
     """Reply text wraps at word boundaries with a 2-space margin."""
 

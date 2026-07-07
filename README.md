@@ -105,6 +105,18 @@ forge learnings [dir]       durable facts forge has learned about a repo
 forge --version
 ```
 
+### In the chat
+
+- **Modes** (`shift+tab` cycles, or `/mode auto|plan|manual`):
+  - **auto** — acts freely, no questions (the default)
+  - **plan** — read-only: investigates, then presents a plan for approval
+  - **manual** — asks before every mutating action: `y` yes once ·
+    `a` always (saved — that action type won't ask again) · `n` no
+- **Queue messages while it works** — just keep typing; Enter delivers your
+  message to the agent between steps (it steers mid-task). Anything not
+  absorbed becomes the next turn.
+- `Esc` clears the line, or stops the agent mid-run (twice force-returns).
+
 ## One fleet with Claude Code
 
 If Claude Code runs on the same machine with a fleet channel (`~/.claude/fleet`),

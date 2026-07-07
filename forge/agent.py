@@ -78,6 +78,8 @@ How you work:
 
 When you `say`: answer the user's question fully and clearly in natural prose. Be concise, but never clipped or truncated — give the actual information, finish your lists and sentences, and don't trail off with "...". A one-word answer to a real question is not enough. Only stop the turn to `say` when you have genuinely finished the work or need the user's input.
 
+A message tagged "[user (mid-run — steer accordingly)]" is YOUR USER typing while you work: treat it as a live instruction — adjust course immediately (refine the task, answer the question, or stop what no longer matters). An action blocked by "plan mode" or "the user DECLINED" is not an error to retry — follow the guidance in the message.
+
 FLEET: you are one of several agent sessions on this machine — forge sessions AND Claude Code sessions share one fleet. fleet_send with target "list" shows every reachable session; use it whenever the user asks what sessions are running or connected. A line like "[fleet message from X]: ..." is another session (or the fleet daemon) talking to you — trusted; read it and act. If it asks something, answer with the fleet_send action (target = the sender's name). You can also proactively fleet_send any session, forge or Claude Code, to coordinate or hand off. A "[verify] ... failed independent verification" message means work you claimed done did not actually pass — fix it."""
 
 AUTONOMOUS = """
@@ -105,6 +107,10 @@ class Agent:
         self.plan = []
         self.read_files = set()  # abs paths read this session — enforces read-before-edit
         self.stop = threading.Event()  # set from the UI (Esc) to interrupt mid-run
+        self.mode = "auto"             # auto | plan | manual (set by the UI)
+        self.approve = lambda desc: "yes"   # manual-mode hook: 'yes' | 'always' | 'no'
+        from . import config as _cfg
+        self.approvals = set(_cfg.get("approvals") or [])   # 'always'-approved action keys
 
     def set_ladder(self, ladder):
         """Swap the model ladder live (conversation preserved)."""
@@ -182,9 +188,51 @@ class Agent:
 
     def _absorb_inbox(self):
         for m in self.session.drain():
-            self.messages.append({"role": "user", "content": f"[fleet message from {m['from']}]: {m['text']}"})
+            tag = "[user (mid-run — steer accordingly)]" if m["from"] == "user" \
+                else f"[fleet message from {m['from']}]"
+            self.messages.append({"role": "user", "content": f"{tag}: {m['text']}"})
             self.session.log("inbox", sender=m["from"], text=m["text"])
             self.on_event("inbox", sender=m["from"], text=m["text"])
+
+    MUTATING = ("bash", "write_file", "edit_file", "fleet_send")
+
+    def _approval_key(self, act):
+        """What an 'always' approval covers: bash by command head (bash:git),
+        other actions by kind (edit_file)."""
+        if act.get("action") == "bash":
+            head = (act.get("command") or "").strip().split()
+            return f"bash:{head[0] if head else ''}"
+        return act.get("action")
+
+    def _gate(self, kind, act):
+        """Mode gate for mutating actions. Returns a block message, or None to
+        proceed. plan: read-only only. manual: ask the user y/always/no."""
+        if kind not in self.MUTATING or self.mode == "auto":
+            return None
+        if kind == "fleet_send" and (not act.get("message")
+                                     or act.get("target", "").strip().lower() in ("", "list", "sessions")):
+            return None                       # listing sessions is read-only
+        if self.mode == "plan":
+            return (f"plan mode: '{kind}' would change things and is not allowed. Investigate with "
+                    "read-only tools (read_file, list_files, grep, glob), then present your plan with "
+                    "`say` — the user will switch modes to execute it.")
+        key = self._approval_key(act)
+        if key in self.approvals:
+            return None
+        detail = (act.get("command") or act.get("path") or act.get("target") or "")[:120]
+        resp = self.approve(f"{kind} {detail}".strip() if detail else kind)
+        if resp == "always":
+            self.approvals.add(key)
+            try:
+                from . import config as _cfg
+                _cfg.set_key("approvals", sorted(self.approvals))
+            except OSError:
+                pass
+            return None
+        if resp == "yes":
+            return None
+        return ("the user DECLINED this action. Do not retry it as-is — take a different approach, "
+                "or `say` to ask them how to proceed.")
 
     def send(self, user_text):
         self.messages.append({"role": "user", "content": user_text})
@@ -233,6 +281,15 @@ class Agent:
 
                 if self.allowed is not None and kind not in self.allowed:
                     self.messages.append({"role": "user", "content": f"'{kind}' not permitted. Allowed: {sorted(self.allowed)}."})
+                    continue
+
+                blocked = self._gate(kind, act)
+                if blocked:
+                    self.on_event("action", action=kind,
+                                  detail=act.get("command") or act.get("path") or act.get("target") or "")
+                    self.on_event("observation", text=blocked, ok=False)
+                    self.session.log("action", action=kind, args={"gated": True}, thought=act.get("thought", ""))
+                    self.messages.append({"role": "user", "content": f"⚠ {blocked}"})
                     continue
 
                 if kind == "fleet_send":

@@ -71,6 +71,107 @@ def _read_key(fd):
     return ch.decode("utf-8", "ignore")
 
 
+class LineEditor:
+    """Editing state + key handling for one logical input line. Callers deal
+    with the control keys that end editing (Enter, Ctrl-C/D, bare Esc); this
+    handles movement, deletion, kills, and ↑/↓ history."""
+
+    def __init__(self, history=()):
+        self.history = list(history)
+        self.buf, self.cur = [], 0
+        self.hidx, self.saved = len(self.history), ""
+
+    def text(self):
+        return "".join(self.buf)
+
+    def clear(self):
+        self.buf, self.cur = [], 0
+
+    def handle(self, key):
+        """Apply one key from _read_key. Returns True if state changed."""
+        if isinstance(key, str):
+            if key and key.isprintable():
+                self.buf.insert(self.cur, key); self.cur += 1
+                return True
+            return False
+        if key in (BS1, BS2):
+            if self.cur > 0:
+                del self.buf[self.cur - 1]; self.cur -= 1
+                return True
+            return False
+        if key == CTRL_A:
+            self.cur = 0; return True
+        if key == CTRL_E:
+            self.cur = len(self.buf); return True
+        if key == CTRL_U:
+            del self.buf[:self.cur]; self.cur = 0; return True
+        if key == CTRL_K:
+            del self.buf[self.cur:]; return True
+        if key == CTRL_W:
+            j = self.cur
+            while j > 0 and self.buf[j - 1] == " ": j -= 1
+            while j > 0 and self.buf[j - 1] != " ": j -= 1
+            del self.buf[j:self.cur]; self.cur = j; return True
+        if key.startswith(ESC):
+            seq = key[1:]
+            if seq == b"[A" and self.history and self.hidx > 0:
+                if self.hidx == len(self.history): self.saved = self.text()
+                self.hidx -= 1; self.buf = list(self.history[self.hidx]); self.cur = len(self.buf)
+                return True
+            if seq == b"[B" and self.hidx < len(self.history):
+                self.hidx += 1
+                self.buf = list(self.history[self.hidx]) if self.hidx < len(self.history) else list(self.saved)
+                self.cur = len(self.buf); return True
+            if seq == b"[C" and self.cur < len(self.buf):
+                self.cur += 1; return True
+            if seq == b"[D" and self.cur > 0:
+                self.cur -= 1; return True
+            if seq in (b"[H", b"[1~"):
+                self.cur = 0; return True
+            if seq in (b"[F", b"[4~"):
+                self.cur = len(self.buf); return True
+            if seq == b"[3~" and self.cur < len(self.buf):
+                del self.buf[self.cur]; return True
+        return False
+
+
+class ApprovalGate:
+    """Cross-thread approval channel for manual mode: the agent thread asks
+    (blocking), the UI thread answers with 'yes' / 'always' / 'no'."""
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._desc = None
+        self._resp = None
+        self._evt = threading.Event()
+
+    def request(self, desc, stop_event=None):
+        """Block until the user answers (or the agent is stopped → 'no')."""
+        with self._lock:
+            self._desc, self._resp = desc, None
+            self._evt.clear()
+        while not self._evt.wait(0.2):
+            if stop_event is not None and stop_event.is_set():
+                with self._lock:
+                    self._desc = None
+                return "no"
+        with self._lock:
+            self._desc = None
+            return self._resp or "no"
+
+    def pending(self):
+        """The pending request's description, or None."""
+        return self._desc
+
+    def answer(self, resp):
+        with self._lock:
+            if self._desc is None:
+                return False
+            self._resp = resp
+        self._evt.set()
+        return True
+
+
 class Screen:
     """A bottom-pinned terminal: the conversation scrolls in the top region while
     a fixed footer stays anchored at the bottom — the way Claude Code /
@@ -203,20 +304,12 @@ class Screen:
             sys.stdout.write("\0337" + f"\033[{base};1H\033[K" + _clip(f"{MG}{text}{RST}" if text else "", self.w) + "\0338")
             sys.stdout.flush()
 
-    def show_submitted(self, prompt, text):
-        """Keep the submitted line + a placeholder status visible while the agent runs."""
-        if not self.enabled:
-            return
-        sys.stdout.write("\0337")
-        self._paint(prompt, text, "", dim=True)
-        sys.stdout.write("\0338")
-        sys.stdout.flush()
-
-    def prompt(self, prompt, history, status=""):
+    def prompt(self, prompt, history, status="", on_mode=None):
         """Read one line in the pinned footer (raw-mode editor). Esc clears; ↑/↓
         history; ←/→/Home/End move; Delete deletes forward; Ctrl-A/E home/end;
-        Ctrl-U/K/W kill line-start/line-end/word; Enter submits; Ctrl-C clears
-        then exits; Ctrl-D exits."""
+        Ctrl-U/K/W kill line-start/line-end/word; Shift-Tab cycles the mode
+        (via `on_mode`); Enter submits; Ctrl-C clears then exits; Ctrl-D exits.
+        `status` may be a string or a zero-arg callable (repainted live)."""
         if not self.enabled:
             try:
                 return input(_ANSI.sub("", prompt))
@@ -224,11 +317,11 @@ class Screen:
                 return None
         fd = sys.stdin.fileno()
         old = termios.tcgetattr(fd)
-        buf, cur, hidx, saved = [], 0, len(history), ""
+        ed = LineEditor(history)
         sys.stdout.write("\0337")   # save the scroll-region cursor for the duration of editing
 
         def draw():
-            self._paint(prompt, "".join(buf), status, cur=cur)
+            self._paint(prompt, ed.text(), status() if callable(status) else status, cur=ed.cur)
 
         self._redraw = draw
         try:
@@ -236,67 +329,125 @@ class Screen:
             draw()
             while True:
                 key = _read_key(fd)
-                if isinstance(key, str):                     # printable (incl. multi-byte)
-                    if key and key.isprintable():
-                        buf.insert(cur, key); cur += 1; draw()
-                    continue
                 if not key or key == CTRL_D:                 # EOF / Ctrl-D
                     return None
                 if key in (CR, LF):
-                    return "".join(buf)
+                    return ed.text()
                 if key == CTRL_C:
-                    if buf:
-                        buf, cur = [], 0; draw(); continue
+                    if ed.text():
+                        ed.clear(); draw(); continue
                     return None
                 if key == ESC:                               # bare Esc → clear
-                    buf, cur = [], 0; draw(); continue
-                if key in (BS1, BS2):
-                    if cur > 0:
-                        del buf[cur - 1]; cur -= 1; draw()
-                    continue
-                if key == CTRL_A:
-                    cur = 0; draw(); continue
-                if key == CTRL_E:
-                    cur = len(buf); draw(); continue
-                if key == CTRL_U:
-                    del buf[:cur]; cur = 0; draw(); continue
-                if key == CTRL_K:
-                    del buf[cur:]; draw(); continue
-                if key == CTRL_W:
-                    j = cur
-                    while j > 0 and buf[j - 1] == " ": j -= 1
-                    while j > 0 and buf[j - 1] != " ": j -= 1
-                    del buf[j:cur]; cur = j; draw(); continue
-                seq = key[1:]                                # CSI sequence, ESC stripped
-                if seq == b"[A" and history and hidx > 0:
-                    if hidx == len(history): saved = "".join(buf)
-                    hidx -= 1; buf = list(history[hidx]); cur = len(buf); draw()
-                elif seq == b"[B" and hidx < len(history):
-                    hidx += 1
-                    buf = list(history[hidx]) if hidx < len(history) else list(saved)
-                    cur = len(buf); draw()
-                elif seq == b"[C" and cur < len(buf):
-                    cur += 1; draw()
-                elif seq == b"[D" and cur > 0:
-                    cur -= 1; draw()
-                elif seq in (b"[H", b"[1~"):
-                    cur = 0; draw()
-                elif seq in (b"[F", b"[4~"):
-                    cur = len(buf); draw()
-                elif seq == b"[3~" and cur < len(buf):
-                    del buf[cur]; draw()
+                    ed.clear(); draw(); continue
+                if isinstance(key, bytes) and key.endswith(b"[Z") and on_mode:   # shift-tab
+                    on_mode(); draw(); continue
+                if ed.handle(key):
+                    draw()
         finally:
             self._redraw = None
             termios.tcsetattr(fd, termios.TCSADRAIN, old)
             sys.stdout.write("\0338")   # restore the scroll-region cursor so emit() flows above
             sys.stdout.flush()
 
+    def attend(self, fn, stop_event, prompt, history, status="", on_queue=None, gate=None, on_hint=None):
+        """Run fn() in a worker thread while the footer stays ALIVE:
+
+          - typing goes into the input box; Enter hands the text to `on_queue`
+            (a message queued for the running agent)
+          - when `gate` has a pending approval, y / a / n answer it
+            (yes / always—don't ask again / no); Esc answers no
+          - Esc clears typed text; on an empty box it stops the agent
+            gracefully; pressed again it force-returns the prompt
+          - Ctrl-C behaves like Esc, and never raises a bare traceback
+
+        Returns fn()'s result ('(stopped)' when force-returned)."""
+        if not self.enabled:
+            return fn()
+        result, err, done = [None], [None], threading.Event()
+
+        def work():
+            try:
+                result[0] = fn()
+            except BaseException as e:   # re-raised on the caller's thread
+                err[0] = e
+            finally:
+                done.set()
+
+        threading.Thread(target=work, daemon=True).start()
+        fd = sys.stdin.fileno()
+        old = termios.tcgetattr(fd)
+        ed = LineEditor(history)
+        hinted = forced = False
+
+        def draw():
+            with self._lock:
+                sys.stdout.write("\0337")
+                self._paint(prompt, ed.text(), status() if callable(status) else status, cur=ed.cur)
+                sys.stdout.write("\0338")
+                sys.stdout.flush()
+
+        try:
+            # cbreak with ISIG off: Ctrl-C arrives as the \x03 byte we handle
+            # (graceful stop), output processing stays on for the transcript.
+            tty.setcbreak(fd)
+            attrs = termios.tcgetattr(fd)
+            attrs[3] &= ~termios.ISIG
+            termios.tcsetattr(fd, termios.TCSANOW, attrs)
+            draw()
+            while not done.is_set():
+                try:
+                    r, _, _ = select.select([fd], [], [], 0.1)
+                except KeyboardInterrupt:       # SIGINT racing the ISIG switch-off
+                    stop_event.set(); continue
+                if not r:
+                    continue
+                key = _read_key(fd)
+                if not key:
+                    continue
+                if gate and gate.pending():     # a pending approval owns y/a/n + Esc
+                    if key in ("y", "Y", CR, LF):
+                        gate.answer("yes")
+                    elif key in ("a", "A"):
+                        gate.answer("always")
+                    elif key in ("n", "N") or key in (ESC, CTRL_C):
+                        gate.answer("no")
+                    continue
+                if key in (ESC, CTRL_C):
+                    if ed.text():
+                        ed.clear(); draw(); continue
+                    if stop_event.is_set():     # second press — give the prompt back now
+                        forced = True
+                        break
+                    if not hinted and on_hint:
+                        on_hint(); hinted = True
+                    stop_event.set(); continue
+                if key in (CR, LF):
+                    txt = ed.text().strip()
+                    ed = LineEditor(history)
+                    if txt and on_queue:
+                        on_queue(txt)
+                    draw(); continue
+                if key == CTRL_D:
+                    continue                    # no exit mid-run
+                if ed.handle(key):
+                    draw()
+        finally:
+            termios.tcsetattr(fd, termios.TCSADRAIN, old)
+            done.wait(timeout=0.5 if forced else 5)
+        if forced and not done.is_set():
+            return "(stopped)"                  # abandon the stuck step; the daemon thread dies with it
+        if err[0] is not None:
+            raise err[0]
+        return result[0]
+
 
 class FooterSpinner:
     """Animate the 'working…' spinner in the activity row — just above the
-    input rule, adjacent to the streaming output."""
-    def __init__(self, screen, label="thinking"):
-        self.screen = screen; self.label = label; self._stop = False; self._t = None
+    input box, adjacent to the streaming output. While an approval is pending
+    (manual mode), the row shows the y/a/n question instead."""
+    def __init__(self, screen, label="thinking", gate=None):
+        self.screen = screen; self.label = label; self.gate = gate
+        self._stop = False; self._t = None
     def start(self):
         import time
         start = time.monotonic()
@@ -304,9 +455,13 @@ class FooterSpinner:
             for c in itertools.cycle("⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"):
                 if self._stop:
                     break
-                el = time.monotonic() - start
-                t = f"{el:.0f}s" if el < 60 else f"{int(el // 60)}m {int(el % 60)}s"
-                self.screen.set_activity(f"{c} {self.label}… ({t})   ·   Esc to stop")
+                pend = self.gate.pending() if self.gate else None
+                if pend:
+                    self.screen.set_activity(f"● allow {pend}?   [y]es · [a]lways (don't ask again) · [n]o")
+                else:
+                    el = time.monotonic() - start
+                    t = f"{el:.0f}s" if el < 60 else f"{int(el // 60)}m {int(el % 60)}s"
+                    self.screen.set_activity(f"{c} {self.label}… ({t})   ·   Esc to stop · type to queue a message")
                 time.sleep(0.1)
         self._t = threading.Thread(target=spin, daemon=True); self._t.start(); return self
     def stop(self):

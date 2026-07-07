@@ -16,6 +16,7 @@ DEFAULTS = {
     "num_predict": 2048,
     "stuck_threshold": 7,
     "verbose": False,
+    "approvals": [],        # manual-mode 'always' approvals (e.g. "bash:git", "edit_file")
     "machine": {},                                  # detected hardware summary
 }
 
