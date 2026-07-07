@@ -292,6 +292,24 @@ class Agent:
                     self.messages.append({"role": "user", "content": f"⚠ {blocked}"})
                     continue
 
+                # small models sometimes name the path field differently, or drop it —
+                # normalize aliases, and reject pathless file actions with an exact fix
+                # (an empty path must never fall through: it used to resolve to the cwd
+                # and hit the read-before-edit guard with a nonsense message).
+                if kind in ("read_file", "write_file", "edit_file") and not act.get("path"):
+                    for alias in ("filename", "file", "filepath", "file_path", "name"):
+                        if isinstance(act.get(alias), str) and act[alias]:
+                            act["path"] = act[alias]
+                            break
+                if kind in ("read_file", "write_file", "edit_file") and not act.get("path"):
+                    obs = (f"'{kind}' is missing its `path` field. Re-send the SAME action as one JSON object "
+                           f'with the file path included, e.g. {{"action":"{kind}","path":"dir/file.go", ...}}.')
+                    self.on_event("action", action=kind, detail="(no path)")
+                    self.on_event("observation", text=obs, ok=False)
+                    self.session.log("action", action=kind, args={"invalid": "missing path"}, thought=act.get("thought", ""))
+                    self.messages.append({"role": "user", "content": f"⚠ {obs}"})
+                    continue
+
                 if kind == "fleet_send":
                     from . import fleet
                     target, msg = act.get("target", ""), act.get("message", "")
@@ -324,12 +342,14 @@ class Agent:
                 # hasn't actually read — this forces it to work from real content, not a
                 # guess (the exact failure mode that made a weak model hallucinate code).
                 if kind in ("edit_file", "write_file"):
-                    fp = os.path.realpath(os.path.join(self.session.cwd, act.get("path", "")))
-                    if os.path.exists(fp) and fp not in self.read_files:
+                    fp = os.path.realpath(os.path.join(self.session.cwd, act["path"]))
+                    if os.path.isfile(fp) and fp not in self.read_files:
                         obs = (f"Blocked: read {act.get('path')} before editing or overwriting it — "
                                "work from its actual current content, not memory. Use read_file first.")
                         self.on_event("action", action=kind, detail=act.get("path", ""))
                         self.on_event("observation", text=obs, ok=False)
+                        self.session.log("action", action=kind, args={"blocked": "read-before-edit", "path": act.get("path", "")},
+                                         thought=act.get("thought", ""))
                         self.messages.append({"role": "user", "content": f"⚠ {obs}"})
                         continue
 

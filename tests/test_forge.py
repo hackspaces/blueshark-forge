@@ -498,6 +498,58 @@ class TestFindSession(unittest.TestCase):
             self.assertEqual([h["sid"] for h in hits], ["claude-ymp"])
 
 
+class TestPathlessFileActions(unittest.TestCase):
+    """Live failure: qwen3-coder emitted write_file without `path` — the empty
+    path resolved to the cwd and the read-before-edit guard blocked every try
+    with a nonsense message. Aliases must be honored; truly pathless actions
+    must get an instructive error, not a confusing block."""
+
+    class Scripted:
+        name = "s"
+        def __init__(self, replies):
+            self.replies = list(replies)
+        def chat(self, m, schema=None, temperature=0.0):
+            return self.replies.pop(0)
+
+    def test_filename_alias_is_honored(self):
+        import json as _json
+        d = tempfile.mkdtemp()
+        b = self.Scripted([
+            _json.dumps({"thought": "t", "action": "write_file", "filename": "go/http_server.go",
+                         "content": "package main\n"}),
+            _json.dumps({"thought": "t", "action": "say", "message": "done"}),
+        ])
+        Agent(b, sm.EphemeralSession(d, "s"), max_steps=5).send("make it")
+        with open(os.path.join(d, "go/http_server.go")) as f:
+            self.assertEqual(f.read(), "package main\n")
+
+    def test_missing_path_gets_instructive_error(self):
+        import json as _json
+        d = tempfile.mkdtemp()
+        events = []
+        b = self.Scripted([
+            _json.dumps({"thought": "t", "action": "write_file", "content": "package main\n"}),
+            _json.dumps({"thought": "t", "action": "say", "message": "ok"}),
+        ])
+        a = Agent(b, sm.EphemeralSession(d, "s"), max_steps=5,
+                  on_event=lambda kind, **k: events.append((kind, k)))
+        a.send("make it")
+        obs = [k.get("text", "") for kind, k in events if kind == "observation"]
+        self.assertTrue(any("missing its `path`" in t for t in obs), obs)
+        self.assertFalse(any("Blocked: read" in t for t in obs), obs)   # the old nonsense block
+
+    def test_dir_path_does_not_trigger_read_guard(self):
+        import json as _json
+        d = tempfile.mkdtemp()
+        os.makedirs(os.path.join(d, "pkg"))
+        b = self.Scripted([
+            _json.dumps({"thought": "t", "action": "write_file", "path": "pkg/x.go", "content": "x"}),
+            _json.dumps({"thought": "t", "action": "say", "message": "ok"}),
+        ])
+        Agent(b, sm.EphemeralSession(d, "s"), max_steps=5).send("go")
+        self.assertTrue(os.path.exists(os.path.join(d, "pkg/x.go")))
+
+
 class TestApprovalGate(unittest.TestCase):
     def test_request_answer_across_threads(self):
         import threading
