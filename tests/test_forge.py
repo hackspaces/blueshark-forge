@@ -2093,20 +2093,23 @@ class TestStructuralCompaction(unittest.TestCase):
         self.assertNotIn("hard-truncated", a.messages[0]["content"])
 
     def test_fill_recomputed_after_structural_pass(self):
-        # judge correction: _fill returns the STALE last_prompt_tokens, so reclaimed
-        # space is invisible until the next model call and the 70% gate misfires.
+        # judge correction: before the reclaimed flag, _fill returned the STALE
+        # last_prompt_tokens, so reclaimed space was invisible until the next model
+        # call and the 70% gate misfired. Under the P4.3 ledger, _fill is the sum of
+        # per-message estimates (len//4 * tok_ratio); last_prompt_tokens is only a
+        # cross-check floor, and the reclaimed flag drops it so the fresh ledger shows.
         d = tempfile.mkdtemp()
-        a = self._agent(d, window=4000, tokens=3900)      # ~97% by the stale token count
+        a = self._agent(d, window=4000, tokens=3900)      # ~97% by the observed floor
         big = "x = 1\n" * 600
         echo = {"role": "assistant",
                 "content": json.dumps({"action": "write_file", "path": "f.py", "content": big})}
         a.messages.append(echo)
         a.meta.append({"kind": "write_echo", "action": "write_file", "path": os.path.join(d, "f.py"), "step": 1})
         self._pad(a)
-        self.assertEqual(a._fill()[0], 3900)              # BEFORE: trusts the stale count
+        self.assertEqual(a._fill()[0], 3900)              # BEFORE: the observed count is the floor
         a._structural_compact(step=12)
-        fresh = sum(len(m["content"]) for m in a.messages) // 4
-        self.assertEqual(a._fill()[0], fresh)             # AFTER: fresh char estimate
+        fresh = sum(len(m["content"]) // 4 for m in a.messages)   # per-message ledger, tok_ratio=1.0
+        self.assertEqual(a._fill()[0], fresh)             # AFTER: fresh ledger (reclaimed flag drops the stale floor)
         self.assertLess(a._fill()[0], 3900)               # reclaimed space is now visible
 
     def test_below_trigger_is_a_noop(self):
@@ -2167,6 +2170,162 @@ class TestStructuralCompaction(unittest.TestCase):
         kinds = [r.get("kind") for r in a.meta]
         self.assertIn("write_echo", kinds)                  # the write echo was tagged
         self.assertTrue(any(r.get("kind") == "obs" and r.get("action") == "read_file" for r in a.meta))
+
+
+class TestTokenLedger(unittest.TestCase):
+    """P4.3 — the harness token ledger fixes WHAT the compaction gate measures
+    (a warm KV-prefix cache makes Ollama's prompt_eval_count report only the newly
+    evaluated suffix, collapsing fill toward zero) and maybe_compact fixes WHEN it
+    fires (proactive 0.55 at the turn boundary; the in-turn gate stays 0.70)."""
+
+    def _agent(self, d, window=8000, tokens=0):
+        return Agent(_FillBackend(window=window, tokens=tokens), _RecSession(d))
+
+    def test_fill_is_sum_of_msg_tokens(self):
+        d = tempfile.mkdtemp()
+        a = self._agent(d)
+        a.messages.append({"role": "user", "content": "a" * 4000})
+        expected = sum(len(m["content"]) // 4 for m in a.messages)   # tok_ratio=1.0, no plan
+        self.assertEqual(a._fill()[0], expected)
+        self.assertEqual(len(a.msg_tokens), len(a.messages))          # index-aligned per-message ledger
+
+    def test_msg_tokens_tracks_appends_and_the_plan_pin(self):
+        d = tempfile.mkdtemp()
+        a = self._agent(d)
+        base = a._fill()[0]                                           # system prompt only
+        a.messages.append({"role": "user", "content": "z" * 400})     # +100 tokens
+        self.assertEqual(a._fill()[0], base + 100)
+        self.assertEqual(len(a.msg_tokens), len(a.messages))
+        # the per-step plan pin is appended OUTSIDE self.messages but MUST be counted
+        a.plan = ["find the bug", "write the failing test", "fix it"]
+        pin_content = "[current plan]\n" + "\n".join(a.plan)
+        self.assertEqual(a._fill()[0], base + 100 + len(pin_content) // 4)
+
+    def test_warm_cache_suffix_does_not_collapse_fill(self):
+        # the correctness bug: with keep_alive warm, prompt_eval_count reports only
+        # the newly-evaluated SUFFIX, so the observed count collapses toward zero and
+        # the 0.70 gate never fires. The ledger keeps fill honest.
+        d = tempfile.mkdtemp()
+        a = self._agent(d)
+        for _ in range(10):
+            a.messages.append({"role": "user", "content": "Observation:\n" + "y" * 2000})
+        ledger = sum(len(m["content"]) // 4 for m in a.messages)
+        self.assertGreater(ledger, 3000)
+        a.backend.last_prompt_tokens = 40                            # warm-cache suffix, near-zero
+        self.assertEqual(a._fill()[0], ledger)                       # ledger wins, not the 40-token suffix
+        self.assertGreater(a._fill()[0], 40)
+
+    def test_observed_count_is_an_upward_floor_only(self):
+        # last_prompt_tokens is a cross-check floor: it can raise fill (a fuller,
+        # uncached count) but never shrink it below the ledger.
+        d = tempfile.mkdtemp()
+        a = self._agent(d)
+        a.messages.append({"role": "user", "content": "q" * 400})
+        ledger = sum(len(m["content"]) // 4 for m in a.messages)
+        a.backend.last_prompt_tokens = ledger + 5000                 # a bigger uncached count
+        self.assertEqual(a._fill()[0], ledger + 5000)                # floor raises fill
+
+    def test_calibration_rebases_ratio_on_uncached_call(self):
+        d = tempfile.mkdtemp()
+        a = self._agent(d)
+        self.assertTrue(a._calibrate_pending)                        # armed at construction
+        self.assertEqual(a.tok_ratio, 1.0)
+        prompt = [{"role": "user", "content": "z" * 400}]            # 100 char-tokens
+        a.backend.last_prompt_tokens = 150                           # true full-prompt count
+        a._recalibrate(prompt)
+        self.assertAlmostEqual(a.tok_ratio, 1.5)                     # 150 / 100
+        self.assertFalse(a._calibrate_pending)                       # consumed
+
+    def test_calibration_cross_check_is_up_only(self):
+        # after the first calibration, a warm-cache (suffix-only) count must NOT
+        # shrink the ratio; only a bigger observed ratio raises it.
+        d = tempfile.mkdtemp()
+        a = self._agent(d)
+        a.tok_ratio = 1.5
+        a._calibrate_pending = False
+        prompt = [{"role": "user", "content": "z" * 400}]            # 100 char-tokens
+        a.backend.last_prompt_tokens = 30                            # suffix only → ratio 0.3
+        a._recalibrate(prompt)
+        self.assertEqual(a.tok_ratio, 1.5)                           # NOT shrunk
+        a.backend.last_prompt_tokens = 300                           # fuller → ratio 3.0
+        a._recalibrate(prompt)
+        self.assertAlmostEqual(a.tok_ratio, 3.0)                     # raised
+
+    def test_compaction_rewrite_rearms_calibration(self):
+        # a compaction rewrite breaks the KV prefix → the next generate is uncached,
+        # so _compact re-arms calibration and a fresh full-prompt count rebases.
+        d = tempfile.mkdtemp()
+        a = Agent(_FillBackend(window=1000, tokens=900), _RecSession(d))
+        for i in range(20):
+            a.messages.append({"role": "user" if i % 2 else "assistant", "content": f"m{i}"})
+        a._calibrate_pending = False
+        a._compact()                                                 # system prompt alone > 70% → compacts
+        self.assertTrue(any(k == "compact" for k, _ in a.session.logs))
+        self.assertTrue(a._calibrate_pending)                        # re-armed by the rewrite
+        prompt = [{"role": "user", "content": "q" * 800}]            # 200 char-tokens
+        a.backend.last_prompt_tokens = 400
+        a._recalibrate(prompt)
+        self.assertAlmostEqual(a.tok_ratio, 2.0)                     # 400 / 200
+
+    def test_maybe_compact_triggers_at_55_but_in_turn_gate_stays_70(self):
+        d = tempfile.mkdtemp()
+        a = Agent(_FillBackend(window=8000, tokens=0), _RecSession(d))
+        for i in range(20):                                          # enough middle for len(middle) >= 4
+            a.messages.append({"role": "user", "content": "Observation:\n" + "y" * 800})
+            a.meta.append({"kind": "obs", "action": "bash", "step": i, "ok": True})
+        used, window = a._fill()
+        self.assertGreaterEqual(used, 0.55 * window)                 # over 55%
+        self.assertLess(used, 0.70 * window)                         # but under 70%
+        before = len(a.messages)
+        a._compact()                                                 # in-turn gate is 0.70 → no-op
+        self.assertEqual(len(a.messages), before)
+        self.assertFalse(any(k == "compact" for k, _ in a.session.logs))
+        a.maybe_compact(0.55)                                        # turn-end gate is 0.55 → compacts
+        self.assertLess(len(a.messages), before)
+        self.assertTrue(any(k == "compact" for k, _ in a.session.logs))
+        self.assertTrue(any("summarized" in m["content"] for m in a.messages))
+
+    def test_maybe_compact_below_threshold_is_a_noop(self):
+        d = tempfile.mkdtemp()
+        a = Agent(_FillBackend(window=8000, tokens=0), _RecSession(d))
+        a.messages.append({"role": "user", "content": "small"})
+        before = list(a.messages)
+        a.maybe_compact(0.55)
+        self.assertEqual(a.messages, before)                        # nothing to reclaim below threshold
+        self.assertFalse(any(k == "compact" for k, _ in a.session.logs))
+
+    def test_maybe_compact_off_when_lever_disabled(self):
+        d = tempfile.mkdtemp()
+        a = Agent(_FillBackend(window=8000, tokens=0), _RecSession(d), levers=frozenset())
+        for i in range(20):
+            a.messages.append({"role": "user", "content": "Observation:\n" + "y" * 800})
+            a.meta.append({"kind": "obs", "action": "bash", "step": i, "ok": True})
+        before = len(a.messages)
+        a.maybe_compact(0.55)                                        # compaction lever off → no-op
+        self.assertEqual(len(a.messages), before)
+
+    def test_prefix_audit_off_by_default_and_warns_under_debug(self):
+        d = tempfile.mkdtemp()
+        a = self._agent(d)
+        a._audit_prefix(step=1)                                     # FORGE_DEBUG unset → total no-op
+        self.assertIsNone(a._prefix_hash)
+        self.assertFalse(any(k == "prefix_mutation" for k, _ in a.session.logs))
+        old = os.environ.get("FORGE_DEBUG")
+        os.environ["FORGE_DEBUG"] = "1"
+        try:
+            a._audit_prefix(step=1)                                 # records the baseline head hash
+            self.assertIsNotNone(a._prefix_hash)
+            a.messages.append({"role": "user", "content": "appended after the head"})
+            a._audit_prefix(step=2)                                 # head unchanged → no warning
+            self.assertFalse(any(k == "prefix_mutation" for k, _ in a.session.logs))
+            a.messages[0] = {"role": "system", "content": "MUTATED HEAD"}
+            a._audit_prefix(step=3)                                 # head byte-changed → warn
+            self.assertTrue(any(k == "prefix_mutation" for k, _ in a.session.logs))
+        finally:
+            if old is None:
+                os.environ.pop("FORGE_DEBUG", None)
+            else:
+                os.environ["FORGE_DEBUG"] = old
 
 
 class TestTraceCmd(unittest.TestCase):

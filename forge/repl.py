@@ -445,3 +445,11 @@ def _run_loop(screen, ui, agent, session, status_line, gate, models, ctx, ptype)
             screen.emit(f"{DIM}  ⊘ stopped. what next?{RST}\n")
         elif reply is not None and not ui.said:        # fallback (step limit / malformed)
             screen.emit(f"\n{ui.wrap_block(reply)}\n")
+        # P4.3: proactive turn-boundary compaction. The turn is done and the user is
+        # reading the reply, so invalidating the warm KV prefix costs nothing here —
+        # compact EARLY (0.55) so the next turn starts with headroom, leaving the
+        # in-turn 0.70 gate + floor as emergency-only.
+        try:
+            agent.maybe_compact(0.55)
+        except Exception:
+            pass

@@ -200,6 +200,19 @@ class Agent:
         # structural or LLM compaction of self.messages.
         self.meta = [{"kind": "head"} for _ in self.messages]
         self._reclaimed = False        # a structural/floor pass reclaimed window THIS step
+        # P4.3 harness TOKEN LEDGER. msg_tokens[] parallels self.messages; each
+        # estimate is len(content)//4 * tok_ratio. tok_ratio is calibrated against
+        # the backend's observed prompt_eval_count on the UNCACHED calls (first call
+        # after construction, and the call after every compaction rewrite) where the
+        # KV prefix is cold, so the reported count IS the true full-prompt count and
+        # can rebase the ledger. On forge's warm-cache append-only pattern Ollama's
+        # prompt_eval_count reports only the newly-evaluated SUFFIX (keep_alive keeps
+        # the prefix cache warm), collapsing the observed count toward zero — so _fill
+        # trusts this ledger, never a shrinking suffix count.
+        self.tok_ratio = 1.0
+        self.msg_tokens = []
+        self._calibrate_pending = True   # the first real generate is uncached → rebase then
+        self._prefix_hash = None         # FORGE_DEBUG prefix-mutation audit (off by default)
         from . import config as _cfg
         self.approvals = set(_cfg.get("approvals") or [])   # 'always'-approved action keys
         # P3.1 meta record: one machine-readable header per session so a dead
@@ -218,20 +231,103 @@ class Agent:
 
     # ---- context management ----
     def _fill(self):
-        """(tokens_used, window) for the current model. Uses the EXACT prompt-token
-        count from the last response and the model's REAL context window when the
-        backend reports them; falls back to a char estimate before the first call."""
+        """(tokens_used, window) for the current model, from the harness TOKEN
+        LEDGER — the sum of per-message estimates (len//4 * tok_ratio) PLUS the
+        per-step plan pin (appended outside self.messages). The ledger is
+        authoritative because Ollama's warm KV-prefix cache makes prompt_eval_count
+        report only the newly-evaluated SUFFIX on forge's append-only pattern, so
+        the observed count collapses toward zero and the 0.70 gate never fires
+        (Ollama then silently truncates at num_ctx). last_prompt_tokens is used only
+        as a cross-check FLOOR that can never push fill DOWN (max), plus to
+        recalibrate tok_ratio UP on an uncached call — never to shrink the estimate."""
         window = self.backend.effective_ctx() if hasattr(self.backend, "effective_ctx") else backends.ctx_cap()
+        est = self._ledger_tokens()
         if self._reclaimed:
-            # P4.2: a structural/floor pass reclaimed window THIS step, but
-            # last_prompt_tokens is still the STALE count from the previous response —
-            # so the reclaimed space is invisible and the 55%/70% gates misfire.
-            # Recompute the char estimate so the LLM _compact decides on the real size.
-            return sum(len(m["content"]) for m in self.messages) // 4, window
-        used = getattr(self.backend, "last_prompt_tokens", 0)
-        if not used:  # no real count yet (first turn) — estimate from chars
-            used = sum(len(m["content"]) for m in self.messages) // 4
-        return used, window
+            # P4.2/P4.3: a structural/floor/turn-end pass reclaimed window THIS step;
+            # last_prompt_tokens is still the STALE (pre-pass) count, so trust only
+            # the fresh ledger (which already reflects the smaller messages).
+            return int(est), window
+        pe = getattr(self.backend, "last_prompt_tokens", 0)
+        return int(max(est, pe)), window
+
+    def _ledger_tokens(self):
+        """Rebuild the per-message token ledger (index-aligned with self.messages)
+        and return its sum plus the per-step plan pin estimate. Each estimate is
+        len(content)//4 * tok_ratio; the plan pin is counted though it is appended
+        OUTSIDE self.messages (prompt = self.messages + [pin])."""
+        self.msg_tokens = [len(m["content"]) // 4 * self.tok_ratio for m in self.messages]
+        total = sum(self.msg_tokens)
+        if self._lv("plan_pin"):
+            pin = self._pin_plan()
+            if pin:
+                total += len(pin["content"]) // 4 * self.tok_ratio
+        return total
+
+    def _recalibrate(self, prompt):
+        """Rebase tok_ratio against the backend's observed prompt_eval_count for the
+        prompt just sent. On an UNCACHED call (flagged: first call after construction,
+        and the call after a compaction rewrite) the reported count is the true
+        full-prompt count → rebase the ledger. On every other call it is an up-only
+        cross-check: a warm-cache count reports only the suffix (SMALLER than our
+        estimate), so it can never corrupt the ratio downward, only raise it when we
+        under-estimate the model's tokenizer."""
+        pe = getattr(self.backend, "last_prompt_tokens", 0)
+        if not pe:
+            return
+        est_chars = sum(len(m["content"]) for m in prompt) // 4
+        if est_chars <= 0:
+            return
+        ratio = pe / est_chars
+        if self._calibrate_pending:
+            self.tok_ratio = ratio
+            self._calibrate_pending = False
+        elif ratio > self.tok_ratio:
+            self.tok_ratio = ratio
+
+    def _audit_prefix(self, step, n_stable=0):
+        """FORGE_DEBUG audit (OFF by default): the KV-cache-warm prefix — the head
+        (system + workspace), which is never compacted away — must be byte-stable
+        between steps, or the warm-cache assumption behind the token ledger and
+        turn-boundary scheduling is void. Hash it each step and warn (transcript +
+        stderr) on any unexpected mutation."""
+        if not os.environ.get("FORGE_DEBUG"):
+            return
+        end = self.head_len + n_stable
+        blob = "".join(m.get("content", "") for m in self.messages[:end])
+        h = hashlib.md5(blob.encode("utf-8", "replace")).hexdigest()
+        if self._prefix_hash is not None and h != self._prefix_hash:
+            self.session.log("prefix_mutation", v=TRACE_V, step=step,
+                             prev=self._prefix_hash, now=h)
+            try:
+                import sys as _sys
+                print(f"[FORGE_DEBUG] prefix mutated at step {step} — the KV-cache "
+                      "prefix (head) is not byte-stable", file=_sys.stderr)
+            except Exception:
+                pass
+        self._prefix_hash = h
+
+    def maybe_compact(self, threshold=0.55):
+        """P4.3 — proactive TURN-BOUNDARY compaction, called by the REPL after a turn
+        completes (while the user reads the reply). A warm KV-prefix is invalidated
+        for FREE at a turn boundary, so we compact EARLY — at a lower threshold than
+        the in-turn 0.70 gate — to start the next turn with headroom. Runs the same
+        structural + LLM + floor passes; the in-turn _compact (0.70) and the floor
+        stay emergency-only. Safe to call with no pressure: each pass is a no-op below
+        its threshold."""
+        if not self._lv("compaction"):
+            return
+        self.ledger.refresh()
+        # step=0: at a turn boundary the within-turn "failed obs older than N steps"
+        # recency is moot; the read-supersede and write-echo rules (step-independent)
+        # do the reclaiming. The most recent 8 messages are protected regardless.
+        self._structural_compact(step=0, threshold=threshold)
+        self._compact(threshold=threshold)
+        self._floor()
+        # A turn-boundary compaction already has its own durable `compact` log record;
+        # clear the transient step-trace flag so it isn't mis-attributed to the NEXT
+        # turn's first step. `_reclaimed` is left set so that turn's first _fill reads
+        # the fresh (post-compaction) ledger instead of the previous turn's stale count.
+        self._compacted = False
 
     def _obs_budget(self):
         """One char budget for a single observation, derived from the model's REAL
@@ -242,13 +338,14 @@ class Agent:
         window = self.backend.effective_ctx() if hasattr(self.backend, "effective_ctx") else backends.ctx_cap()
         return min(12000, int(window * 4 * 0.08))
 
-    def _compact(self):
-        """At ~70% of the model's real window, SUMMARIZE the older middle turns
-        into a dense state note (instead of dropping them). System + workspace
-        stay pinned, recent turns stay verbatim, the plan is pinned separately —
-        nothing important is lost, the context just gets denser."""
+    def _compact(self, threshold=0.70):
+        """At `threshold` of the model's real window (0.70 in-turn; 0.55 at the
+        turn boundary via maybe_compact), SUMMARIZE the older middle turns into a
+        dense state note (instead of dropping them). System + workspace stay pinned,
+        recent turns stay verbatim, the plan is pinned separately — nothing important
+        is lost, the context just gets denser."""
         used, window = self._fill()
-        if used < 0.70 * window:
+        if used < threshold * window:
             return
         self._sync_meta()                   # P4.2: meta must be aligned before we slice it
         head = self.messages[:self.head_len]
@@ -265,6 +362,9 @@ class Agent:
         # reports the fresh (smaller) size instead of the stale token count.
         self.meta = self.meta[:self.head_len] + [{"kind": "summary"}] + self.meta[-12:]
         self._reclaimed = True
+        # P4.3: a compaction rewrite breaks the KV prefix, so the NEXT generate is an
+        # uncached call — re-arm calibration so prompt_eval_count can rebase the ledger.
+        self._calibrate_pending = True
         # P4.1: any read/write observation that fell out of the retained window is
         # no longer in context — evict it so read-before-edit mechanically re-forces
         # a read. Then tell the model which files it DOES still hold.
@@ -351,7 +451,7 @@ class Agent:
         return (f"  ⚠ earlier failed action (step {step}) — first error line kept:\n"
                 f"Observation:\n{first}\n[error tail elided; re-run the action to see the full failure]")
 
-    def _structural_compact(self, step):
+    def _structural_compact(self, step, threshold=STRUCT_FILL):
         """P4.2 — a zero-model-call deterministic compaction pass, run each step
         BEFORE the LLM _compact. It reclaims mechanically-redundant window losslessly
         (every stub is recoverable from disk / the ledger): (a) an older read_file
@@ -362,7 +462,7 @@ class Agent:
         settled middle (never the head, never the most recent 8 messages) and marks
         the window reclaimed so the 70% LLM gate decides on the fresh size."""
         used, window = self._fill()
-        if used < STRUCT_FILL * window or len(self.messages) <= self.head_len + 8:
+        if used < threshold * window or len(self.messages) <= self.head_len + 8:
             return
         self._sync_meta()
         # The ledger's CURRENT per-path observation binding: a read obs message whose
@@ -655,8 +755,9 @@ class Agent:
                     self.ledger.refresh()
                     if self._lv("compaction"):
                         self._structural_compact(step)   # P4.2: deterministic pass first (zero model calls)
-                        self._compact()                  # then the LLM summarizer at 70%
+                        self._compact()                  # then the LLM summarizer at 70% (emergency in-turn gate)
                         self._floor()                    # then the hard floor: escape a full-window wedge
+                    self._audit_prefix(step)             # P4.3: FORGE_DEBUG prefix-mutation audit (no-op by default)
                     pin = self._pin_plan() if self._lv("plan_pin") else None
                     prompt = self.messages + ([pin] if pin else [])
                     self.on_event("thinking")
@@ -664,6 +765,10 @@ class Agent:
                     # P4.2: the real prompt-token count now reflects any compaction —
                     # stop overriding _fill with the char estimate.
                     self._reclaimed = False
+                    # P4.3: rebase the token ledger against the observed prompt_eval_count
+                    # for the EXACT prompt just sent (messages + pin) — an uncached call
+                    # rebases tok_ratio; a warm-cache one is an up-only cross-check.
+                    self._recalibrate(prompt)
                     # P3.3 flight recorder: persist the RAW model output of every
                     # step — including the malformed ones the parse below discards
                     # (the valuable ones). prompt_tokens is the exact count for THIS
