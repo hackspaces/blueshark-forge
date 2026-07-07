@@ -49,6 +49,56 @@ def ctx_cap():
 NUM_CTX = ctx_cap()  # back-compat static alias for the char-estimate fallback
 
 
+# --- Pure protocol parsers -------------------------------------------------
+# The two stream dialects are parsed by these module-level generators, each
+# yielding (text_chunk, usage_or_none). Keeping them pure (they take an iterable
+# of lines, never a socket) is the test seam: fixtures replace live servers, and
+# a parser that MUST surface usage makes the dropped-usage-frame bug (below)
+# impossible to reintroduce.
+
+def iter_sse(lines):
+    """OpenAI-dialect Server-Sent Events. Yields (delta_text, usage_or_none).
+    The final usage frame has choices == [] — surface it as ('', usage) instead
+    of letting it fall into the choices[0] IndexError and get dropped (which is
+    why last_prompt_tokens stayed 0 forever on streaming non-Ollama engines)."""
+    for line in lines:
+        if isinstance(line, (bytes, bytearray)):
+            line = line.decode("utf-8", "replace")
+        line = line.strip()
+        if not line.startswith("data:"):
+            continue
+        data = line[5:].strip()
+        if data == "[DONE]":
+            return
+        try:
+            obj = json.loads(data)
+            if obj.get("usage") and not obj.get("choices"):
+                yield "", obj["usage"]
+            else:
+                yield obj["choices"][0]["delta"].get("content", ""), None
+        except (json.JSONDecodeError, KeyError, IndexError):
+            continue
+
+
+def iter_ndjson(lines):
+    """Ollama-dialect newline-delimited JSON. Yields (chunk_text, usage_or_none);
+    on the done frame yields ('', {'prompt_eval_count': ...}) then stops."""
+    for line in lines:
+        if isinstance(line, (bytes, bytearray)):
+            line = line.decode("utf-8", "replace")
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            obj = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        yield obj.get("message", {}).get("content", ""), None
+        if obj.get("done"):
+            yield "", {"prompt_eval_count": obj.get("prompt_eval_count")}
+            return
+
+
 class OllamaBackend:
     def __init__(self, model, url=None):
         self.model = model
@@ -117,17 +167,11 @@ class OllamaBackend:
 
     def stream(self, messages, schema=None, temperature=0.0):
         with self._open(self._req(self._body(messages, schema, temperature, True))) as r:
-            for line in r:
-                if not line.strip():
-                    continue
-                obj = json.loads(line)
-                chunk = obj.get("message", {}).get("content", "")
+            for chunk, usage in iter_ndjson(r):
                 if chunk:
                     yield chunk
-                if obj.get("done"):
-                    if obj.get("prompt_eval_count"):
-                        self.last_prompt_tokens = obj["prompt_eval_count"]
-                    break
+                if usage and usage.get("prompt_eval_count"):
+                    self.last_prompt_tokens = usage["prompt_eval_count"]
 
     def warm(self):
         """Load the model into memory now, so the first real turn is fast."""
@@ -193,19 +237,11 @@ class OpenAICompatBackend:
 
     def stream(self, messages, schema=None, temperature=0.0):
         with self._open(self._req(self._body(messages, schema, temperature, True))) as r:
-            for line in r:
-                line = line.decode("utf-8", "replace").strip()
-                if not line.startswith("data:"):
-                    continue
-                data = line[5:].strip()
-                if data == "[DONE]":
-                    break
-                try:
-                    delta = json.loads(data)["choices"][0]["delta"].get("content", "")
-                except (json.JSONDecodeError, KeyError, IndexError):
-                    continue
-                if delta:
-                    yield delta
+            for chunk, usage in iter_sse(r):
+                if chunk:
+                    yield chunk
+                if usage and usage.get("prompt_tokens"):
+                    self.last_prompt_tokens = usage["prompt_tokens"]
 
     def warm(self):
         pass

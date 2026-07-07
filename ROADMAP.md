@@ -128,7 +128,7 @@ Small, independent fixes that stop the harness silently lying to the model or to
 
 ### P1.4 · Extract pure protocol parsers + backend conformance tests (mechanically fixes OpenAI token accounting)
 
-**Status: open · Impact 4/5 · Effort S · Depends on: none**
+**Status: done · Impact 4/5 · Effort S · Depends on: none · note: extracted iter_sse/iter_ndjson pure generators (each yields (text, usage_or_none)); OpenAI SSE now surfaces the choices==[] usage frame so last_prompt_tokens is captured on streaming — the fix. Both stream() methods are thin loops; iter_ndjson also skips malformed lines. New tests/test_backends.py (17 tests) covers parsers, stream integration, _body envelopes, ctx_cap precedence, ForgeError translation. Full suite green (123).**
 
 **What.** Pull NDJSON and SSE stream parsing out of the backend classes into pure module-level generators — iter_ndjson(lines) and iter_sse(lines), each yielding (text_chunk, usage_or_none) — unit-tested against fixture byte streams, including the OpenAI final usage frame (choices == []) the current parser silently discards. Add the missing pure-function tests: _body schema envelopes for both backends, ctx_cap precedence, ForgeError translation.
 
