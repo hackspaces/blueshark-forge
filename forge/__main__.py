@@ -207,6 +207,46 @@ def cmd_learnings(args):
         print(f"• {f}")
 
 
+def cmd_trace(args):
+    """Pretty-print a session's structured step trace (P3.1): the meta header plus
+    one row per loop iteration. `sid` defaults to 'last' — the most recently
+    modified transcript in ~/.forge/sessions."""
+    import glob
+    from . import fleet
+    sid = args.sid
+    if sid == "last":
+        files = glob.glob(os.path.join(sessmod.SESSIONS, "*.jsonl"))
+        if not files:
+            print("no sessions found."); return
+        sid = os.path.basename(max(files, key=os.path.getmtime))[:-len(".jsonl")]
+    recs = fleet._records(sid, tail_bytes=10 ** 9)   # whole file — the meta record is at the top
+    if not recs:
+        print(f"no records for session {sid}."); return
+    meta = next((r for r in recs if r.get("type") == "meta"), None)
+    if meta:
+        print(f"forge {meta.get('forge', '?')}  ·  model {meta.get('model', '?')}  ·  mode {meta.get('mode', '?')}")
+        ladder = meta.get("ladder") or []
+        if ladder:
+            print(f"ladder: {', '.join(ladder)}")
+        print(f"cwd:    {meta.get('cwd', '?')}")
+        print()
+    steps = [r for r in recs if r.get("type") == "step"]
+    if not steps:
+        print("(no step records)"); return
+    FLAGS = ("malformed", "loop_trip", "gated", "escalated", "compacted")
+    print(f"{'step':>4}  {'tier':>4}  {'action':<11}  {'fill':>5}  {'ok':>4}  {'flags':<30}  {'ms':>6}")
+    print("-" * 74)
+    for r in steps:
+        used, window = r.get("used"), r.get("window")
+        fill = f"{100 * used / window:.0f}%" if used and window else "-"
+        ok = r.get("ok")
+        oks = "-" if ok is None else ("ok" if ok else "FAIL")
+        flags = ",".join(f for f in FLAGS if r.get(f)) or "-"
+        ms = r.get("elapsed_ms")
+        print(f"{r.get('step', '?'):>4}  {r.get('tier', 0):>4}  {(r.get('action') or '-'):<11}  "
+              f"{fill:>5}  {oks:>4}  {flags:<30}  {('?' if ms is None else ms):>6}")
+
+
 def main():
     ap = argparse.ArgumentParser(prog="forge")
     # default LOCAL LADDER comes from ~/.forge/config.json (written by `forge setup`)
@@ -237,6 +277,9 @@ def main():
     p_ln = sub.add_parser("learnings", help="facts learned in a repo")
     p_ln.add_argument("dir", nargs="?", default=os.getcwd())
 
+    p_tr = sub.add_parser("trace", help="pretty-print a session's step trace")
+    p_tr.add_argument("sid", nargs="?", default="last", help="session id (or 'last', the default)")
+
     p_setup = sub.add_parser("setup", help="detect hardware, choose an engine, pull/point at models, write config")
     p_setup.add_argument("--auto", action="store_true", help="no prompts (Ollama, RAM-sized ladder)")
     p_setup.add_argument("--engine", help="ollama | vllm | llamacpp | mlx | lmstudio | tgi | sglang | openai")
@@ -251,7 +294,8 @@ def main():
         sys.exit(setupmod.run(auto=args.auto, engine=args.engine, url=args.url,
                               api_key=args.api_key, models=models))
     dispatch = {"run": cmd_run, "status": cmd_status, "send": cmd_send, "up": cmd_up,
-                "down": cmd_down, "receipts": cmd_receipts, "learnings": cmd_learnings}
+                "down": cmd_down, "receipts": cmd_receipts, "learnings": cmd_learnings,
+                "trace": cmd_trace}
     (dispatch.get(args.cmd) or cmd_chat)(args)
 
 

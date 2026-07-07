@@ -3,6 +3,7 @@ harness invariants, tools, config, fleet, and workspace logic.
 
     python -m unittest discover -s tests      # or: python -m pytest tests
 """
+import json
 import os
 import sys
 import tempfile
@@ -1845,6 +1846,151 @@ class TestWakeOnInbox(unittest.TestCase):
         self.assertEqual(len(self._ui.events), 2)            # both rendered
         self.assertEqual(len(agent.messages), 1)             # only the non-actionable one folded into context
         self.assertIn("chatbox", agent.messages[0]["content"])
+
+
+class TestStepTrace(unittest.TestCase):
+    """P3.1 — the transcript is a complete machine-readable trace: one 'meta'
+    record at Agent.__init__, exactly one 'step' record per loop iteration carrying
+    schema version + flags, and durable 'compact'/'malformed'/'loop' records for the
+    events that used to leave no trace. None of this touches the observation stream."""
+
+    def setUp(self):
+        from forge import fleet
+        self.fleet = fleet
+        self._orig = fleet.detect_test_cmd
+        self.fleet.detect_test_cmd = lambda cwd: None      # no suite → say is never gated
+
+    def tearDown(self):
+        self.fleet.detect_test_cmd = self._orig
+
+    def test_meta_record_written_once_at_init(self):
+        from forge import __version__
+        from forge.agent import TRACE_V
+        d = tempfile.mkdtemp()
+        sess = _RecSession(d)
+        ladder = [ScriptBackend([]), ScriptBackend([])]
+        Agent(ladder, sess, workspace="hello world")
+        metas = [f for k, f in sess.logs if k == "meta"]
+        self.assertEqual(len(metas), 1)                     # exactly one header
+        m = metas[0]
+        self.assertEqual(m["v"], TRACE_V)
+        self.assertEqual(m["forge"], __version__)
+        self.assertEqual(m["model"], "script")
+        self.assertEqual(m["ladder"], ["script", "script"])
+        self.assertEqual(m["cwd"], d)
+        self.assertEqual(m["mode"], "auto")
+        self.assertEqual(m["briefing"],
+                         __import__("hashlib").md5(b"hello world").hexdigest()[:12])
+        # no workspace → briefing is None
+        sess2 = _RecSession(d)
+        Agent(ScriptBackend([]), sess2)
+        self.assertIsNone([f for k, f in sess2.logs if k == "meta"][0]["briefing"])
+
+    def test_one_step_per_iteration_with_flags(self):
+        from forge.agent import TRACE_V
+        d = tempfile.mkdtemp()
+        _write(os.path.join(d, "r.py"), "x = 1\n")
+        actions = [
+            "this is not json",                                                    # malformed
+            '{"thought":"a","action":"read_file","path":"r.py"}',                   # normal ok
+            '{"thought":"b","action":"read_file","path":"r.py"}',                   # normal ok
+            '{"thought":"c","action":"read_file","path":"r.py"}',                   # 3x → loop_trip
+            '{"thought":"d","action":"say","message":"done"}',                      # ends the turn
+        ]
+        events = []
+        sess = _RecSession(d)
+        a = Agent(ScriptBackend(actions), sess, max_steps=8,
+                  on_event=lambda k, **kw: events.append((k, kw)))
+        result = a.send("go")
+        self.assertEqual(result, "done")
+        steps = [f for k, f in sess.logs if k == "step"]
+        self.assertEqual(len(steps), 5)                    # exactly one per iteration
+        self.assertTrue(all(s["v"] == TRACE_V and "elapsed_ms" in s for s in steps))
+        # step 1: malformed, no action
+        self.assertTrue(steps[0].get("malformed"))
+        self.assertIsNone(steps[0].get("action"))
+        # step 2: a normal action carries action + ok
+        self.assertEqual(steps[1]["action"], "read_file")
+        self.assertTrue(steps[1]["ok"])
+        # step 4: the loop detector fired
+        self.assertTrue(steps[3].get("loop_trip"))
+        # the say step is present and flagged as the say action
+        self.assertEqual(steps[4]["action"], "say")
+        # the three blind events now leave durable records
+        self.assertTrue(any(k == "malformed" for k, f in sess.logs))
+        self.assertTrue(any(k == "loop" for k, f in sess.logs))
+        # REGRESSION GUARD: none of this became an observation-ok event
+        malformed_obs = [kw for k, kw in events if k == "observation" and kw.get("ok") is False]
+        # (a read never fails here, so there are simply no failed observations)
+        self.assertEqual(malformed_obs, [])
+
+    def test_compaction_logs_record_and_flags_step(self):
+        from forge.agent import TRACE_V
+
+        class CompactBackend:
+            name = "cb"
+            last_prompt_tokens = 900                        # 90% of the window → over the 70% threshold
+            def effective_ctx(self): return 1000
+            def stream(self, messages, schema=None, temperature=0.0):
+                yield '{"thought":"x","action":"say","message":"done"}'
+            def chat(self, messages, schema=None, temperature=0.0):
+                return "COMPACT SUMMARY"                    # _summarize uses the cheapest ladder model
+
+        d = tempfile.mkdtemp()
+        sess = _RecSession(d)
+        a = Agent(CompactBackend(), sess, max_steps=3)
+        for i in range(20):                                 # seed enough middle turns that len(middle) >= 4
+            a.messages.append({"role": "user" if i % 2 else "assistant", "content": f"m{i}"})
+        result = a.send("go")
+        self.assertEqual(result, "done")
+        compacts = [f for k, f in sess.logs if k == "compact"]
+        self.assertEqual(len(compacts), 1)
+        self.assertEqual(compacts[0]["v"], TRACE_V)
+        self.assertEqual(compacts[0]["summary"], "COMPACT SUMMARY")
+        self.assertEqual(compacts[0]["window"], 1000)
+        steps = [f for k, f in sess.logs if k == "step"]
+        self.assertTrue(steps[0].get("compacted"))         # the iteration that compacted is flagged
+        self.assertFalse(a._compacted)                      # transient flag was cleared
+
+
+class TestTraceCmd(unittest.TestCase):
+    """P3.1 — `forge trace <sid|last>` renders the meta header + a step table."""
+
+    def test_cmd_trace_pretty_prints_a_session(self):
+        import io
+        import types
+        import contextlib
+        from forge.__main__ import cmd_trace
+        d = tempfile.mkdtemp()
+        orig = sm.SESSIONS
+        sm.SESSIONS = d
+        try:
+            sid = "tracetest"
+            recs = [
+                {"ts": 1, "type": "meta", "v": 1, "forge": "9.9.9", "model": "m",
+                 "ladder": ["m", "n"], "cwd": "/x", "mode": "auto", "briefing": None},
+                {"ts": 2, "type": "step", "v": 1, "step": 1, "tier": 0,
+                 "action": "read_file", "ok": True, "used": 500, "window": 1000, "elapsed_ms": 12},
+                {"ts": 3, "type": "step", "v": 1, "step": 2, "tier": 0,
+                 "malformed": True, "used": 510, "window": 1000, "elapsed_ms": 8},
+                {"ts": 4, "type": "step", "v": 1, "step": 3, "tier": 1, "action": "say",
+                 "ok": None, "loop_trip": True, "used": 520, "window": 1000, "elapsed_ms": 5},
+            ]
+            with open(os.path.join(d, sid + ".jsonl"), "w") as f:
+                for r in recs:
+                    f.write(json.dumps(r) + "\n")
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                cmd_trace(types.SimpleNamespace(sid="last"))   # default = newest file
+                cmd_trace(types.SimpleNamespace(sid=sid))      # explicit sid
+            out = buf.getvalue()
+            self.assertIn("forge 9.9.9", out)                  # meta header
+            self.assertIn("read_file", out)                    # a step row
+            self.assertIn("50%", out)                          # fill 500/1000
+            self.assertIn("malformed", out)                    # flags rendered
+            self.assertIn("loop_trip", out)
+        finally:
+            sm.SESSIONS = orig
 
 
 if __name__ == "__main__":

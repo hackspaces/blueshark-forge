@@ -102,6 +102,7 @@ forge send <target> <msg>   message another running session
 forge up  /  forge down     start / stop the fleet autopilot (verify + coordinate + learn)
 forge receipts              trust audit trail — verdicts on "done" claims
 forge learnings [dir]       durable facts forge has learned about a repo
+forge trace [sid|last]      replay a session's step trace as a table
 forge --version
 ```
 
@@ -200,6 +201,7 @@ forge down                     stop it
 forge send <target> <msg>      message another session (it absorbs it mid-work)
 forge receipts                 trust audit trail — verdicts on "done" claims
 forge learnings [dir]          durable facts learned in a repo
+forge trace [sid|last]         replay a session's per-step trace as a table
 ```
 
 ## Architecture

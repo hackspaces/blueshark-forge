@@ -11,15 +11,19 @@ Frontier-quality scaffolding so any model, even a small one, works well:
                         the window.
   VERIFY-BEFORE-DONE    the agent is pushed to actually check its work before `say`.
 """
+import hashlib
 import json
 import os
 import re
 import threading
+import time
 
+from . import __version__
 from . import backends
 from .tools import ACTION_SCHEMA, TOOL_HELP, execute, shape, error_hint
 
 STUCK_AT = int(os.environ.get("FORGE_STUCK_THRESHOLD", "7"))  # failures before escalating a rung
+TRACE_V = 1  # P3.1 schema version stamped on every meta/step/compact/loop/malformed record
 
 # P2.1 done-gate: a bash command that IS (a run of) a test suite marks the turn
 # verified. Covers every form detect_test_cmd emits (pytest/npm test/make test/
@@ -158,8 +162,16 @@ class Agent:
         self.stop = threading.Event()  # set from the UI (Esc) to interrupt mid-run
         self.mode = "auto"             # auto | plan | manual (set by the UI)
         self.approve = lambda desc: "yes"   # manual-mode hook: 'yes' | 'always' | 'no'
+        self._compacted = False        # P3.1: transient — set by _compact, read+cleared by the step trace
         from . import config as _cfg
         self.approvals = set(_cfg.get("approvals") or [])   # 'always'-approved action keys
+        # P3.1 meta record: one machine-readable header per session so a dead
+        # transcript is self-describing (forge version, model ladder, cwd, mode).
+        # EphemeralSession.log is a no-op, so internal agents never pollute a file.
+        self.session.log("meta", v=TRACE_V, forge=__version__, model=self.backend.name,
+                         ladder=[b.name for b in self.ladder], cwd=self.session.cwd,
+                         mode=self.mode,
+                         briefing=hashlib.md5(workspace.encode()).hexdigest()[:12] if workspace else None)
 
     def set_ladder(self, ladder):
         """Swap the model ladder live (conversation preserved)."""
@@ -205,6 +217,10 @@ class Agent:
         note = {"role": "user", "content": "[Earlier progress, summarized to save context:]\n" + summary}
         self.messages = head + [note] + tail
         self.on_event("compact", window=window)
+        # P3.1: persist the summary so a resume can reconstruct the compacted middle,
+        # and flag this step so its trace records compacted=True.
+        self.session.log("compact", v=TRACE_V, summary=summary, window=window)
+        self._compacted = True
 
     def _summarize(self, msgs):
         convo = "\n\n".join(f"[{m['role']}] {m['content'][:1200]}" for m in msgs)[:16000]
@@ -340,189 +356,223 @@ class Agent:
                 if self.stop.is_set():
                     self.on_event("stopped")
                     return "(stopped)"
-                self._absorb_inbox()
-                self._compact()
-                pin = self._pin_plan()
-                prompt = self.messages + ([pin] if pin else [])
-                self.on_event("thinking")
-                raw = self._generate(prompt)
-
+                # P3.1 flight recorder: build the step trace at the top of the iteration
+                # and fill it as we go; the try/finally below fires EXACTLY ONE 'step'
+                # record no matter which continue/return/raise exits the iteration.
+                trace = {"v": TRACE_V, "step": step, "tier": self.tier}
+                _t0 = time.monotonic()
                 try:
-                    act = json.loads(raw)
-                except json.JSONDecodeError:
-                    bad += 1
-                    self.on_event("malformed")
-                    self.messages.append({"role": "user", "content": "That was not valid action JSON. Reply with one JSON action object only."})
-                    if bad >= 5:
-                        return "(the model could not hold the action format)"
-                    continue
-                bad = 0
-                self.messages.append({"role": "assistant", "content": raw})
+                    self._absorb_inbox()
+                    self._compact()
+                    pin = self._pin_plan()
+                    prompt = self.messages + ([pin] if pin else [])
+                    self.on_event("thinking")
+                    raw = self._generate(prompt)
 
-                # plan update
-                if isinstance(act.get("plan"), list) and act["plan"]:
-                    if act["plan"] != self.plan:
-                        self.plan = act["plan"]
-                        self.on_event("plan", plan=self.plan)
-
-                kind = act.get("action")
-                if kind == "say":
-                    bounce = self._done_gate()
-                    if bounce:
-                        self.messages.append({"role": "user", "content": bounce})
-                        continue
-                    msg = act.get("message", "")
-                    self.session.log("assistant", text=msg, thought=act.get("thought", ""))
-                    self.on_event("say", message=msg)
-                    return msg
-
-                if self.allowed is not None and kind not in self.allowed:
-                    self.messages.append({"role": "user", "content": f"'{kind}' not permitted. Allowed: {sorted(self.allowed)}."})
-                    continue
-
-                blocked = self._gate(kind, act)
-                if blocked:
-                    self.on_event("action", action=kind,
-                                  detail=act.get("command") or act.get("path") or act.get("target") or "")
-                    self.on_event("observation", text=blocked, ok=False)
-                    self.session.log("action", action=kind, args={"gated": True}, thought=act.get("thought", ""))
-                    self.messages.append({"role": "user", "content": f"⚠ {blocked}"})
-                    continue
-
-                # small models sometimes name the path field differently, or drop it —
-                # normalize aliases, and reject pathless file actions with an exact fix
-                # (an empty path must never fall through: it used to resolve to the cwd
-                # and hit the read-before-edit guard with a nonsense message).
-                if kind in ("read_file", "write_file", "edit_file") and not act.get("path"):
-                    for alias in ("filename", "file", "filepath", "file_path", "name"):
-                        if isinstance(act.get(alias), str) and act[alias]:
-                            act["path"] = act[alias]
-                            break
-                if kind in ("read_file", "write_file", "edit_file") and not act.get("path"):
-                    obs = (f"'{kind}' is missing its `path` field. Re-send the SAME action as one JSON object "
-                           f'with the file path included, e.g. {{"action":"{kind}","path":"dir/file.go", ...}}.')
-                    self.on_event("action", action=kind, detail="(no path)")
-                    self.on_event("observation", text=obs, ok=False)
-                    self.session.log("action", action=kind, args={"invalid": "missing path"}, thought=act.get("thought", ""))
-                    self.messages.append({"role": "user", "content": f"⚠ {obs}"})
-                    continue
-
-                if kind == "fleet_send":
-                    from . import fleet
-                    target, msg = act.get("target", ""), act.get("message", "")
                     try:
-                        if target.strip().lower() in ("", "list", "sessions") or not msg:
-                            obs, ok = f"Reachable sessions (forge + Claude Code): {fleet.roster()}", True
-                        else:
-                            peer = fleet.send(target, msg, sender=self.session.name,
-                                              sender_cwd=self.session.cwd, sender_sid=self.session.sid)
-                            runtime = " claude" if peer.get("kind") == "claude" else ""
-                            obs, ok = f"delivered to{runtime} {peer['name']} ({peer['sid'][:8]})", True
-                    except SystemExit as e:
-                        obs, ok = str(e), False
-                    self.session.log("action", action="fleet_send", args={"target": target}, thought=act.get("thought", ""))
-                    self.on_event("action", action="fleet_send", detail=target, thought=act.get("thought", ""))
-                    self.on_event("observation", text=obs, ok=ok)
-                    self.messages.append({"role": "user", "content": f"Observation:\n{obs}"})
-                    continue
+                        act = json.loads(raw)
+                    except json.JSONDecodeError:
+                        bad += 1
+                        trace["malformed"] = True
+                        self.on_event("malformed")
+                        self.session.log("malformed", v=TRACE_V, step=step, raw=raw[:200])
+                        self.messages.append({"role": "user", "content": "That was not valid action JSON. Reply with one JSON action object only."})
+                        if bad >= 5:
+                            return "(the model could not hold the action format)"
+                        continue
+                    bad = 0
+                    self.messages.append({"role": "assistant", "content": raw})
 
-                # include offset so paging one big file (same path, new range) isn't seen as a loop
-                sig = f"{kind}:{act.get('command') or act.get('path') or act.get('pattern') or ''}:{act.get('offset', '')}"
-                recent.append(sig)
-                if recent[-3:].count(sig) >= 3:
-                    self.on_event("loop")
-                    self.messages.append({"role": "user", "content": "You repeated the same action 3x with no progress. Do something different, or `say` if the task is already done."})
-                    recent.clear()
-                    continue
+                    # plan update
+                    if isinstance(act.get("plan"), list) and act["plan"]:
+                        if act["plan"] != self.plan:
+                            self.plan = act["plan"]
+                            self.on_event("plan", plan=self.plan)
 
-                # read-before-edit: never edit or overwrite an EXISTING file the model
-                # hasn't actually read — this forces it to work from real content, not a
-                # guess (the exact failure mode that made a weak model hallucinate code).
-                if kind in ("edit_file", "write_file"):
-                    fp = os.path.realpath(os.path.join(self.session.cwd, act["path"]))
-                    if os.path.isfile(fp) and fp not in self.read_files:
-                        obs = (f"Blocked: read {act.get('path')} before editing or overwriting it — "
-                               "work from its actual current content, not memory. Use read_file first.")
-                        self.on_event("action", action=kind, detail=act.get("path", ""))
+                    kind = act.get("action")
+                    trace["action"] = kind
+                    if kind == "say":
+                        bounce = self._done_gate()
+                        if bounce:
+                            self.messages.append({"role": "user", "content": bounce})
+                            continue
+                        msg = act.get("message", "")
+                        self.session.log("assistant", text=msg, thought=act.get("thought", ""))
+                        self.on_event("say", message=msg)
+                        return msg
+
+                    if self.allowed is not None and kind not in self.allowed:
+                        self.messages.append({"role": "user", "content": f"'{kind}' not permitted. Allowed: {sorted(self.allowed)}."})
+                        continue
+
+                    blocked = self._gate(kind, act)
+                    if blocked:
+                        trace["gated"] = True
+                        self.on_event("action", action=kind,
+                                      detail=act.get("command") or act.get("path") or act.get("target") or "")
+                        self.on_event("observation", text=blocked, ok=False)
+                        self.session.log("action", action=kind, args={"gated": True}, thought=act.get("thought", ""))
+                        self.messages.append({"role": "user", "content": f"⚠ {blocked}"})
+                        continue
+
+                    # small models sometimes name the path field differently, or drop it —
+                    # normalize aliases, and reject pathless file actions with an exact fix
+                    # (an empty path must never fall through: it used to resolve to the cwd
+                    # and hit the read-before-edit guard with a nonsense message).
+                    if kind in ("read_file", "write_file", "edit_file") and not act.get("path"):
+                        for alias in ("filename", "file", "filepath", "file_path", "name"):
+                            if isinstance(act.get(alias), str) and act[alias]:
+                                act["path"] = act[alias]
+                                break
+                    if kind in ("read_file", "write_file", "edit_file") and not act.get("path"):
+                        obs = (f"'{kind}' is missing its `path` field. Re-send the SAME action as one JSON object "
+                               f'with the file path included, e.g. {{"action":"{kind}","path":"dir/file.go", ...}}.')
+                        trace["ok"] = False
+                        self.on_event("action", action=kind, detail="(no path)")
                         self.on_event("observation", text=obs, ok=False)
-                        self.session.log("action", action=kind, args={"blocked": "read-before-edit", "path": act.get("path", "")},
-                                         thought=act.get("thought", ""))
+                        self.session.log("action", action=kind, args={"invalid": "missing path"}, thought=act.get("thought", ""))
                         self.messages.append({"role": "user", "content": f"⚠ {obs}"})
                         continue
 
-                # capture the before-content so we can show a real diff after a write
-                before = ""
-                if kind == "write_file":
-                    _fp = os.path.join(self.session.cwd, act.get("path", ""))
-                    if os.path.isfile(_fp):
+                    if kind == "fleet_send":
+                        from . import fleet
+                        target, msg = act.get("target", ""), act.get("message", "")
                         try:
-                            with open(_fp, errors="replace") as _f:
-                                before = _f.read()
-                        except OSError:
-                            pass
+                            if target.strip().lower() in ("", "list", "sessions") or not msg:
+                                obs, ok = f"Reachable sessions (forge + Claude Code): {fleet.roster()}", True
+                            else:
+                                peer = fleet.send(target, msg, sender=self.session.name,
+                                                  sender_cwd=self.session.cwd, sender_sid=self.session.sid)
+                                runtime = " claude" if peer.get("kind") == "claude" else ""
+                                obs, ok = f"delivered to{runtime} {peer['name']} ({peer['sid'][:8]})", True
+                        except SystemExit as e:
+                            obs, ok = str(e), False
+                        trace["ok"] = ok
+                        self.session.log("action", action="fleet_send", args={"target": target}, thought=act.get("thought", ""))
+                        self.on_event("action", action="fleet_send", detail=target, thought=act.get("thought", ""))
+                        self.on_event("observation", text=obs, ok=ok)
+                        self.messages.append({"role": "user", "content": f"Observation:\n{obs}"})
+                        continue
 
-                self.session.log("action", action=kind, args={k: act.get(k) for k in ("command", "path") if act.get(k)}, thought=act.get("thought", ""))
-                self.on_event("action", action=kind, thought=act.get("thought", ""),
-                              detail=act.get("command") or act.get("path") or act.get("pattern") or "")
-                obs, ok = execute(act, self.session.cwd, stop=self.stop)
-                budget = self._obs_budget()
-                if ok and kind in ("read_file", "write_file") and act.get("path"):
-                    self.read_files.add(os.path.realpath(os.path.join(self.session.cwd, act["path"])))
-                if ok and kind in ("write_file", "edit_file") and act.get("path"):
-                    self._mutated.add(os.path.realpath(os.path.join(self.session.cwd, act["path"])))
-                    self._verified = False
-                if ok and kind == "bash":
-                    _cmd = act.get("command", "")
-                    from . import fleet as _fleet
-                    if _is_test_cmd(_cmd, self.session.cwd):
-                        self._verified = True         # the model ran the suite itself
-                    elif _fleet.bash_mutates(_cmd):
-                        self._mutated.add("<bash>")   # a file-touching bash still gates `say`
-                        self._verified = False
-                if ok and kind == "edit_file":
-                    self.on_event("diff", path=act.get("path", ""), old=act.get("old", ""), new=act.get("new", ""))
-                elif ok and kind == "write_file":
-                    self.on_event("diff", path=act.get("path", ""), old=before, new=act.get("content", ""))
-                self.session.log("observation", text=shape(obs, budget), ok=ok)
-                self.on_event("observation", text=obs, ok=ok)
-
-                tag = ""
-                if not ok:
-                    fail_counts[sig] = fail_counts.get(sig, 0) + 1
-                    total_fails += 1
-                    tag = "  ⚠ this action FAILED — diagnose the cause before retrying.\n"
-                    # per-command repeat (survives interleaved successes, unlike a consecutive counter)
-                    if fail_counts[sig] >= 3:
+                    # include offset so paging one big file (same path, new range) isn't seen as a loop
+                    sig = f"{kind}:{act.get('command') or act.get('path') or act.get('pattern') or ''}:{act.get('offset', '')}"
+                    trace["sig"] = sig
+                    recent.append(sig)
+                    if recent[-3:].count(sig) >= 3:
+                        trace["loop_trip"] = True
                         self.on_event("loop")
-                        tag = (f"  ⚠ `{sig}` has now failed {fail_counts[sig]} times. STOP retrying this exact thing. "
-                               "Change approach entirely: re-read the real file/error, rewrite with write_file instead of edit_file, "
-                               "or `say` to tell the user you're stuck and exactly what failed.\n")
-                    # stuck: escalate to a stronger LOCAL model (same task, same
-                    # context) rather than grinding or giving up. All still local.
-                    if total_fails >= STUCK_AT:
-                        if self.tier < len(self.ladder) - 1:
-                            self.tier += 1
-                            self.backend = self.ladder[self.tier]
-                            self.on_event("escalate", model=self.backend.name)
-                            self.session.log("escalate", model=self.backend.name)
-                            if hasattr(self.backend, "warm"):
-                                self.backend.warm()
-                            self.messages.append({"role": "user", "content":
-                                f"[The previous model kept failing. You are now a stronger model taking over the SAME task with full context above. Step back, re-diagnose from the real errors, and solve it. Last error: {obs[:200].strip()}]"})
-                            fail_counts.clear()
-                            total_fails = 0
+                        self.session.log("loop", v=TRACE_V, step=step, sig=sig, cause="repeat")
+                        self.messages.append({"role": "user", "content": "You repeated the same action 3x with no progress. Do something different, or `say` if the task is already done."})
+                        recent.clear()
+                        continue
+
+                    # read-before-edit: never edit or overwrite an EXISTING file the model
+                    # hasn't actually read — this forces it to work from real content, not a
+                    # guess (the exact failure mode that made a weak model hallucinate code).
+                    if kind in ("edit_file", "write_file"):
+                        fp = os.path.realpath(os.path.join(self.session.cwd, act["path"]))
+                        if os.path.isfile(fp) and fp not in self.read_files:
+                            obs = (f"Blocked: read {act.get('path')} before editing or overwriting it — "
+                                   "work from its actual current content, not memory. Use read_file first.")
+                            trace["ok"] = False
+                            self.on_event("action", action=kind, detail=act.get("path", ""))
+                            self.on_event("observation", text=obs, ok=False)
+                            self.session.log("action", action=kind, args={"blocked": "read-before-edit", "path": act.get("path", "")},
+                                             thought=act.get("thought", ""))
+                            self.messages.append({"role": "user", "content": f"⚠ {obs}"})
                             continue
-                        stuck = (f"I'm stuck even after escalating through the local models. Last error: {obs[:200].strip()}. "
-                                 "This needs a different approach — want me to try one, or take it yourself?")
-                        self.session.log("assistant", text=stuck)
-                        self.on_event("say", message=stuck)
-                        return stuck
-                    # deterministic recovery hint for the common bash failure signatures
-                    if kind == "bash":
-                        h = error_hint(obs)
-                        if h:
-                            tag += f"  ↳ {h}\n"
-                self.messages.append({"role": "user", "content": f"{tag}Observation:\n{shape(obs, budget)}"})
+
+                    # capture the before-content so we can show a real diff after a write
+                    before = ""
+                    if kind == "write_file":
+                        _fp = os.path.join(self.session.cwd, act.get("path", ""))
+                        if os.path.isfile(_fp):
+                            try:
+                                with open(_fp, errors="replace") as _f:
+                                    before = _f.read()
+                            except OSError:
+                                pass
+
+                    self.session.log("action", action=kind, args={k: act.get(k) for k in ("command", "path") if act.get(k)}, thought=act.get("thought", ""))
+                    self.on_event("action", action=kind, thought=act.get("thought", ""),
+                                  detail=act.get("command") or act.get("path") or act.get("pattern") or "")
+                    obs, ok = execute(act, self.session.cwd, stop=self.stop)
+                    trace["ok"] = ok
+                    budget = self._obs_budget()
+                    if ok and kind in ("read_file", "write_file") and act.get("path"):
+                        self.read_files.add(os.path.realpath(os.path.join(self.session.cwd, act["path"])))
+                    if ok and kind in ("write_file", "edit_file") and act.get("path"):
+                        self._mutated.add(os.path.realpath(os.path.join(self.session.cwd, act["path"])))
+                        self._verified = False
+                    if ok and kind == "bash":
+                        _cmd = act.get("command", "")
+                        from . import fleet as _fleet
+                        if _is_test_cmd(_cmd, self.session.cwd):
+                            self._verified = True         # the model ran the suite itself
+                        elif _fleet.bash_mutates(_cmd):
+                            self._mutated.add("<bash>")   # a file-touching bash still gates `say`
+                            self._verified = False
+                    if ok and kind == "edit_file":
+                        self.on_event("diff", path=act.get("path", ""), old=act.get("old", ""), new=act.get("new", ""))
+                    elif ok and kind == "write_file":
+                        self.on_event("diff", path=act.get("path", ""), old=before, new=act.get("content", ""))
+                    self.session.log("observation", text=shape(obs, budget), ok=ok)
+                    self.on_event("observation", text=obs, ok=ok)
+
+                    tag = ""
+                    if not ok:
+                        fail_counts[sig] = fail_counts.get(sig, 0) + 1
+                        total_fails += 1
+                        tag = "  ⚠ this action FAILED — diagnose the cause before retrying.\n"
+                        # per-command repeat (survives interleaved successes, unlike a consecutive counter)
+                        if fail_counts[sig] >= 3:
+                            trace["loop_trip"] = True
+                            self.on_event("loop")
+                            self.session.log("loop", v=TRACE_V, step=step, sig=sig, cause="fail", count=fail_counts[sig])
+                            tag = (f"  ⚠ `{sig}` has now failed {fail_counts[sig]} times. STOP retrying this exact thing. "
+                                   "Change approach entirely: re-read the real file/error, rewrite with write_file instead of edit_file, "
+                                   "or `say` to tell the user you're stuck and exactly what failed.\n")
+                        # stuck: escalate to a stronger LOCAL model (same task, same
+                        # context) rather than grinding or giving up. All still local.
+                        if total_fails >= STUCK_AT:
+                            if self.tier < len(self.ladder) - 1:
+                                self.tier += 1
+                                self.backend = self.ladder[self.tier]
+                                trace["escalated"] = True
+                                self.on_event("escalate", model=self.backend.name)
+                                self.session.log("escalate", model=self.backend.name)
+                                if hasattr(self.backend, "warm"):
+                                    self.backend.warm()
+                                self.messages.append({"role": "user", "content":
+                                    f"[The previous model kept failing. You are now a stronger model taking over the SAME task with full context above. Step back, re-diagnose from the real errors, and solve it. Last error: {obs[:200].strip()}]"})
+                                fail_counts.clear()
+                                total_fails = 0
+                                continue
+                            stuck = (f"I'm stuck even after escalating through the local models. Last error: {obs[:200].strip()}. "
+                                     "This needs a different approach — want me to try one, or take it yourself?")
+                            self.session.log("assistant", text=stuck)
+                            self.on_event("say", message=stuck)
+                            return stuck
+                        # deterministic recovery hint for the common bash failure signatures
+                        if kind == "bash":
+                            h = error_hint(obs)
+                            if h:
+                                tag += f"  ↳ {h}\n"
+                    self.messages.append({"role": "user", "content": f"{tag}Observation:\n{shape(obs, budget)}"})
+                finally:
+                    # ONE step record per iteration. Guarded so a raising backend is
+                    # surfaced (the original exception propagates) — not masked by a
+                    # logging error — while the trace still lands on the happy path.
+                    try:
+                        trace["elapsed_ms"] = int((time.monotonic() - _t0) * 1000)
+                        used, window = self._fill()
+                        trace["used"], trace["window"] = used, window
+                        if self._compacted:
+                            trace["compacted"] = True
+                            self._compacted = False
+                        self.session.log("step", **trace)
+                    except Exception:
+                        pass
 
             return "(hit the step limit — ask me to continue)"
         finally:
