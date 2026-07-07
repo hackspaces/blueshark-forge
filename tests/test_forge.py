@@ -665,6 +665,41 @@ class TestModeGate(unittest.TestCase):
         self.assertEqual(a._approval_key({"action": "edit_file", "path": "x"}), "edit_file")
 
 
+class TestExplorer(unittest.TestCase):
+    def _ex(self, root):
+        from forge.tui import Explorer, Screen
+        s = Screen.__new__(Screen)
+        s.w, s.h, s.rows, s.enabled = 80, 24, 2, False
+        return Explorer(s, root)
+
+    def _tree(self):
+        d = tempfile.mkdtemp()
+        os.makedirs(os.path.join(d, "src"))
+        _write(os.path.join(d, "src", "main.go"), "package main\n")
+        _write(os.path.join(d, "README.md"), "# hi\n")
+        _write(os.path.join(d, ".hidden"), "x")
+        return d
+
+    def test_entries_dirs_first_hidden_toggle(self):
+        d = self._tree()
+        ex = self._ex(d)
+        ents = ex._entries(d)
+        self.assertEqual(ents[0], ("src", True))            # dirs first
+        self.assertNotIn((".hidden", False), ents)          # hidden filtered
+        ex.show_hidden = True
+        self.assertIn((".hidden", False), ex._entries(d))
+
+    def test_preview_file_and_binary(self):
+        d = self._tree()
+        ex = self._ex(d)
+        pv = ex._preview(os.path.join(d, "README.md"), False, 40, 10)
+        self.assertEqual(pv[0], "# hi")
+        with open(os.path.join(d, "blob.bin"), "wb") as f:
+            f.write(b"\x00\x01\x02")
+        pv2 = ex._preview(os.path.join(d, "blob.bin"), False, 40, 10)
+        self.assertIn("binary", pv2[0])
+
+
 class TestLineEditor(unittest.TestCase):
     def test_editing_basics(self):
         from forge.tui import LineEditor

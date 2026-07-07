@@ -115,6 +115,10 @@ forge --version
 - **Queue messages while it works** — just keep typing; Enter delivers your
   message to the agent between steps (it steers mid-task). Anything not
   absorbed becomes the next turn.
+- **`/files` — folder explorer** — a three-pane Miller-column browser
+  (parent · current · preview) right in the terminal: `↑↓` move, `←→`
+  navigate, `Enter` on a file attaches it to your next message as `@file`,
+  `.` shows hidden files, `q` closes.
 - `Esc` clears the line, or stops the agent mid-run (twice force-returns).
 
 ## One fleet with Claude Code

@@ -13,7 +13,7 @@ import termios
 import threading
 import tty
 
-DIM = "\033[2m"; GR = "\033[32m"; MG = "\033[35m"; RST = "\033[0m"
+DIM = "\033[2m"; GR = "\033[32m"; CY = "\033[36m"; MG = "\033[35m"; RST = "\033[0m"
 
 ESC, CTRL_C, CTRL_D, CR, LF, BS1, BS2 = b"\x1b", b"\x03", b"\x04", b"\r", b"\n", b"\x7f", b"\x08"
 CTRL_A, CTRL_E, CTRL_K, CTRL_U, CTRL_W = b"\x01", b"\x05", b"\x0b", b"\x15", b"\x17"
@@ -76,9 +76,9 @@ class LineEditor:
     with the control keys that end editing (Enter, Ctrl-C/D, bare Esc); this
     handles movement, deletion, kills, and ↑/↓ history."""
 
-    def __init__(self, history=()):
+    def __init__(self, history=(), initial=""):
         self.history = list(history)
-        self.buf, self.cur = [], 0
+        self.buf, self.cur = list(initial), len(initial)
         self.hidx, self.saved = len(self.history), ""
 
     def text(self):
@@ -133,6 +133,157 @@ class LineEditor:
             if seq == b"[3~" and self.cur < len(self.buf):
                 del self.buf[self.cur]; return True
         return False
+
+
+class Explorer:
+    """A Miller-column folder explorer inside the TUI — three panes like
+    ranger/Finder: parent · current · preview. Dependency-free.
+
+        ↑/↓ move · ← parent · →/Enter enter dir · Enter on a file PICKS it
+        (returned as a path) · . toggles hidden files · q/Esc closes
+
+    Runs on the terminal's alternate screen, so the conversation underneath
+    is untouched and restored pixel-perfect on close."""
+
+    CAP = 400            # entries listed per directory
+    PREVIEW_BYTES = 4096
+
+    def __init__(self, screen, root):
+        self.s = screen
+        self.root = os.path.abspath(root)
+        self.cwd = self.root
+        self.cursor = 0
+        self.show_hidden = False
+
+    def _entries(self, path):
+        """[(name, is_dir)] — directories first, each group sorted."""
+        try:
+            names = sorted(os.listdir(path), key=str.lower)
+        except OSError:
+            return []
+        if not self.show_hidden:
+            names = [n for n in names if not n.startswith(".")]
+        dirs, files = [], []
+        for n in names:
+            (dirs if os.path.isdir(os.path.join(path, n)) else files).append(n)
+        return ([(n, True) for n in dirs] + [(n, False) for n in files])[:self.CAP]
+
+    def _preview(self, path, is_dir, width, rows):
+        if is_dir:
+            return [f"{CY}{n}/{RST}" if d else n for n, d in self._entries(path)[:rows]]
+        try:
+            with open(path, "rb") as f:
+                blob = f.read(self.PREVIEW_BYTES)
+            if b"\0" in blob:
+                size = os.path.getsize(path)
+                return [f"{DIM}(binary · {size:,} bytes){RST}"]
+            text = blob.decode("utf-8", "replace").expandtabs(4)
+            return [ln[:width] for ln in text.splitlines()[:rows]]
+        except OSError as e:
+            return [f"{DIM}({e}){RST}"]
+
+    def _col(self, lines, entries, width, rows, hi_index, scroll=0):
+        """Render one pane's rows into `lines` (a list of per-row strings)."""
+        for i in range(rows):
+            j = i + scroll
+            if j >= len(entries):
+                cell = ""
+            elif isinstance(entries[j], tuple):
+                n, d = entries[j]
+                label = _clip((n + "/") if d else n, width - 1)
+                if j == hi_index:
+                    cell = f"\033[7m{label}{RST}"
+                else:
+                    cell = f"{CY}{label}{RST}" if d else label
+            else:
+                cell = _clip(entries[j], width)
+            lines[i].append(cell + " " * max(0, width - _vis(cell)))
+
+    def _draw(self):
+        w, h = self.s.w, self.s.h
+        rows = max(3, h - 3)
+        c1 = max(14, w * 22 // 100)
+        c2 = max(18, w * 34 // 100)
+        c3 = max(10, w - c1 - c2 - 4)
+        ents = self._entries(self.cwd)
+        self.cursor = min(self.cursor, max(0, len(ents) - 1))
+        scroll = max(0, self.cursor - rows + 2)
+        parent = os.path.dirname(self.cwd)
+        p_ents = self._entries(parent) if parent != self.cwd else []
+        p_hi = next((i for i, (n, d) in enumerate(p_ents) if n == os.path.basename(self.cwd)), -1)
+        p_scroll = max(0, p_hi - rows + 2) if p_hi >= 0 else 0
+        if ents:
+            name, is_dir = ents[self.cursor]
+            pv = self._preview(os.path.join(self.cwd, name), is_dir, c3, rows)
+        else:
+            pv = [f"{DIM}(empty){RST}"]
+
+        lines = [[] for _ in range(rows)]
+        self._col(lines, p_ents, c1, rows, p_hi, p_scroll)
+        for ln in lines:
+            ln.append(f"{DIM}│{RST} ")
+        self._col(lines, ents, c2, rows, self.cursor, scroll)
+        for ln in lines:
+            ln.append(f"{DIM}│{RST} ")
+        self._col(lines, pv, c3, rows, -1)
+
+        out = [f"\033[1;1H\033[K{MG}{_clip(self.cwd, w - 20)}{RST}"
+               + (f"  {DIM}(hidden shown){RST}" if self.show_hidden else "")]
+        for i, ln in enumerate(lines):
+            out.append(f"\033[{i + 2};1H\033[K" + "".join(ln)[:2048])
+        out.append(f"\033[{h};1H\033[K{DIM}↑↓ move · ←→ navigate · Enter: pick file (@attach) · . hidden · q/Esc close{RST}")
+        sys.stdout.write("".join(out))
+        sys.stdout.flush()
+
+    def run(self):
+        """Open the explorer; returns the picked file path (relative to the
+        root when inside it) or None."""
+        if not self.s.enabled:
+            return None
+        fd = sys.stdin.fileno()
+        old = termios.tcgetattr(fd)
+        sys.stdout.write("\033[?1049h\033[r\033[2J")     # alternate screen, full region
+        self.s._redraw = self._draw
+        try:
+            tty.setraw(fd)
+            self._draw()
+            while True:
+                key = _read_key(fd)
+                if not key or key in ("q", "Q") or key in (ESC, CTRL_C, CTRL_D):
+                    return None
+                ents = self._entries(self.cwd)
+                sel = ents[self.cursor] if ents and self.cursor < len(ents) else None
+                if key == ".":
+                    self.show_hidden = not self.show_hidden; self.cursor = 0
+                elif isinstance(key, bytes) and key.endswith(b"[A"):
+                    self.cursor = max(0, self.cursor - 1)
+                elif isinstance(key, bytes) and key.endswith(b"[B"):
+                    self.cursor = min(max(0, len(ents) - 1), self.cursor + 1)
+                elif isinstance(key, bytes) and key.endswith(b"[D"):
+                    parent = os.path.dirname(self.cwd)
+                    if parent != self.cwd:
+                        was = os.path.basename(self.cwd)
+                        self.cwd, self.cursor = parent, 0
+                        self.cursor = next((i for i, (n, d) in enumerate(self._entries(parent)) if n == was), 0)
+                elif sel and (key in (CR, LF) or (isinstance(key, bytes) and key.endswith(b"[C"))):
+                    name, is_dir = sel
+                    full = os.path.join(self.cwd, name)
+                    if is_dir:
+                        self.cwd, self.cursor = full, 0
+                    elif key in (CR, LF):                 # Enter on a file → pick it
+                        try:
+                            rel = os.path.relpath(full, self.root)
+                            return rel if not rel.startswith("..") else full
+                        except ValueError:
+                            return full
+                self._draw()
+        finally:
+            self.s._redraw = None
+            termios.tcsetattr(fd, termios.TCSADRAIN, old)
+            sys.stdout.write("\033[?1049l")               # back to the conversation
+            if self.s._entered:
+                sys.stdout.write(f"\0337\033[1;{self.s.h - self.s.footer}r\0338")
+            sys.stdout.flush()
 
 
 class ApprovalGate:
@@ -304,12 +455,13 @@ class Screen:
             sys.stdout.write("\0337" + f"\033[{base};1H\033[K" + _clip(f"{MG}{text}{RST}" if text else "", self.w) + "\0338")
             sys.stdout.flush()
 
-    def prompt(self, prompt, history, status="", on_mode=None):
+    def prompt(self, prompt, history, status="", on_mode=None, initial=""):
         """Read one line in the pinned footer (raw-mode editor). Esc clears; ↑/↓
         history; ←/→/Home/End move; Delete deletes forward; Ctrl-A/E home/end;
         Ctrl-U/K/W kill line-start/line-end/word; Shift-Tab cycles the mode
         (via `on_mode`); Enter submits; Ctrl-C clears then exits; Ctrl-D exits.
-        `status` may be a string or a zero-arg callable (repainted live)."""
+        `status` may be a string or a zero-arg callable (repainted live);
+        `initial` pre-fills the line (e.g. an @file picked in the explorer)."""
         if not self.enabled:
             try:
                 return input(_ANSI.sub("", prompt))
@@ -317,7 +469,7 @@ class Screen:
                 return None
         fd = sys.stdin.fileno()
         old = termios.tcgetattr(fd)
-        ed = LineEditor(history)
+        ed = LineEditor(history, initial)
         sys.stdout.write("\0337")   # save the scroll-region cursor for the duration of editing
 
         def draw():

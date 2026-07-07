@@ -302,9 +302,10 @@ def _set_mode(agent, screen, mode):
 def _run_loop(screen, ui, agent, session, status_line, gate, models, ctx, ptype):
     from .tui import FooterSpinner
     screen.emit(_banner(models, ctx, session.cwd, ptype))
-    screen.emit(f"{DIM}  Esc clears/stops · shift+tab: auto/plan/manual · type while it works to queue · /help{RST}\n\n")
+    screen.emit(f"{DIM}  Esc clears/stops · shift+tab: auto/plan/manual · /files explorer · type while it works to queue · /help{RST}\n\n")
     history = []
     pending = []                                        # messages queued for the NEXT turn
+    prefill = ""                                        # e.g. "@file " picked in the explorer
 
     def cycle_mode():
         _set_mode(agent, screen, MODES[(MODES.index(agent.mode) + 1) % len(MODES)])
@@ -314,7 +315,8 @@ def _run_loop(screen, ui, agent, session, status_line, gate, models, ctx, ptype)
             user = pending.pop(0)
             screen.emit(f"\n{GR}❯{RST} {user} {DIM}(queued){RST}\n")
         else:
-            user = screen.prompt(f"{GR}❯{RST} ", history, status_line, on_mode=cycle_mode)
+            user = screen.prompt(f"{GR}❯{RST} ", history, status_line, on_mode=cycle_mode, initial=prefill)
+            prefill = ""
             if user is None:
                 break
             user = user.strip()
@@ -328,13 +330,21 @@ def _run_loop(screen, ui, agent, session, status_line, gate, models, ctx, ptype)
                 screen.emit(f"{DIM}  Esc: clear/stop · ↑↓ history · Ctrl-A/E home/end · Ctrl-U/K/W kill · shift+tab: mode{RST}\n")
                 screen.emit(f"{DIM}  modes — auto: {MODE_HINT['auto']} · plan: {MODE_HINT['plan']} · manual: {MODE_HINT['manual']}{RST}\n")
                 screen.emit(f"{DIM}  while working: type + Enter queues a message the agent absorbs between steps{RST}\n")
-                screen.emit(f"{DIM}  /mode [auto|plan|manual] · /model · /config · /verbose · /plan · /cwd · /exit{RST}\n"); continue
+                screen.emit(f"{DIM}  /files: 3-pane folder explorer (Enter on a file attaches it as @file){RST}\n")
+                screen.emit(f"{DIM}  /mode [auto|plan|manual] · /files · /model · /config · /verbose · /plan · /cwd · /exit{RST}\n"); continue
             if user.startswith("/mode"):
                 arg = user.split(None, 1)[1].strip().lower() if " " in user else ""
                 if arg in MODES:
                     _set_mode(agent, screen, arg)
                 else:
                     screen.emit(f"{DIM}  {agent.mode} mode — /mode auto|plan|manual (or shift+tab){RST}\n")
+                continue
+            if user in ("/files", "/f", "/explore"):
+                from .tui import Explorer
+                pick = Explorer(screen, session.cwd).run()
+                if pick:
+                    prefill = f"@{pick} "
+                    screen.emit(f"{DIM}  ⌘ attached @{pick} — finish your message and send{RST}\n")
                 continue
             if user in ("/model", "/models"):
                 _menu_model(agent, screen, history); continue
