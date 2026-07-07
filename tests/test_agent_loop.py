@@ -261,7 +261,7 @@ class TestCompaction(unittest.TestCase):
 
 
 class TestPlanPin(unittest.TestCase):
-    """Plan pin/update semantics (agent.py _pin_plan + the plan-update guard)."""
+    """Plan pin/update semantics (agent.py _pin_state + the plan-update guard)."""
 
     def test_plan_pinned_transiently_and_empty_list_does_not_clear(self):
         d = tempfile.mkdtemp()
@@ -281,6 +281,106 @@ class TestPlanPin(unittest.TestCase):
         self.assertEqual(pins[0]["content"], "[current plan]\n[ ] one\n[ ] two")
         # but the pin is transient — it must never be persisted into the transcript
         self.assertFalse(any("[current plan]" in m.get("content", "") for m in a.messages))
+        self.assertEqual(result, "done")
+
+
+class TestNotePin(unittest.TestCase):
+    """P4.8 pinned scratch notes: a `note` field the harness pins alongside the
+    plan (agent.py _pin_state / _add_note / the note-update guard). Notes are
+    harness-owned state, so they survive compaction verbatim — the whole point."""
+
+    def test_note_action_pins_a_fact_into_the_prompt(self):
+        d = tempfile.mkdtemp()
+        # step1 carries a `note`; it must land in self.notes and appear in step2's
+        # generation prompt (received[1]) as a pinned [notes] block, but the pin is
+        # transient — it must NEVER be persisted into self.messages.
+        step1 = '{"thought":"n","action":"bash","command":"true","note":"config lives at src/config.py"}'
+        be = _FakeBackend([step1, _SAY])
+        a = Agent(be, sm.EphemeralSession(d, "note"), max_steps=6)
+        result = a.send("go")
+
+        self.assertIn("config lives at src/config.py", a.notes)
+        notes_pins = [m for m in be.received[1] if "[notes]" in m.get("content", "")]
+        self.assertEqual(len(notes_pins), 1)
+        self.assertIn("- config lives at src/config.py", notes_pins[0]["content"])
+        # transient: the pin is appended OUTSIDE self.messages every step
+        self.assertFalse(any("[notes]" in m.get("content", "") for m in a.messages))
+        self.assertEqual(result, "done")
+
+    def test_notes_deduped_and_fifo_capped(self):
+        d = tempfile.mkdtemp()
+        be = _FakeBackend([_SAY])
+        a = Agent(be, sm.EphemeralSession(d, "cap"), max_steps=2)
+        a.notes = []
+        # dedup: exact repeat + whitespace/case variant collapse to one
+        self.assertTrue(a._add_note("fact one"))
+        self.assertFalse(a._add_note("fact one"))
+        self.assertFalse(a._add_note("  FACT   one "))
+        self.assertEqual(a.notes, ["fact one"])
+        # FIFO cap on COUNT: past NOTES_CAP the oldest is evicted
+        a.notes = []
+        for i in range(agent_mod.NOTES_CAP + 3):
+            a._add_note("n%d" % i)
+        self.assertEqual(len(a.notes), agent_mod.NOTES_CAP)
+        self.assertNotIn("n0", a.notes)                                  # oldest gone
+        self.assertIn("n%d" % (agent_mod.NOTES_CAP + 2), a.notes)        # newest kept
+        # FIFO cap on CHARS: one big note pushes older ones out
+        a.notes = []
+        a._add_note("x" * 100)
+        a._add_note("y" * agent_mod.NOTES_CHARS)
+        self.assertNotIn("x" * 100, a.notes)
+        self.assertIn("y" * agent_mod.NOTES_CHARS, a.notes)
+
+    def test_pin_state_emits_notes_with_an_empty_plan(self):
+        d = tempfile.mkdtemp()
+        be = _FakeBackend([_SAY])
+        a = Agent(be, sm.EphemeralSession(d, "pin"), max_steps=2)
+        # notes-only (empty plan) must STILL pin — _pin_plan returned None here
+        a.plan = []
+        a.notes = ["test command: pytest -q", "config at src/config.py"]
+        pin = a._pin_state()
+        self.assertIsNotNone(pin)
+        self.assertNotIn("[current plan]", pin["content"])
+        self.assertIn("[notes]", pin["content"])
+        self.assertIn("- test command: pytest -q", pin["content"])
+        self.assertIn("- config at src/config.py", pin["content"])
+        # plan AND notes present → both blocks, plan first
+        a.plan = ["[ ] do it"]
+        both = a._pin_state()["content"]
+        self.assertTrue(both.startswith("[current plan]\n[ ] do it"))
+        self.assertIn("[notes]", both)
+        # both empty → None (unchanged from the old _pin_plan)
+        a.plan, a.notes = [], []
+        self.assertIsNone(a._pin_state())
+
+    def test_seeded_test_command_note_appears_once(self):
+        d = tempfile.mkdtemp()
+        os.mkdir(os.path.join(d, "tests"))     # detect_test_cmd -> "pytest -q"
+        be = _FakeBackend([_SAY])
+        a = Agent(be, sm.EphemeralSession(d, "seed"), max_steps=2)
+        self.assertEqual(a.notes, ["test command: pytest -q"])   # seeded ONCE at init
+        # the model re-noting the same fact does not duplicate the seed
+        self.assertFalse(a._add_note("test command: pytest -q"))
+        self.assertEqual(a.notes.count("test command: pytest -q"), 1)
+
+    def test_notes_survive_compaction(self):
+        d = tempfile.mkdtemp()
+        # same compaction trigger as TestCompaction (900 >= 0.70*1000)
+        be = _FakeBackend([_SAY], ctx=1000, prompt_tokens=900, summary="STATE")
+        a = Agent(be, sm.EphemeralSession(d, "notecomp"), max_steps=4)
+        a.notes = ["config lives at src/config.py"]
+        for i in range(20):
+            role = "user" if i % 2 == 0 else "assistant"
+            a.messages.append({"role": role, "content": "<<seed %d>>" % i})
+        result = a.send("go")
+
+        contents = [m.get("content", "") for m in a.messages]
+        self.assertFalse(any("<<seed 0>>" in c for c in contents))   # middle summarized away
+        # the note is NOT stored in self.messages (harness state), yet it STILL rides
+        # the post-compaction prompt because the pin is rebuilt from self.notes
+        self.assertFalse(any("[notes]" in c for c in contents))
+        self.assertTrue(any("- config lives at src/config.py" in m.get("content", "")
+                            for m in be.received[-1]))
         self.assertEqual(result, "done")
 
 

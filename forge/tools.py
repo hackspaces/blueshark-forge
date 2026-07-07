@@ -48,11 +48,13 @@ ACTION_SCHEMA = {
         "outline": {"type": "boolean", "description": "read_file: return only the file's symbol map (defs/classes with line numbers) instead of its text — turns a 2000-line file into a ~60-line map; then read exact ranges with offset/limit"},
         "target": {"type": "string", "description": "which session to message (fleet_send): its project name, dir, or id"},
         "message": {"type": "string", "description": "the message text (say, or fleet_send)"},
+        "note": {"type": "string", "description": "a durable fact worth keeping: where something lives, a command that works, a decision made"},
     },
     "required": ["thought", "action"],
 }
 
 TOOL_HELP = """Each turn, output ONE JSON action. Maintain a `plan` (todo list) and keep it updated as you work.
+Optionally set `note` to pin a durable fact worth keeping: where something lives, a command that works, a decision made (survives compaction).
 Actions:
   bash        {command}            run a shell command, see its output
   bash        {command, background:true}   start a SERVER or long-lived process: returns pid + log file

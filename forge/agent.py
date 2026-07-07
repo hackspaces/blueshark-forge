@@ -47,6 +47,12 @@ ALL_LEVERS = frozenset({
     "compaction",   # summarize old turns near the context limit
 })
 
+# P4.8 pinned scratch notes — durable facts the harness pins alongside the plan
+# every step (so they survive compaction verbatim). FIFO-capped: oldest evicted
+# once either bound is exceeded.
+NOTES_CAP = 12       # max number of pinned notes
+NOTES_CHARS = 1500   # max total characters across pinned notes
+
 # P2.1 done-gate: a bash command that IS (a run of) a test suite marks the turn
 # verified. Covers every form detect_test_cmd emits (pytest/npm test/make test/
 # cargo test) plus the common runners, so a model that runs its own tests before
@@ -173,7 +179,8 @@ SUMMARIZE_SYSTEM = (
     "read to continue. Capture: the task/goal, what has been done, key findings, files "
     "read or changed (with exact paths), decisions made, errors hit, and the current state "
     "and next step. Preserve concrete details — paths, names, commands, values. No preamble, "
-    "no fluff. Just the state, tightly written."
+    "no fluff. Just the state, tightly written. "
+    "Facts already pinned in the notes need not be repeated."
 )
 
 _MSG_OPEN = re.compile(r'"message"\s*:\s*"')
@@ -257,6 +264,7 @@ class Agent:
             self.messages.append({"role": "assistant", "content": '{"thought":"Oriented in the workspace. Ready.","action":"say","message":"Ready."}'})
         self.head_len = len(self.messages)  # system (+ workspace) — never compacted away
         self.plan = []
+        self.notes = []   # P4.8 pinned scratch facts (durable, survive compaction — see _pin_state); seed #0 set below
         # P4.1 file-state ledger — the harness-owned model of what's been read and
         # still held in context (replaces the bare read_files set). Backs the honest
         # read-before-edit gate, served-from-cache reads, and compaction eviction.
@@ -309,6 +317,19 @@ class Agent:
                     self._retr_test_cmd = _fleet.detect_test_cmd(cwd)
             except Exception:
                 self._retr_test_cmd = None
+        # P4.8 seed note #0 = the project's detected test command, computed ONCE here
+        # (reusing the P4.5 probe when present, otherwise a single probe of its own —
+        # so the seed is robust even when the workspace lever is off), never per send().
+        _seed_cmd = self._retr_test_cmd
+        if _seed_cmd is None:
+            try:
+                from . import fleet as _fleet_seed
+                _seed_cwd = getattr(self.session, "cwd", None)
+                _seed_cmd = _fleet_seed.detect_test_cmd(_seed_cwd) if _seed_cwd else None
+            except Exception:
+                _seed_cmd = None
+        if _seed_cmd:
+            self.notes.append("test command: " + _seed_cmd)
         # P3.1 meta record: one machine-readable header per session so a dead
         # transcript is self-describing (forge version, model ladder, cwd, mode).
         # EphemeralSession.log is a no-op, so internal agents never pollute a file.
@@ -352,7 +373,7 @@ class Agent:
         self.msg_tokens = [len(m["content"]) // 4 * self.tok_ratio for m in self.messages]
         total = sum(self.msg_tokens)
         if self._lv("plan_pin"):
-            pin = self._pin_plan()
+            pin = self._pin_state()
             if pin:
                 total += len(pin["content"]) // 4 * self.tok_ratio
         return total
@@ -624,10 +645,39 @@ class Agent:
             self._reclaimed = True
             self.session.log("floor", v=TRACE_V, window=window, used=cfill())
 
-    def _pin_plan(self):
+    def _pin_state(self):
+        """P4.8: pin harness-owned scratch state — the living plan AND durable notes —
+        into context each turn. Rebuilt per-step from self.plan/self.notes so both
+        survive compaction verbatim (state held in the harness beats state held in
+        the model's context). Returns None only when BOTH are empty: an empty plan
+        must still emit notes, and notes-only must still pin. Rides the `plan_pin`
+        lever at the call site, so ablating it removes the whole state pin."""
+        parts = []
         if self.plan:
-            return {"role": "user", "content": "[current plan]\n" + "\n".join(self.plan)}
-        return None
+            parts.append("[current plan]\n" + "\n".join(self.plan))
+        if self.notes:
+            parts.append("[notes]\n" + "\n".join("- " + n for n in self.notes))
+        if not parts:
+            return None
+        return {"role": "user", "content": "\n".join(parts)}
+
+    def _add_note(self, text):
+        """Append a scratch note if it is normalized-new (dedup on whitespace-folded,
+        case-insensitive text), then FIFO-evict the oldest until both bounds hold
+        (NOTES_CAP entries and NOTES_CHARS total chars). A single oversized note is
+        kept rather than evicting itself into oblivion. Returns True if appended."""
+        text = (text or "").strip()
+        if not text:
+            return False
+        norm = " ".join(text.split()).lower()
+        if any(" ".join(n.split()).lower() == norm for n in self.notes):
+            return False
+        self.notes.append(text)
+        while len(self.notes) > 1 and (
+                len(self.notes) > NOTES_CAP
+                or sum(len(n) for n in self.notes) > NOTES_CHARS):
+            self.notes.pop(0)
+        return True
 
     # ---- P4.1 read cache + honest read-before-edit ----
     def _serve_cached_read(self, act, fp, step, trace):
@@ -980,7 +1030,7 @@ class Agent:
                         self._compact()                  # then the LLM summarizer at 70% (emergency in-turn gate)
                         self._floor()                    # then the hard floor: escape a full-window wedge
                     self._audit_prefix(step)             # P4.3: FORGE_DEBUG prefix-mutation audit (no-op by default)
-                    pin = self._pin_plan() if self._lv("plan_pin") else None
+                    pin = self._pin_state() if self._lv("plan_pin") else None
                     prompt = self.messages + ([pin] if pin else [])
                     self.on_event("thinking")
                     raw = self._generate(prompt)
@@ -1028,6 +1078,14 @@ class Agent:
                             # P4.7: persist plan changes so a --resume can restore the
                             # living plan from the transcript (mirrors meta/compact).
                             self.session.log("plan", items=self.plan)
+
+                    # P4.8 note update: pin a discovered fact alongside the plan. Any
+                    # action may carry `note`; _add_note dedups + FIFO-caps it. Because
+                    # the pin is rebuilt per-step from self.notes, the fact survives
+                    # compaction verbatim (the lossy summarizer never touches it).
+                    if isinstance(act.get("note"), str) and act["note"].strip():
+                        if self._add_note(act["note"]):
+                            self.session.log("note", items=list(self.notes))
 
                     kind = act.get("action")
                     trace["action"] = kind

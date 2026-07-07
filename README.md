@@ -219,9 +219,12 @@ pinned into context. Say "fix the auth bug" or "read this @file" and it already
 knows where things are. It also inherits whatever the fleet has learned about the repo.
 
 **Frontier agent loop**: a living plan (todo list the agent maintains and the
-harness pins each turn), surgical `edit_file` (not fragile full rewrites),
-self-correction (failed actions are flagged so the model diagnoses), loop-breaking,
-and context compaction for long sessions.
+harness pins each turn), pinned `note` scratch facts (a durable fact worth
+keeping — where something lives, a command that works — pinned alongside the plan
+so it survives compaction verbatim; the harness seeds note #0 with the detected
+test command), surgical `edit_file` (not fragile full rewrites), self-correction
+(failed actions are flagged so the model diagnoses), loop-breaking, and context
+compaction for long sessions.
 
 **Local model router (escalation ladder)**: `--model a,b,c` is a ladder of local
 models, cheapest first. forge runs on the fast one and, when it detects it's stuck
