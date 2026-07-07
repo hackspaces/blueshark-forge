@@ -340,6 +340,7 @@ class TestDoneGate(unittest.TestCase):
         events = []
         a = Agent(ScriptBackend(actions), _RecSession(d), max_steps=6,
                   on_event=lambda k, **kw: events.append((k, kw)))
+        asked.clear()   # P4.5 memoizes the test cmd ONCE at construction; the gate itself must not seek one
         result = a.send("look")
         self.assertEqual(result, "all done")
         self.assertEqual(asked, [])                              # gate never even sought a test cmd
@@ -2758,6 +2759,86 @@ class TestRepoMap(unittest.TestCase):
             self.assertNotIn("Key symbols", small)           # tiny window → no symbol map
             self.assertIn("Key symbols", large)              # roomy window → symbols included
             self.assertIn("handler", large)
+        finally:
+            os.environ.pop("FORGE_INDEX_DIR", None)
+
+
+class TestJitRetrieval(unittest.TestCase):
+    """P4.5 — turn-start '[retrieved context]' injection from the symbol index."""
+
+    _SAY = '{"thought":"done","action":"say","message":"ok"}'
+
+    def _repo(self, **files):
+        d = tempfile.mkdtemp()
+        for name, body in files.items():
+            p = os.path.join(d, name)
+            os.makedirs(os.path.dirname(p), exist_ok=True) if "/" in name else None
+            _write(p, body)
+        return d
+
+    def _note(self, agent):
+        """The single injected retrieval message, or None."""
+        for m in agent.messages:
+            if m["role"] == "user" and m["content"].startswith("[retrieved context"):
+                return m["content"]
+        return None
+
+    def test_injects_bounded_note_for_named_file_and_symbol(self):
+        # a BARE Agent.send (no repl, no @-expansion) — proves cmd_run/fleet get it too
+        d = self._repo(**{"pyproject.toml": "[project]\nname='x'\n",
+                          "auth.py": "def authenticate(user, pw):\n    return True\n"})
+        os.environ["FORGE_INDEX_DIR"] = tempfile.mkdtemp()
+        try:
+            a = Agent(ScriptBackend([self._SAY]), sm.EphemeralSession(d, "jit"), max_steps=2)
+            a.send("please fix authenticate in auth.py")
+            note = self._note(a)
+            self.assertIsNotNone(note)                                # a note was injected
+            self.assertIn("auth.py", note)                            # the matched file
+            self.assertIn("authenticate — auth.py:1", note)           # symbol name — file:line
+            self.assertIn("def authenticate(user, pw)", note)         # reconstructed signature
+            self.assertIn("Test: pytest -q", note)                    # the detected test command
+            self.assertLessEqual(len(note), 2400 + 20)                # capped
+        finally:
+            os.environ.pop("FORGE_INDEX_DIR", None)
+
+    def test_skips_when_nothing_matches(self):
+        d = self._repo(**{"auth.py": "def authenticate():\n    return 1\n"})
+        os.environ["FORGE_INDEX_DIR"] = tempfile.mkdtemp()
+        try:
+            a = Agent(ScriptBackend([self._SAY]), sm.EphemeralSession(d, "jit"), max_steps=2)
+            a.send("please fix the frobnicate gizmo and refactor everything")
+            self.assertIsNone(self._note(a))                          # nothing real named → NOTHING
+        finally:
+            os.environ.pop("FORGE_INDEX_DIR", None)
+
+    def test_note_is_capped_and_truncated(self):
+        # 10 symbols with very long signatures → the raw note blows past the cap
+        args = ", ".join(f"parameter_number_{i}=0" for i in range(30))
+        body = "".join(f"def handler{n}({args}):\n    return {n}\n\n" for n in range(10))
+        d = self._repo(**{"big.py": body})
+        os.environ["FORGE_INDEX_DIR"] = tempfile.mkdtemp()
+        try:
+            a = Agent(ScriptBackend([self._SAY]), sm.EphemeralSession(d, "jit"), max_steps=2)
+            a.send("look at the handler functions in big.py")
+            note = self._note(a)
+            self.assertIsNotNone(note)
+            self.assertLessEqual(len(note), 2400 + len("\n… (truncated)"))
+            self.assertTrue(note.endswith("(truncated)"))
+            # never more than the hard caps' worth of symbol lines
+            self.assertLessEqual(sum(1 for ln in note.splitlines() if ln.startswith("- handler")), 10)
+        finally:
+            os.environ.pop("FORGE_INDEX_DIR", None)
+
+    def test_gated_off_in_bare_mode(self):
+        # levers=frozenset() (bench 'bare' harness) → workspace lever off → NO note,
+        # even when the prompt names a real file. Injection lives in the workspace lever.
+        d = self._repo(**{"auth.py": "def authenticate():\n    return 1\n"})
+        os.environ["FORGE_INDEX_DIR"] = tempfile.mkdtemp()
+        try:
+            a = Agent(ScriptBackend([self._SAY]), sm.EphemeralSession(d, "jit"),
+                      max_steps=2, levers=frozenset())
+            a.send("fix authenticate in auth.py")
+            self.assertIsNone(self._note(a))
         finally:
             os.environ.pop("FORGE_INDEX_DIR", None)
 

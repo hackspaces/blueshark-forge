@@ -93,6 +93,81 @@ def _cmd_missing(out):
     o = (out or "").lower()
     return "command not found" in o or ": not found" in o
 
+
+# ---- P4.5 just-in-time retrieval ---------------------------------------------
+# When a user turn starts, scan the prompt for path fragments and identifiers,
+# resolve them against the deterministic file list + symbol index (P4.4), and
+# inject ONE compact "[retrieved context]" note. This converts the first several
+# pure-retrieval steps (list/grep/glob/read to rediscover WHERE things live) into
+# zero steps. Load-bearing safety rails (judge): SKIP the note entirely when
+# nothing resolves — a note fired every turn poisons a small model's context —
+# and cap it hard (~600 tokens). It is a plain user message, so it rides normal
+# compaction and is cheap to regenerate next turn.
+RETR_MAX_FILES = 8
+RETR_MAX_SYMS = 10
+RETR_CHAR_CAP = 2400        # ~600 tokens at 4 chars/token
+RETR_TAG = "[retrieved context — verified paths and symbols, current as of this turn]"
+
+# Very common English / instruction words that must never be treated as a file or
+# symbol candidate: some repo really does define a `run`/`get`/`test` symbol, so
+# the skip-when-empty rule alone can't catch them — this stoplist can.
+_RETR_STOP = frozenset("""
+the a an and or nor for to of in on at by with from into onto over under this that
+these those it its is are was were be been being do does did done has have had can
+could should would will shall may might must not no yes ok please help me my we you
+your our their them they he she who whom whose what why how when where which while
+then than else if so as up out off down all any both each few more most other some
+such only own same too very just now here there about above after again run test
+tests fix add added make made change update read write file files code func function
+class method get set use using need want like let go new old also want build check
+""".split())
+
+_RETR_PATH_RE = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_./\-]*")
+_RETR_WORD_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+_RETR_DOTTED_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)+")
+
+
+def _retrieval_extract(text):
+    """Conservative candidate extraction from a user prompt.
+
+    Returns (paths, idents): `paths` are slash- or dotted-filename tokens matched
+    against the file list; `idents` are code-shaped words matched against symbols.
+    Deliberately biased toward MISSING a candidate over inventing a noisy one —
+    the resolver + skip-when-empty do the rest of the filtering."""
+    text = (text or "")[:4000]
+    paths, idents = set(), set()
+    for m in _RETR_PATH_RE.findall(text):
+        if "/" in m or re.search(r"\.[A-Za-z0-9]{1,6}$", m):
+            paths.add(m.strip("./"))
+    for m in _RETR_WORD_RE.findall(text):
+        if m.lower() in _RETR_STOP or len(m) < 3:
+            continue
+        if ("_" in m) or (m[1:].lower() != m[1:]) or len(m) >= 4:   # snake / camel / long
+            idents.add(m)
+    for m in _RETR_DOTTED_RE.findall(text):     # module.attr → attr is the symbol
+        tail = m.split(".")[-1]
+        if tail.lower() not in _RETR_STOP and len(tail) >= 3:
+            idents.add(tail)
+    return paths, idents
+
+
+def _retr_file_line(cwd, rel):
+    """'path (size, YYYY-MM-DD)' with a human size; degrades to the bare path."""
+    try:
+        st = os.stat(os.path.join(cwd, rel))
+        size = float(st.st_size)
+        human = f"{int(size)} B"
+        if size >= 1024:
+            for unit in ("KB", "MB", "GB"):
+                size /= 1024.0
+                if size < 1024 or unit == "GB":
+                    human = f"{size:.1f} {unit}"
+                    break
+        return f"{rel} ({human}, {time.strftime('%Y-%m-%d', time.localtime(st.st_mtime))})"
+    except OSError:
+        return rel
+
+
 SUMMARIZE_SYSTEM = (
     "You compress an AI coding agent's work-in-progress into a dense STATE note it will "
     "read to continue. Capture: the task/goal, what has been done, key findings, files "
@@ -215,6 +290,25 @@ class Agent:
         self._prefix_hash = None         # FORGE_DEBUG prefix-mutation audit (off by default)
         from . import config as _cfg
         self.approvals = set(_cfg.get("approvals") or [])   # 'always'-approved action keys
+        # P4.5 just-in-time retrieval: the project's test command, detected ONCE
+        # (fleet.detect_test_cmd is otherwise computed only inside verify() and
+        # never surfaced to the working agent). The file-list + symbol tables are
+        # built lazily on the first turn that actually has candidates.
+        self._retr_built = False
+        self._retr_files = ()
+        self._retr_fileset = frozenset()
+        self._retr_by_base = {}
+        self._retr_by_stem = {}
+        self._retr_symbols = ()
+        self._retr_test_cmd = None
+        if self._lv("workspace"):
+            try:
+                from . import fleet as _fleet
+                cwd = getattr(self.session, "cwd", None)
+                if cwd:
+                    self._retr_test_cmd = _fleet.detect_test_cmd(cwd)
+            except Exception:
+                self._retr_test_cmd = None
         # P3.1 meta record: one machine-readable header per session so a dead
         # transcript is self-describing (forge version, model ladder, cwd, mode).
         # EphemeralSession.log is a no-op, so internal agents never pollute a file.
@@ -726,8 +820,136 @@ class Agent:
         return (f"[done-check] `{cmd}` FAILS:\n{tail}\n— fix before finishing, or say why "
                 "this failure is out of scope")
 
+    # ---- P4.5 just-in-time retrieval -----------------------------------------
+    def _retrieval_ensure(self):
+        """Build the file-list + symbol lookup tables once per session (lazy: only
+        the first turn whose prompt actually has candidates pays the I/O). Fully
+        best-effort — every failure degrades to fewer matches, never a crash."""
+        if self._retr_built:
+            return
+        self._retr_built = True
+        cwd = getattr(self.session, "cwd", None)
+        if not cwd:
+            return
+        try:
+            from . import workspace as _ws
+            files = _ws._source_files(cwd, 5000)
+        except Exception:
+            files = []
+        self._retr_files = tuple(files)
+        self._retr_fileset = frozenset(files)
+        for f in files:
+            base = f.rsplit("/", 1)[-1]
+            self._retr_by_base.setdefault(base, []).append(f)
+            stem = base.rsplit(".", 1)[0] if "." in base else base
+            if stem:
+                self._retr_by_stem.setdefault(stem, []).append(f)
+        try:
+            from . import index as _index
+            self._retr_symbols = tuple(_index.refresh(cwd) or ())
+        except Exception:
+            self._retr_symbols = ()
+
+    def _match_files(self, cands):
+        """Resolve path/word candidates to real repo files by exact path, path
+        suffix, basename, then basename-without-extension. Capped, deduped."""
+        files = self._retr_files
+        if not files:
+            return []
+        hits, seen = [], set()
+        for cand in cands:
+            cand = cand.strip("/")
+            if not cand:
+                continue
+            matched = None
+            if cand in self._retr_fileset:
+                matched = [cand]
+            elif "/" in cand:
+                matched = [f for f in files if f.endswith("/" + cand)] or None
+            if matched is None:
+                base = cand.rsplit("/", 1)[-1]
+                matched = self._retr_by_base.get(base) or self._retr_by_stem.get(base)
+            for f in (matched or []):
+                if f not in seen:
+                    seen.add(f)
+                    hits.append(f)
+                    if len(hits) >= RETR_MAX_FILES:
+                        return hits
+        return hits
+
+    def _match_symbols(self, idents):
+        """Resolve identifiers to indexed symbol definitions: exact (full dotted
+        name or its simple tail) first, then a bounded prefix fill (candidate ≥4
+        chars). Index order is preserved, so results are deterministic."""
+        syms = self._retr_symbols
+        if not syms or not idents:
+            return []
+        hits, seen = [], set()
+
+        def _take(s):
+            key = (s.get("path"), s.get("lineno"), s.get("name"))
+            if key not in seen:
+                seen.add(key)
+                hits.append(s)
+
+        for s in syms:
+            name = s.get("name", "")
+            if name in idents or name.rsplit(".", 1)[-1] in idents:
+                _take(s)
+                if len(hits) >= RETR_MAX_SYMS:
+                    return hits
+        longs = [i for i in idents if len(i) >= 4]
+        if longs:
+            for s in syms:
+                simple = s.get("name", "").rsplit(".", 1)[-1]
+                if any(simple != c and simple.startswith(c) for c in longs):
+                    _take(s)
+                    if len(hits) >= RETR_MAX_SYMS:
+                        break
+        return hits
+
+    def _retrieval_note(self, user_text):
+        """The one-shot '[retrieved context]' note, or None when nothing in the
+        prompt resolves to a real path/symbol (the load-bearing skip rule)."""
+        paths, idents = _retrieval_extract(user_text)
+        if not paths and not idents:
+            return None
+        self._retrieval_ensure()
+        files = self._match_files(set(paths) | set(idents))
+        syms = self._match_symbols(idents)
+        if not files and not syms:
+            return None                          # nothing matched → inject NOTHING
+        cwd = getattr(self.session, "cwd", "") or ""
+        lines = [RETR_TAG]
+        if files:
+            lines.append("Files:")
+            lines += [f"- {_retr_file_line(cwd, f)}" for f in files[:RETR_MAX_FILES]]
+        if syms:
+            lines.append("Symbols:")
+            for s in syms[:RETR_MAX_SYMS]:
+                sig = (s.get("signature") or "").strip()
+                lines.append(f"- {s.get('name')} — {s.get('path')}:{s.get('lineno')}"
+                             + (f"  {sig}" if sig else ""))
+        if self._retr_test_cmd:
+            lines.append(f"Test: {self._retr_test_cmd}")
+        note = "\n".join(lines)
+        if len(note) > RETR_CHAR_CAP:
+            note = note[:RETR_CHAR_CAP].rstrip() + "\n… (truncated)"
+        return note
+
     def send(self, user_text):
         self.messages.append({"role": "user", "content": user_text})
+        # P4.5 just-in-time retrieval: turn-start, inject ONE deterministic
+        # "[retrieved context]" note (matched files + symbols + the test command)
+        # so the first pure-retrieval steps become zero steps. Skipped when the
+        # prompt names nothing real; wrapped so retrieval NEVER breaks a turn.
+        if self._lv("workspace"):
+            try:
+                note = self._retrieval_note(user_text)
+            except Exception:
+                note = None
+            if note:
+                self.messages.append({"role": "user", "content": note})
         self._mutated = set()
         self._verified = False
         self._bounced = False
