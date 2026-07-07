@@ -550,6 +550,49 @@ class TestPathlessFileActions(unittest.TestCase):
         self.assertTrue(os.path.exists(os.path.join(d, "pkg/x.go")))
 
 
+class TestBackgroundBash(unittest.TestCase):
+    """Servers must keep running while the agent continues, and die with forge."""
+
+    def tearDown(self):
+        from forge import tools
+        tools._kill_background()
+        tools._BG_PROCS.clear()
+
+    def test_background_returns_immediately_and_keeps_running(self):
+        import time as _t
+        t0 = _t.monotonic()
+        obs, ok = execute({"action": "bash", "command": "sleep 30", "background": True}, "/tmp")
+        self.assertLess(_t.monotonic() - t0, 5)
+        self.assertTrue(ok)
+        self.assertIn("pid", obs)
+        self.assertIn("KEEPS RUNNING", obs)
+        from forge import tools
+        self.assertIsNone(tools._BG_PROCS[-1].poll())    # still alive
+
+    def test_instant_crash_is_reported(self):
+        obs, ok = execute({"action": "bash", "command": "echo boom >&2; exit 3", "background": True}, "/tmp")
+        self.assertFalse(ok)
+        self.assertIn("exited immediately", obs)
+        self.assertIn("boom", obs)
+
+    def test_trailing_ampersand_heuristic(self):
+        obs, ok = execute({"action": "bash", "command": "sleep 30 &"}, "/tmp")
+        self.assertTrue(ok)
+        self.assertIn("background", obs)
+        # && must NOT trigger it
+        obs2, ok2 = execute({"action": "bash", "command": "true && echo chained"}, "/tmp")
+        self.assertTrue(ok2)
+        self.assertIn("chained", obs2)
+
+    def test_kill_background_cleans_up(self):
+        from forge import tools
+        execute({"action": "bash", "command": "sleep 30", "background": True}, "/tmp")
+        p = tools._BG_PROCS[-1]
+        tools._kill_background()
+        p.wait(timeout=5)
+        self.assertIsNotNone(p.poll())
+
+
 class TestApprovalGate(unittest.TestCase):
     def test_request_answer_across_threads(self):
         import threading

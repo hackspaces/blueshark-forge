@@ -34,6 +34,7 @@ ACTION_SCHEMA = {
             "enum": ["bash", "read_file", "write_file", "edit_file", "list_files", "grep", "glob", "fleet_send", "say"],
         },
         "command": {"type": "string", "description": "shell command (bash)"},
+        "background": {"type": "boolean", "description": "bash: run as a background process (servers, watchers) — returns pid + log file immediately and keeps running while you continue"},
         "path": {"type": "string", "description": "file path (read/write/edit/list)"},
         "content": {"type": "string", "description": "full file content (write_file)"},
         "old": {"type": "string", "description": "exact text to replace (edit_file)"},
@@ -50,6 +51,9 @@ ACTION_SCHEMA = {
 TOOL_HELP = """Each turn, output ONE JSON action. Maintain a `plan` (todo list) and keep it updated as you work.
 Actions:
   bash        {command}            run a shell command, see its output
+  bash        {command, background:true}   start a SERVER or long-lived process: returns pid + log file
+                                  immediately and keeps running — then test it (curl, client, ...),
+                                  check output with `tail <log>`, stop with `kill <pid>`
   read_file   {path}              read a file
   write_file  {path, content}     create/overwrite a file with full content
   edit_file   {path, old, new}    surgically replace an exact snippet (preferred for changes)
@@ -96,6 +100,51 @@ def _maybe_offload(text, label):
     head = text[:MAX_OUTPUT]
     return (f"{head}\n\n[... output truncated: {len(text)} chars total. Full output saved to {fn} — "
             f"read a range or grep it for what you need.]")
+
+
+# ---- background processes (servers, watchers) --------------------------------
+# The agent starts one, gets a pid + live log file back IMMEDIATELY, and keeps
+# working — test with curl, tail the log, kill the pid. All are cleaned up when
+# the forge session exits.
+_BG_PROCS = []
+_BG_TRAILING_AMP = __import__("re").compile(r"(?<![&|])&\s*$")
+
+
+def _run_background(cmd, cwd):
+    import time
+    os.makedirs(_OVERFLOW_DIR, exist_ok=True)
+    log = os.path.join(_OVERFLOW_DIR, f"bg-{len(_BG_PROCS) + 1}-{os.getpid()}.log")
+    lf = open(log, "w")
+    p = subprocess.Popen(cmd, cwd=cwd, shell=True, stdout=lf, stderr=subprocess.STDOUT,
+                         start_new_session=True)
+    _BG_PROCS.append(p)
+    if len(_BG_PROCS) == 1:
+        import atexit
+        atexit.register(_kill_background)
+    time.sleep(1.2)                      # long enough to catch an instant crash
+    if p.poll() is not None:
+        lf.flush()
+        try:
+            with open(log, errors="replace") as f:
+                tail = f.read()[-800:]
+        except OSError:
+            tail = ""
+        return (f"(background command exited immediately, code {p.returncode}) output:\n{tail}",
+                p.returncode == 0)
+    return (f"✓ running in the background: pid {p.pid}, output → {log}\n"
+            f"It KEEPS RUNNING while you continue — test it now (curl, run a client, ...). "
+            f"Check its output: bash `tail -n 40 {log}`. Stop it: bash `kill {p.pid}`. "
+            f"It is stopped automatically when this forge session ends.", True)
+
+
+def _kill_background():
+    import signal
+    for p in _BG_PROCS:
+        if p.poll() is None:
+            try:
+                os.killpg(os.getpgid(p.pid), signal.SIGKILL)
+            except (OSError, ProcessLookupError):
+                pass
 
 
 def _run(cmd, cwd, timeout=None, stop=None):
@@ -165,6 +214,8 @@ def execute(action, cwd, stop=None):
             cmd = (action.get("command") or "").strip()
             if not cmd:
                 return "(no command provided)", False
+            if action.get("background") or _BG_TRAILING_AMP.search(cmd):
+                return _run_background(_BG_TRAILING_AMP.sub("", cmd).strip(), cwd)
             return _run(cmd, cwd, stop=stop)
         if a == "list_files":
             lp = _resolve(cwd, action.get("path", "."))
