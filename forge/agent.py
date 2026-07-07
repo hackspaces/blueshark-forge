@@ -21,6 +21,52 @@ from .tools import ACTION_SCHEMA, TOOL_HELP, execute, shape, error_hint
 
 STUCK_AT = int(os.environ.get("FORGE_STUCK_THRESHOLD", "7"))  # failures before escalating a rung
 
+# P2.1 done-gate: a bash command that IS (a run of) a test suite marks the turn
+# verified. Covers every form detect_test_cmd emits (pytest/npm test/make test/
+# cargo test) plus the common runners, so a model that runs its own tests before
+# `say` isn't re-tested by the harness. Anchored at a command HEAD (segment start,
+# after shell separators) — NOT a bare substring — so `which pytest`,
+# `pip install pytest`, `pytest --version`, and `git commit -m "make test green"`
+# (which run zero tests) do NOT falsely satisfy the gate.
+_TEST_CMD_RE = re.compile(
+    r"^(pytest|py\.test|npm (run )?test|pnpm (run )?test|yarn (run )?test|"
+    r"go test|cargo test|make test|tox|jest|vitest|rspec|"
+    r"(python[0-9.]*|py) -m (unittest|pytest))\b")
+_SHELL_SEP_RE = re.compile(r"[;&|\n]+")
+_NOOP_FLAGS = frozenset(("--version", "-V", "--help", "-h", "--collect-only"))
+
+
+def _is_test_cmd(command, cwd):
+    """True if `command` actually RUNS the project's tests: a known runner (or the
+    deterministically detected test cmd for `cwd`) at a command-HEAD position, and
+    not a no-op invocation (--version/--help/--collect-only)."""
+    if not command:
+        return False
+    from . import fleet
+    try:
+        detected = (fleet.detect_test_cmd(cwd) or "").split()
+    except Exception:
+        detected = []
+    for seg in _SHELL_SEP_RE.split(command):
+        toks = seg.split()
+        while toks and ("=" in toks[0] or toks[0] in ("sudo", "env", "time", "nice", "command")):
+            toks = toks[1:]                       # strip leading env-assignment / wrapper
+        if not toks or _NOOP_FLAGS.intersection(toks):
+            continue
+        if _TEST_CMD_RE.match(" ".join(toks)):
+            return True
+        if detected and toks[:len(detected)] == detected:   # exact detected-cmd prefix
+            return True
+    return False
+
+
+def _cmd_missing(out):
+    """A guessed test command wasn't runnable here (exit 127) — e.g. detect_test_cmd
+    returns 'pytest -q' just because a tests/ dir exists, but pytest isn't installed.
+    _run swallows the return code, so we read the shell's own phrasing."""
+    o = (out or "").lower()
+    return "command not found" in o or ": not found" in o
+
 SUMMARIZE_SYSTEM = (
     "You compress an AI coding agent's work-in-progress into a dense STATE note it will "
     "read to continue. Capture: the task/goal, what has been done, key findings, files "
@@ -106,6 +152,9 @@ class Agent:
         self.head_len = len(self.messages)  # system (+ workspace) — never compacted away
         self.plan = []
         self.read_files = set()  # abs paths read this session — enforces read-before-edit
+        self._mutated = set()    # P2.1 done-gate: paths mutated THIS turn
+        self._verified = False   # a test run this turn already passed
+        self._bounced = False    # the done-gate already bounced/nudged once this turn
         self.stop = threading.Event()  # set from the UI (Esc) to interrupt mid-run
         self.mode = "auto"             # auto | plan | manual (set by the UI)
         self.approve = lambda desc: "yes"   # manual-mode hook: 'yes' | 'always' | 'no'
@@ -243,8 +292,43 @@ class Agent:
         return ("the user DECLINED this action. Do not retry it as-is — take a different approach, "
                 "or `say` to ask them how to proceed.")
 
+    def _done_gate(self):
+        """P2.1 — SYNCHRONOUS done-gate on `say`. If this turn mutated files and
+        nothing has verified them, the HARNESS itself runs the project's real test
+        command (zero model tokens) and grounds acceptance in the exit code. It
+        bounces at most ONCE per turn — the second `say` always passes, no
+        livelock — and NEVER emits an observation-ok event (existing tests key on
+        that stream); it uses the distinct 'done_check' event plus a plain
+        user-message append. Returns a bounce message to append+continue, or None
+        to accept the say."""
+        if not self._mutated or self._verified or self._bounced:
+            return None
+        from . import fleet, tools
+        try:
+            cmd = fleet.detect_test_cmd(self.session.cwd)
+        except Exception:
+            cmd = None
+        if not cmd:
+            return None                       # no detectable suite → accept gracefully
+        obs2, ok2 = tools._run(cmd, self.session.cwd, timeout=tools.BASH_TIMEOUT * 3, stop=self.stop)
+        if _cmd_missing(obs2):                # exit 127 / not installed → not a usable test cmd
+            return None
+        if ok2:
+            self.session.log("verified", cmd=cmd, ok=True)
+            self.on_event("done_check", cmd=cmd, ok=True)
+            self.messages.append({"role": "user", "content": f"[done-gate] `{cmd}` passed"})
+            return None
+        self._bounced = True
+        self.on_event("done_check", cmd=cmd, ok=False)
+        tail = "\n".join((obs2 or "").splitlines()[-15:])
+        return (f"[done-check] `{cmd}` FAILS:\n{tail}\n— fix before finishing, or say why "
+                "this failure is out of scope")
+
     def send(self, user_text):
         self.messages.append({"role": "user", "content": user_text})
+        self._mutated = set()
+        self._verified = False
+        self._bounced = False
         self.session.log("user", text=user_text)
         self.session.set_status("working")
         bad = 0
@@ -283,6 +367,10 @@ class Agent:
 
                 kind = act.get("action")
                 if kind == "say":
+                    bounce = self._done_gate()
+                    if bounce:
+                        self.messages.append({"role": "user", "content": bounce})
+                        continue
                     msg = act.get("message", "")
                     self.session.log("assistant", text=msg, thought=act.get("thought", ""))
                     self.on_event("say", message=msg)
@@ -380,6 +468,17 @@ class Agent:
                 budget = self._obs_budget()
                 if ok and kind in ("read_file", "write_file") and act.get("path"):
                     self.read_files.add(os.path.realpath(os.path.join(self.session.cwd, act["path"])))
+                if ok and kind in ("write_file", "edit_file") and act.get("path"):
+                    self._mutated.add(os.path.realpath(os.path.join(self.session.cwd, act["path"])))
+                    self._verified = False
+                if ok and kind == "bash":
+                    _cmd = act.get("command", "")
+                    from . import fleet as _fleet
+                    if _is_test_cmd(_cmd, self.session.cwd):
+                        self._verified = True         # the model ran the suite itself
+                    elif _fleet.bash_mutates(_cmd):
+                        self._mutated.add("<bash>")   # a file-touching bash still gates `say`
+                        self._verified = False
                 if ok and kind == "edit_file":
                     self.on_event("diff", path=act.get("path", ""), old=act.get("old", ""), new=act.get("new", ""))
                 elif ok and kind == "write_file":

@@ -140,6 +140,11 @@ class UI:
             self._line(f"  {YE}✉ {k['sender']}: {k['text'][:76]}{RST}")
         elif kind == "compact":
             self._line(f"  {DIM}⟲ context compacted{RST}")
+        elif kind == "done_check":
+            if k.get("ok"):
+                self._line(f"  {GR}✓ done-gate: {k.get('cmd','')} passed{RST}")
+            else:
+                self._line(f"  {YE}▸ done-gate: {k.get('cmd','')} failed — sent back to fix{RST}")
         elif kind in ("malformed", "loop"):
             self._line(f"  {DIM}· ({kind}, recovering){RST}")
 

@@ -52,6 +52,9 @@ class Forged:
             if seen.get(e["sid"]) == h:
                 continue
             seen[e["sid"]] = h; _save("seen-claims.json", seen)
+            if fleet.harness_verified(e["sid"]):
+                log(f'TRUST: "{e["name"]}" already harness-verified this turn → skip')
+                continue
             log(f'TRUST: "{e["name"]}" claims done → verifying ({self.model})')
             r = fleet.verify(text[:1500], e["cwd"], self.model)
             with open(fleet.RECEIPTS, "a") as f:

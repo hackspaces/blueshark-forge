@@ -260,6 +260,241 @@ class TestReadBeforeEdit(unittest.TestCase):
         self.assertIn("x = 2", _read(os.path.join(d, "r.py")))
 
 
+class _RecSession:
+    """A minimal session that records log() calls — enough to drive Agent.send
+    and inspect the transcript the done-gate writes."""
+    def __init__(self, cwd, sid="rec"):
+        self.cwd, self.sid, self.name = cwd, sid, "rec"
+        self.status = "idle"
+        self.logs = []
+    def log(self, kind, **fields): self.logs.append((kind, fields))
+    def drain(self): return []
+    def set_status(self, s): self.status = s
+    def push(self, sender, text): pass
+
+
+class TestDoneGate(unittest.TestCase):
+    """P2.1 — the harness runs the real test command before accepting `say`:
+    a passing suite is grounded and logged 'verified', a failing one bounces the
+    say exactly once (never a second time — no livelock), a no-mutation turn is
+    never gated, and the gate uses the 'done_check' event, never observation-ok."""
+
+    def setUp(self):
+        from forge import fleet
+        self.fleet = fleet
+        self._orig = fleet.detect_test_cmd
+
+    def tearDown(self):
+        self.fleet.detect_test_cmd = self._orig
+
+    def _run_turn(self, actions, test_cmd):
+        d = tempfile.mkdtemp()
+        self.fleet.detect_test_cmd = lambda cwd: test_cmd
+        events = []
+        sess = _RecSession(d)
+        a = Agent(ScriptBackend(actions), sess, max_steps=8,
+                  on_event=lambda k, **kw: events.append((k, kw)))
+        result = a.send("do it")
+        return result, events, sess, d
+
+    _WRITE = '{"thought":"w","action":"write_file","path":"new.py","content":"x = 1\\n"}'
+    _SAY = '{"thought":"d","action":"say","message":"all done"}'
+
+    def test_passing_test_accepts_and_logs_verified(self):
+        result, events, sess, _ = self._run_turn([self._WRITE, self._SAY], test_cmd="true")
+        self.assertEqual(result, "all done")                     # say accepted
+        checks = [kw for k, kw in events if k == "done_check"]
+        self.assertEqual(len(checks), 1)
+        self.assertTrue(checks[0]["ok"])                         # harness ran it, it passed
+        self.assertTrue(any(k == "verified" and f.get("ok") for k, f in sess.logs))
+        # the gate must NOT masquerade as a failed observation
+        self.assertFalse(any(k == "observation" and kw.get("ok") is False for k, kw in events))
+
+    def test_failing_test_bounces_once_then_second_say_passes(self):
+        result, events, sess, _ = self._run_turn([self._WRITE, self._SAY], test_cmd="false")
+        self.assertEqual(result, "all done")                     # the SECOND say gets through
+        checks = [kw for k, kw in events if k == "done_check"]
+        self.assertEqual(len(checks), 1)                         # bounced exactly once, no livelock
+        self.assertFalse(checks[0]["ok"])
+        self.assertFalse(any(k == "verified" for k, f in sess.logs))  # never grounded
+        # CRITICAL: the bounce is NOT an observation-ok=False event
+        self.assertFalse(any(k == "observation" and kw.get("ok") is False for k, kw in events))
+        # it left a plain user-visible done-check note in the transcript context
+        self.assertTrue(any(k == "say" for k, kw in events))
+
+    def test_no_mutation_turn_is_never_gated(self):
+        _write(os.path.join(tempfile.mkdtemp(), "z"), "z")       # unrelated
+        asked = []
+        d = tempfile.mkdtemp()
+        _write(os.path.join(d, "seen.py"), "y = 2\n")
+        self.fleet.detect_test_cmd = lambda cwd: asked.append(cwd) or "true"
+        actions = [
+            '{"thought":"r","action":"read_file","path":"seen.py"}',
+            self._SAY,
+        ]
+        events = []
+        a = Agent(ScriptBackend(actions), _RecSession(d), max_steps=6,
+                  on_event=lambda k, **kw: events.append((k, kw)))
+        result = a.send("look")
+        self.assertEqual(result, "all done")
+        self.assertEqual(asked, [])                              # gate never even sought a test cmd
+        self.assertFalse(any(k == "done_check" for k, kw in events))
+
+    def test_missing_command_is_not_a_failure(self):
+        # detect_test_cmd guesses 'pytest -q' from a bare tests/ dir; if it isn't
+        # installed the command exits 127 — treat as no usable suite, accept, no bounce.
+        result, events, sess, _ = self._run_turn(
+            [self._WRITE, self._SAY], test_cmd="forge-no-such-cmd-xyz")
+        self.assertEqual(result, "all done")
+        self.assertFalse(any(k == "done_check" for k, kw in events))
+        self.assertFalse(any(k == "verified" for k, f in sess.logs))
+
+    def test_is_test_cmd_recognizes_runners(self):
+        from forge.agent import _is_test_cmd
+        d = tempfile.mkdtemp()
+        for c in ("pytest -q", "npm test --silent", "npm run test", "go test ./...",
+                  "cargo test", "make test", "python3 -m unittest"):
+            self.assertTrue(_is_test_cmd(c, d), c)
+        for c in ("echo hi", "ls -la", "git status", ""):
+            self.assertFalse(_is_test_cmd(c, d), c)
+
+    def test_is_test_cmd_rejects_lookalikes(self):
+        # a runner NAMED somewhere in the string but not actually running tests must
+        # NOT satisfy the gate (was a soundness hole: substring match set _verified).
+        from forge.agent import _is_test_cmd
+        d = tempfile.mkdtemp()
+        for c in ("pytest --version", "which pytest", "pip install pytest",
+                  'git commit -m "make test now green"', "pytest --collect-only",
+                  "cargo test --help", "echo 'run pytest later'"):
+            self.assertFalse(_is_test_cmd(c, d), c)
+        # a real runner reached after a shell separator still counts
+        self.assertTrue(_is_test_cmd("cd sub && pytest -q", d))
+
+    def test_bash_write_gates_say(self):
+        # a file mutation made via BASH (echo > f, sed -i) must still gate `say` —
+        # it used to bypass the gate entirely because only write_file/edit_file
+        # were tracked. Failing suite -> bounce exactly once, second say passes.
+        d = tempfile.mkdtemp()
+        self.fleet.detect_test_cmd = lambda cwd: "false"
+        actions = [
+            '{"thought":"w","action":"bash","command":"echo broken > app.py"}',
+            self._SAY,
+        ]
+        events = []
+        a = Agent(ScriptBackend(actions), _RecSession(d), max_steps=8,
+                  on_event=lambda k, **kw: events.append((k, kw)))
+        result = a.send("do it")
+        self.assertEqual(result, "all done")                     # second say passes
+        checks = [kw for k, kw in events if k == "done_check"]
+        self.assertEqual(len(checks), 1)                         # gate DID run, bounced once
+        self.assertFalse(checks[0]["ok"])
+
+    def test_readonly_bash_is_not_gated(self):
+        # a turn whose only bash is read-only (ls) is not a mutation, so the gate
+        # never runs the suite (no done_check) even though a test cmd is available.
+        d = tempfile.mkdtemp()
+        self.fleet.detect_test_cmd = lambda cwd: "false"       # would bounce IF the gate ran
+        actions = ['{"thought":"l","action":"bash","command":"ls -la"}', self._SAY]
+        events = []
+        a = Agent(ScriptBackend(actions), _RecSession(d), max_steps=6,
+                  on_event=lambda k, **kw: events.append((k, kw)))
+        result = a.send("look")
+        self.assertEqual(result, "all done")                    # accepted, never bounced
+        self.assertFalse(any(k == "done_check" for k, kw in events))
+
+    def test_bash_mutates_classifier(self):
+        from forge import fleet
+        for c in ("echo x > f", "cat x >> log", "sed -i s/a/b/ f", "perl -i -pe s/a/b/ f",
+                  "rm f", "mv a b", "cp a b", "mkdir d", "chmod +x s", "git checkout f",
+                  "git reset --hard", "/bin/rm -rf x", "FOO=1 tee out"):
+            self.assertTrue(fleet.bash_mutates(c), c)
+        for c in ("ls -la", "cat f", "grep -rn x .", "git status", "git diff", "git log",
+                  "pytest -q", "make test", "python app.py 2>&1", "echo hi", "git add -A", ""):
+            self.assertFalse(fleet.bash_mutates(c), c)
+
+    def test_model_running_its_own_tests_satisfies_the_gate(self):
+        # if the model itself runs the suite green (a bash matching a test runner
+        # that exits 0), the harness does not re-run it: no done_check, say passes.
+        import shutil
+        if not shutil.which("make"):
+            self.skipTest("make not available")
+        d = tempfile.mkdtemp()
+        _write(os.path.join(d, "Makefile"), "test:\n\t@true\n")
+        # gate's own cmd would FAIL if it ran — proves the model's green run short-circuits it
+        self.fleet.detect_test_cmd = lambda cwd: "false"
+        actions = [
+            self._WRITE,
+            '{"thought":"t","action":"bash","command":"make test"}',
+            self._SAY,
+        ]
+        events = []
+        a = Agent(ScriptBackend(actions), _RecSession(d), max_steps=8,
+                  on_event=lambda k, **kw: events.append((k, kw)))
+        result = a.send("build and test")
+        self.assertEqual(result, "all done")
+        self.assertFalse(any(k == "done_check" for k, kw in events))  # gate short-circuited
+
+    def test_harness_verified_skip_predicate(self):
+        # daemon.verify_pass skips a claim the harness already verified: a passing
+        # 'verified' record no older than the last mutation.
+        import json as _json
+        from forge import session as sm2
+        d = tempfile.mkdtemp()
+        orig = sm2.SESSIONS
+        sm2.SESSIONS = d
+        try:
+            sid = "vsid"
+            path = os.path.join(d, sid + ".jsonl")
+            with open(path, "w") as f:
+                for r in [
+                    {"ts": 1.0, "type": "action", "action": "write_file", "args": {"path": "a.py"}},
+                    {"ts": 2.0, "type": "verified", "cmd": "pytest -q", "ok": True},
+                    {"ts": 3.0, "type": "assistant", "text": "all tests pass"},
+                ]:
+                    f.write(_json.dumps(r) + "\n")
+            self.assertTrue(self.fleet.harness_verified(sid))
+            # a mutation AFTER the last verification invalidates it
+            with open(path, "a") as f:
+                f.write(_json.dumps({"ts": 4.0, "type": "action", "action": "edit_file",
+                                     "args": {"path": "a.py"}}) + "\n")
+            self.assertFalse(self.fleet.harness_verified(sid))
+        finally:
+            sm2.SESSIONS = orig
+
+    def test_harness_verified_bash_edit_invalidates(self):
+        # REGRESSION: a file-touching BASH edit after the verified record must make
+        # the daemon re-verify — otherwise a `sed -i` breaking the tests slips past
+        # both the gate (already fired) and the daemon's skip.
+        import json as _json
+        from forge import session as sm2
+        d = tempfile.mkdtemp()
+        orig = sm2.SESSIONS
+        sm2.SESSIONS = d
+        try:
+            sid = "vsid2"
+            path = os.path.join(d, sid + ".jsonl")
+            base = [
+                {"ts": 1.0, "type": "action", "action": "write_file", "args": {"path": "a.py"}},
+                {"ts": 2.0, "type": "verified", "cmd": "pytest -q", "ok": True},
+            ]
+            with open(path, "w") as f:
+                for r in base:
+                    f.write(_json.dumps(r) + "\n")
+            self.assertTrue(self.fleet.harness_verified(sid))
+            # a read-only bash after the verification does NOT invalidate it
+            with open(path, "a") as f:
+                f.write(_json.dumps({"ts": 3.0, "type": "action", "action": "bash",
+                                     "args": {"command": "cat a.py"}}) + "\n")
+            self.assertTrue(self.fleet.harness_verified(sid))
+            # but a mutating bash (sed -i) after it DOES
+            with open(path, "a") as f:
+                f.write(_json.dumps({"ts": 4.0, "type": "action", "action": "bash",
+                                     "args": {"command": "sed -i s/True/False/ a.py"}}) + "\n")
+            self.assertFalse(self.fleet.harness_verified(sid))
+        finally:
+            sm2.SESSIONS = orig
+
+
 class TestConfig(unittest.TestCase):
     def test_load_defaults(self):
         from forge import config

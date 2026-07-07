@@ -53,6 +53,29 @@ def last_say(sid):
     return text
 
 
+def harness_verified(sid):
+    """True if the P2.1 done-gate already verified the latest state: a passing
+    'verified' record no older than the most recent file mutation, so nothing has
+    changed on disk since the harness ran the tests. Mutations count write_file /
+    edit_file AND file-touching bash (echo > f, sed -i …) — otherwise a bash edit
+    after the verified record would let the daemon skip a now-stale claim without
+    ever re-running the tests. Lets the daemon skip its expensive rsync-and-run
+    verify pass for a claim the harness already grounded."""
+    last_mut = last_ver = 0.0
+    for r in _records(sid):
+        t = r.get("ts", 0) or 0
+        typ = r.get("type")
+        if typ == "action":
+            a = r.get("action")
+            if a in ("write_file", "edit_file"):
+                last_mut = t
+            elif a == "bash" and bash_mutates((r.get("args") or {}).get("command", "")):
+                last_mut = t
+        elif typ == "verified" and r.get("ok"):
+            last_ver = t
+    return last_ver > 0 and last_ver >= last_mut
+
+
 def edited_files(sid, cwd):
     files = set()
     for r in _records(sid):
@@ -191,6 +214,43 @@ def detect_test_cmd(cwd):
     if os.path.exists(os.path.join(cwd, "Cargo.toml")):
         return "cargo test"
     return None
+
+
+# ---- bash mutation heuristic (done-gate) ------------------------------------
+_REDIR_WRITE_RE = re.compile(r">(?!&)")          # > / >> to a file (not 2>&1, >&2)
+_INPLACE_RE = re.compile(r"\b(?:sed|gsed|perl|ruby)\b\s+(?:-\S+\s+)*-\S*i\b")  # in-place edit
+_SHELL_SEP_RE = re.compile(r"[;&|\n]+")
+_MUTATING_HEADS = frozenset((
+    "cp", "mv", "rm", "rmdir", "mkdir", "touch", "tee", "ln", "dd", "install",
+    "patch", "truncate", "chmod", "chown", "rsync", "unzip", "shred", "mktemp"))
+_GIT_WRITE = frozenset((
+    "apply", "checkout", "restore", "reset", "stash", "clean", "revert",
+    "cherry-pick", "merge", "rebase", "pull"))
+
+
+def bash_mutates(command):
+    """Heuristic: could this bash command change files on disk? Deliberately
+    OVER-inclusive — a write that slips past the done-gate is the failure we must
+    not have, so read-only bash (ls/cat/grep/git status…) stays ungated while
+    anything that redirects to a file, edits in place, or runs a file-mutating
+    command counts. Used both to trigger the gate live and to invalidate a stale
+    'verified' record for the daemon."""
+    if not command:
+        return False
+    if _REDIR_WRITE_RE.search(command) or _INPLACE_RE.search(command):
+        return True
+    for seg in _SHELL_SEP_RE.split(command):
+        toks = seg.split()
+        while toks and ("=" in toks[0] or toks[0] in ("sudo", "env", "time", "nice", "command")):
+            toks = toks[1:]                       # strip leading env-assignment / wrapper
+        if not toks:
+            continue
+        base = toks[0].rsplit("/", 1)[-1]
+        if base in _MUTATING_HEADS:
+            return True
+        if base == "git" and len(toks) > 1 and toks[1] in _GIT_WRITE:
+            return True
+    return False
 
 
 def verify(claim, cwd, model):
