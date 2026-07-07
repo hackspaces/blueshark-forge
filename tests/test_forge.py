@@ -12,7 +12,9 @@ import unittest
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from forge import session as sm            # noqa: E402
+from forge import ledger as ledger_mod     # noqa: E402
 from forge.agent import Agent              # noqa: E402
+from forge.ledger import Ledger            # noqa: E402
 from forge.backends import make_backend, OllamaBackend, OpenAICompatBackend  # noqa: E402
 from forge.tools import (execute, _fuzzy_replace, _syntax_error, _which,  # noqa: E402
                          shape, overflow_dir, _maybe_offload, MAX_OUTPUT,
@@ -1991,6 +1993,254 @@ class TestTraceCmd(unittest.TestCase):
             self.assertIn("loop_trip", out)
         finally:
             sm.SESSIONS = orig
+
+
+class TestLedgerUnit(unittest.TestCase):
+    """P4.1 — the file-state Ledger in isolation: stat-tracked staleness, the
+    diff-since-last-read baseline, explicit mutation marking, and the RAM caps
+    that drop cached content but keep metadata."""
+
+    def setUp(self):
+        self.d = tempfile.mkdtemp()
+
+    def _f(self, name, body):
+        p = os.path.join(self.d, name)
+        _write(p, body)
+        return os.path.realpath(p)
+
+    def test_current_and_change_detection(self):
+        led = Ledger()
+        fp = self._f("a.py", "x = 1\n")
+        led.record_read(fp, 1)
+        self.assertTrue(led.current(fp))
+        self.assertEqual(led.status(fp), "current")
+        # change the file on disk (size differs) → stale
+        _write(fp, "x = 999\n")
+        led.refresh()
+        self.assertFalse(led.current(fp))
+        self.assertEqual(led.status(fp), "changed")
+
+    def test_mark_mutated_poisons_until_reread(self):
+        led = Ledger()
+        fp = self._f("b.py", "a\n")
+        led.record_read(fp, 1)
+        self.assertTrue(led.current(fp))
+        led.mark_mutated(fp)                      # harness knows it changed, even if stat wouldn't show it
+        self.assertFalse(led.current(fp))
+        self.assertEqual(led.status(fp), "changed")
+        led.record_read(fp, 2)                    # a fresh read clears it
+        self.assertTrue(led.current(fp))
+
+    def test_diff_since_last_read(self):
+        led = Ledger()
+        fp = self._f("c.txt", "line1\nline2\n")
+        led.record_read(fp, 1)
+        _write(fp, "line1\nCHANGED\n")
+        d = led.diff(fp)
+        self.assertIn("-line2", d)
+        self.assertIn("+CHANGED", d)
+        # a re-record rebaselines; an identical-content touch diffs to empty string
+        led.record_read(fp, 2)
+        self.assertEqual(led.diff(fp), "")
+        # no cached baseline → None (can't diff)
+        led.evict(fp)
+        self.assertIsNone(led.diff(fp))
+
+    def test_ram_caps_drop_content_keep_metadata(self):
+        led = Ledger()
+        orig_total, orig_content = ledger_mod.TOTAL_CAP, ledger_mod.CONTENT_CAP
+        ledger_mod.TOTAL_CAP, ledger_mod.CONTENT_CAP = 20, 100
+        try:
+            f1 = self._f("f1", "a" * 10)
+            f2 = self._f("f2", "b" * 10)
+            f3 = self._f("f3", "c" * 10)
+            led.record_read(f1, 1)
+            led.record_read(f2, 2)
+            led.record_read(f3, 3)                # total 30 > 20 → LRU-drop oldest content
+            self.assertIsNone(led.get(f1).content)        # content dropped (LRU)
+            self.assertIsNotNone(led.get(f1).sha1)        # metadata kept
+            self.assertTrue(led.get(f1).in_context)       # still counts as held
+            self.assertTrue(led.current(f1))              # gate still passes (unchanged on disk)
+            self.assertIsNotNone(led.get(f3).content)     # most-recent content retained
+            # a single file over CONTENT_CAP is never cached, but is still tracked
+            big = self._f("big", "z" * 200)
+            led.record_read(big, 4)
+            self.assertIsNone(led.get(big).content)
+            self.assertIsNotNone(led.get(big).sha1)
+            self.assertTrue(led.current(big))
+        finally:
+            ledger_mod.TOTAL_CAP, ledger_mod.CONTENT_CAP = orig_total, orig_content
+
+    def test_partial_read_spans_not_whole(self):
+        led = Ledger()
+        fp = self._f("p.py", "".join(f"line{i:02d}\n" for i in range(1, 31)))
+        led.record_read(fp, 1, offset=1, limit=3)         # only lines 1-3
+        e = led.get(fp)
+        self.assertFalse(e.whole)
+        self.assertEqual(e.spans, [(1, 3)])
+        self.assertTrue(led.covers(fp, 1, 3))
+        self.assertFalse(led.covers(fp, 18, 5))           # a region it never read
+        led.record_read(fp, 2, offset=18, limit=5)        # merge the new window
+        self.assertTrue(led.covers(fp, 18, 5))
+        # a whole-file read subsumes everything
+        led.record_read(fp, 3)
+        self.assertTrue(led.get(fp).whole)
+        self.assertTrue(led.covers(fp, 25, 100))
+
+
+class TestFileStateLedger(unittest.TestCase):
+    """P4.1 — the ledger wired through Agent.send: honest read-before-edit that
+    re-arms on disk change and on compaction eviction, served-from-cache repeat
+    reads, and diff-on-reread of a changed file."""
+
+    def _drive(self, d, actions, max_steps=10, agent=None):
+        events = []
+        a = agent or Agent(ScriptBackend(actions), sm.EphemeralSession(d, "s"),
+                           max_steps=max_steps, on_event=lambda k, **kw: events.append((k, kw)))
+        a.send("go")
+        obs = [(kw.get("text", ""), kw.get("ok")) for k, kw in events if k == "observation"]
+        return a, events, obs
+
+    def test_edit_reblocked_after_ondisk_change(self):
+        d = tempfile.mkdtemp()
+        fp = os.path.join(d, "r.py")
+        _write(fp, "x = 1\n")
+        actions = [
+            '{"thought":"read","action":"read_file","path":"r.py"}',
+            '{"thought":"mutate","action":"bash","command":"echo \\"x = 999\\" > r.py"}',
+            '{"thought":"blind","action":"edit_file","path":"r.py","old":"x = 999","new":"x = 2"}',
+            '{"thought":"reread","action":"read_file","path":"r.py"}',
+            '{"thought":"edit","action":"edit_file","path":"r.py","old":"x = 999","new":"x = 2"}',
+            '{"thought":"done","action":"say","message":"done"}',
+        ]
+        a, events, obs = self._drive(d, actions)
+        # step3: the edit is blocked because the file changed on disk since the read
+        self.assertFalse(obs[2][1])
+        self.assertIn("CHANGED on disk", obs[2][0])
+        self.assertIn("step 1", obs[2][0])
+        # step4: the re-read is answered with a DIFF, not the whole file
+        self.assertTrue(obs[3][1])
+        self.assertIn("CHANGED since you read it", obs[3][0])
+        self.assertIn("+x = 999", obs[3][0])
+        self.assertIn("-x = 1", obs[3][0])
+        # step5: the edit now goes through
+        self.assertTrue(obs[4][1])
+        self.assertEqual(_read(fp), "x = 2\n")
+
+    def test_repeat_read_served_from_cache(self):
+        d = tempfile.mkdtemp()
+        _write(os.path.join(d, "r.py"), "x = 1\nbody line\n")
+        actions = [
+            '{"thought":"read","action":"read_file","path":"r.py"}',
+            '{"thought":"reread","action":"read_file","path":"r.py"}',
+            '{"thought":"done","action":"say","message":"done"}',
+        ]
+        a, events, obs = self._drive(d, actions)
+        self.assertIn("body line", obs[0][0])              # first read shows the body
+        self.assertTrue(obs[1][1])                          # served, ok
+        self.assertIn("already in your context", obs[1][0])
+        self.assertNotIn("body line", obs[1][0])            # the body is NOT re-injected
+
+    def test_repeated_reads_still_trip_loop_detector(self):
+        d = tempfile.mkdtemp()
+        _write(os.path.join(d, "r.py"), "x = 1\n")
+        actions = [
+            '{"thought":"1","action":"read_file","path":"r.py"}',
+            '{"thought":"2","action":"read_file","path":"r.py"}',
+            '{"thought":"3","action":"read_file","path":"r.py"}',
+            '{"thought":"done","action":"say","message":"done"}',
+        ]
+        a, events, obs = self._drive(d, actions)
+        self.assertTrue(any(k == "loop" for k, kw in events))   # 3 identical reads still trip the loop
+
+    def test_write_content_cached_then_diffed(self):
+        d = tempfile.mkdtemp()
+        actions = [
+            '{"thought":"write","action":"write_file","path":"w.py","content":"a\\nb\\n"}',
+            '{"thought":"mutate","action":"bash","command":"echo a > w.py"}',
+            '{"thought":"reread","action":"read_file","path":"w.py"}',
+            '{"thought":"done","action":"say","message":"done"}',
+        ]
+        a, events, obs = self._drive(d, actions)
+        # the read after the external change diffs against the WRITTEN content baseline
+        self.assertTrue(obs[2][1])
+        self.assertIn("CHANGED since you read it", obs[2][0])
+        self.assertIn("-b", obs[2][0])
+
+    def test_gate_reforces_read_after_eviction(self):
+        d = tempfile.mkdtemp()
+        fp = os.path.join(d, "r.py")
+        _write(fp, "x = 1\n")
+        real = os.path.realpath(fp)
+        actions = [
+            '{"thought":"blind","action":"edit_file","path":"r.py","old":"x = 1","new":"x = 2"}',
+            '{"thought":"read","action":"read_file","path":"r.py"}',
+            '{"thought":"edit","action":"edit_file","path":"r.py","old":"x = 1","new":"x = 2"}',
+            '{"thought":"done","action":"say","message":"done"}',
+        ]
+        a = Agent(ScriptBackend(actions), sm.EphemeralSession(d, "s"), max_steps=8)
+        # simulate a read earlier in the session that compaction later dropped
+        a.ledger.record_read(real, 0)
+        a.ledger.evict(real)
+        self.assertEqual(a.ledger.status(real), "evicted")
+        events = []
+        a.on_event = lambda k, **kw: events.append((k, kw))
+        a.send("go")
+        obs = [(kw.get("text", ""), kw.get("ok")) for k, kw in events if k == "observation"]
+        self.assertFalse(obs[0][1])                         # edit blocked — read fell out of context
+        self.assertIn("no longer in your context", obs[0][0])
+        self.assertTrue(obs[2][1])                          # after re-read, the edit lands
+        self.assertEqual(_read(fp), "x = 2\n")
+
+    def test_compaction_evicts_read_observation(self):
+        d = tempfile.mkdtemp()
+        fp = os.path.join(d, "r.py")
+        _write(fp, "x = 1\n")
+        real = os.path.realpath(fp)
+        a = Agent(ScriptBackend(['{"action":"say","message":"x"}']), sm.EphemeralSession(d, "s"))
+        # a read whose observation lives in the message log
+        obs_msg = {"role": "user", "content": "Observation:\nx = 1"}
+        a.messages.append(obs_msg)
+        a.ledger.record_read(real, 1)
+        a.ledger.set_obs_msg(real, obs_msg)
+        self.assertTrue(a.ledger.current(real))
+        # compaction rewrites messages and drops that observation → eviction flips it
+        a.messages = a.messages[:a.head_len]
+        a._evict_compacted()
+        self.assertFalse(a.ledger.current(real))
+        self.assertEqual(a.ledger.status(real), "evicted")
+        self.assertIsNone(a.ledger.get(real).content)       # cached content dropped too
+
+    def test_partial_read_region_guard(self):
+        d = tempfile.mkdtemp()
+        fp = os.path.join(d, "p.py")
+        _write(fp, "".join(f"line{i:02d}\n" for i in range(1, 31)))
+        actions = [
+            '{"thought":"read top","action":"read_file","path":"p.py","offset":1,"limit":3}',
+            '{"thought":"edit far","action":"edit_file","path":"p.py","old":"line20","new":"LINE20"}',
+            '{"thought":"read region","action":"read_file","path":"p.py","offset":18,"limit":6}',
+            '{"thought":"edit","action":"edit_file","path":"p.py","old":"line20","new":"LINE20"}',
+            '{"thought":"done","action":"say","message":"done"}',
+        ]
+        a, events, obs = self._drive(d, actions)
+        self.assertFalse(obs[1][1])                         # editing an unread region is blocked
+        self.assertIn("only read PART", obs[1][0])
+        self.assertTrue(obs[3][1])                          # after reading the region, the edit lands
+        self.assertIn("LINE20", _read(fp))
+
+    def test_plain_read_then_edit_unchanged(self):
+        d = tempfile.mkdtemp()
+        fp = os.path.join(d, "s.py")
+        _write(fp, "value = 1\n")
+        actions = [
+            '{"thought":"read","action":"read_file","path":"s.py"}',
+            '{"thought":"edit","action":"edit_file","path":"s.py","old":"value = 1","new":"value = 2"}',
+            '{"thought":"done","action":"say","message":"done"}',
+        ]
+        a, events, obs = self._drive(d, actions)
+        self.assertTrue(obs[0][1])
+        self.assertTrue(obs[1][1])                          # read → edit works with no re-read
+        self.assertEqual(_read(fp), "value = 2\n")
 
 
 if __name__ == "__main__":

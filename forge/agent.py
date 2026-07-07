@@ -20,6 +20,7 @@ import time
 
 from . import __version__
 from . import backends
+from .ledger import Ledger
 from .tools import ACTION_SCHEMA, TOOL_HELP, execute, shape, error_hint
 
 STUCK_AT = int(os.environ.get("FORGE_STUCK_THRESHOLD", "7"))  # failures before escalating a rung
@@ -175,7 +176,10 @@ class Agent:
             self.messages.append({"role": "assistant", "content": '{"thought":"Oriented in the workspace. Ready.","action":"say","message":"Ready."}'})
         self.head_len = len(self.messages)  # system (+ workspace) — never compacted away
         self.plan = []
-        self.read_files = set()  # abs paths read this session — enforces read-before-edit
+        # P4.1 file-state ledger — the harness-owned model of what's been read and
+        # still held in context (replaces the bare read_files set). Backs the honest
+        # read-before-edit gate, served-from-cache reads, and compaction eviction.
+        self.ledger = Ledger()
         self._mutated = set()    # P2.1 done-gate: paths mutated THIS turn
         self._verified = False   # a test run this turn already passed
         self._bounced = False    # the done-gate already bounced/nudged once this turn
@@ -236,6 +240,16 @@ class Agent:
         summary = self._summarize(middle)
         note = {"role": "user", "content": "[Earlier progress, summarized to save context:]\n" + summary}
         self.messages = head + [note] + tail
+        # P4.1: any read/write observation that fell out of the retained window is
+        # no longer in context — evict it so read-before-edit mechanically re-forces
+        # a read. Then tell the model which files it DOES still hold.
+        self._evict_compacted()
+        held = self.ledger.held()
+        if held:
+            names = ", ".join(f"{os.path.relpath(p, self.session.cwd)}"
+                              + (f" ({n}l)" if n is not None else "")
+                              for p, n in sorted(held))
+            note["content"] += "\n\nfiles you have read and still hold: " + names
         self.on_event("compact", window=window)
         # P3.1: persist the summary so a resume can reconstruct the compacted middle,
         # and flag this step so its trace records compacted=True.
@@ -252,10 +266,106 @@ class Agent:
         except Exception:
             return f"[{len(msgs)} earlier steps omitted; continue from the recent turns and the plan below]"
 
+    def _evict_compacted(self):
+        """After a compaction rewrite of self.messages, flip in_context=False for
+        every ledger entry whose observation message is no longer retained (matched
+        by object identity — head/tail slices preserve the same dicts)."""
+        live = {id(m) for m in self.messages}
+        for e in list(self.ledger.entries.values()):
+            if e.in_context and (e.obs_msg is None or id(e.obs_msg) not in live):
+                self.ledger.evict(e.realpath)
+
     def _pin_plan(self):
         if self.plan:
             return {"role": "user", "content": "[current plan]\n" + "\n".join(self.plan)}
         return None
+
+    # ---- P4.1 read cache + honest read-before-edit ----
+    def _serve_cached_read(self, act, fp, step, trace):
+        """A repeat read_file the ledger can answer without re-injecting the file.
+        Returns True if served (observation appended), False to let a real read run.
+        Unchanged in-context files → a one-line note; changed files → a capped diff
+        since the last read. A never-read file, an evicted read, a new line-range, or
+        a file with no cached baseline all fall through to a real read."""
+        if not os.path.isfile(fp):
+            return False
+        e = self.ledger.get(fp)
+        if e is None:
+            return False
+        rel = os.path.relpath(fp, self.session.cwd)
+        st = self.ledger.status(fp)
+        offset, limit = act.get("offset", 1), act.get("limit")
+        if st == "current":
+            if not self.ledger.covers(fp, offset, limit):
+                return False                      # a genuinely new window → read it
+            note = f"[unchanged since step {e.read_step} — {rel} is already in your context; not re-injecting it]"
+            self._serve_read_obs(act, fp, note, trace, bind=False)
+            return True
+        if st == "changed":
+            d = self.ledger.diff(fp, name=rel)
+            if d is None:
+                return False                      # no cached baseline → re-read fully
+            if d == "":                           # touched but byte-identical
+                self.ledger.record_read(fp, step, offset=offset, limit=limit)
+                note = f"[unchanged since step {e.read_step} — {rel} is already in your context; not re-injecting it]"
+                self._serve_read_obs(act, fp, note, trace, bind=False)
+                return True
+            note = (f"[{rel} CHANGED since you read it at step {e.read_step}. Unified diff since your "
+                    f"last read (the whole file is NOT re-injected — apply this to your copy):]\n{d}")
+            self.ledger.record_write(fp, step)    # baseline is now the current on-disk content
+            self._serve_read_obs(act, fp, note, trace, bind=True)
+            return True
+        return False                              # unread / evicted → real read
+
+    def _serve_read_obs(self, act, fp, note, trace, bind):
+        """Append a harness-served read observation (note or diff) as if it were a
+        real read result: same events/log surface, so loop detection and the trace
+        stay honest. `bind` binds this message as the file's in-context observation."""
+        trace["ok"] = True
+        self.on_event("action", action="read_file", detail=act.get("path", ""), thought=act.get("thought", ""))
+        self.session.log("action", action="read_file", args={"served": True, "path": act.get("path", "")},
+                         thought=act.get("thought", ""))
+        obs_msg = {"role": "user", "content": f"Observation:\n{note}"}
+        self.messages.append(obs_msg)
+        if bind:
+            self.ledger.set_obs_msg(fp, obs_msg)
+        self.session.log("observation", text=note, ok=True)
+        self.on_event("observation", text=note, ok=True)
+
+    def _read_gate_msg(self, kind, act, fp):
+        """The read-before-edit block message, specific to WHY the file isn't
+        current: never read, dropped from context by compaction, or changed on disk."""
+        e = self.ledger.get(fp)
+        path = act.get("path")
+        st = self.ledger.status(fp)
+        if st == "changed" and e is not None:
+            return (f"Blocked: {path} CHANGED on disk since you read it at step {e.read_step} — your copy "
+                    "is stale. read_file it again and work from the current content before editing.")
+        if st == "evicted" and e is not None:
+            return (f"Blocked: you read {path} at step {e.read_step}, but it's no longer in your context — "
+                    "read_file it again before editing or overwriting it.")
+        return (f"Blocked: read {path} before editing or overwriting it — "
+                "work from its actual current content, not memory. Use read_file first.")
+
+    def _edit_region_seen(self, act, fp):
+        """True unless the edit targets lines OUTSIDE the (partial) range the model
+        actually read. A whole-file read, or an `old` snippet we cannot locate,
+        never blocks — this only catches editing a region a ranged read never saw."""
+        e = self.ledger.get(fp)
+        if e is None or e.whole or not e.spans:
+            return True
+        old = act.get("old", "")
+        try:
+            with open(fp, errors="replace") as f:
+                text = f.read()
+        except OSError:
+            return True
+        idx = text.find(old)
+        if idx == -1:
+            return True
+        start = text.count("\n", 0, idx) + 1
+        end = start + old.count("\n")
+        return any(a <= start and end <= b for a, b in e.spans)
 
     def _generate(self, prompt):
         """Stream the model's action. When it turns out to be a `say`, emit the
@@ -384,6 +494,10 @@ class Agent:
                 _t0 = time.monotonic()
                 try:
                     self._absorb_inbox()
+                    # P4.1: re-stat tracked files (bounded) so any bash/redirect/edit
+                    # that changed a file's mtime since it was read is caught before
+                    # the gate and the read cache consult the ledger this step.
+                    self.ledger.refresh()
                     if self._lv("compaction"):
                         self._compact()
                     pin = self._pin_plan() if self._lv("plan_pin") else None
@@ -494,18 +608,42 @@ class Agent:
                         recent.clear()
                         continue
 
-                    # read-before-edit: never edit or overwrite an EXISTING file the model
-                    # hasn't actually read — this forces it to work from real content, not a
-                    # guess (the exact failure mode that made a weak model hallucinate code).
+                    # P4.1 read cache: a repeat read of a file the ledger still holds
+                    # is answered by the harness — unchanged files get a one-line note
+                    # (no re-inject), changed files get a diff-since-last-read. A new file
+                    # or a new line-range falls through to a real read below.
+                    if self._lv("read_gate") and kind == "read_file" and act.get("path"):
+                        fp = os.path.realpath(os.path.join(self.session.cwd, act["path"]))
+                        if self._serve_cached_read(act, fp, step, trace):
+                            continue
+
+                    # read-before-edit: never edit or overwrite an EXISTING file whose
+                    # CURRENT content the model doesn't hold — it must work from real
+                    # content, not a guess or a stale copy (the exact failure mode that
+                    # made a weak model hallucinate code). The ledger makes this honest:
+                    # a bash mutation, a compaction that dropped the read, or an on-disk
+                    # change since the read all re-arm the gate.
                     if self._lv("read_gate") and kind in ("edit_file", "write_file"):
                         fp = os.path.realpath(os.path.join(self.session.cwd, act["path"]))
-                        if os.path.isfile(fp) and fp not in self.read_files:
-                            obs = (f"Blocked: read {act.get('path')} before editing or overwriting it — "
-                                   "work from its actual current content, not memory. Use read_file first.")
+                        if os.path.isfile(fp) and not self.ledger.current(fp):
+                            obs = self._read_gate_msg(kind, act, fp)
                             trace["ok"] = False
                             self.on_event("action", action=kind, detail=act.get("path", ""))
                             self.on_event("observation", text=obs, ok=False)
                             self.session.log("action", action=kind, args={"blocked": "read-before-edit", "path": act.get("path", "")},
+                                             thought=act.get("thought", ""))
+                            self.messages.append({"role": "user", "content": f"⚠ {obs}"})
+                            continue
+                        # partial-read guard: editing a region the model never read
+                        # still requires a region read (a 10-line read is not the file).
+                        if kind == "edit_file" and act.get("old") and not self._edit_region_seen(act, fp):
+                            obs = (f"Blocked: you only read PART of {act.get('path')} — the text you're editing "
+                                   "is outside the lines you read. Read that region first (use offset/limit), "
+                                   "then edit.")
+                            trace["ok"] = False
+                            self.on_event("action", action=kind, detail=act.get("path", ""))
+                            self.on_event("observation", text=obs, ok=False)
+                            self.session.log("action", action=kind, args={"blocked": "read-region", "path": act.get("path", "")},
                                              thought=act.get("thought", ""))
                             self.messages.append({"role": "user", "content": f"⚠ {obs}"})
                             continue
@@ -527,8 +665,20 @@ class Agent:
                     obs, ok = execute(act, self.session.cwd, stop=self.stop)
                     trace["ok"] = ok
                     budget = self._obs_budget()
-                    if ok and kind in ("read_file", "write_file") and act.get("path"):
-                        self.read_files.add(os.path.realpath(os.path.join(self.session.cwd, act["path"])))
+                    # P4.1 ledger population — a ranged read records only its span; a
+                    # write/edit ingests the new content as the cached (diffable) version.
+                    recorded_fp = None
+                    if ok and act.get("path"):
+                        _rp = os.path.realpath(os.path.join(self.session.cwd, act["path"]))
+                        if kind == "read_file":
+                            self.ledger.record_read(_rp, step, offset=act.get("offset", 1), limit=act.get("limit"))
+                            recorded_fp = _rp
+                        elif kind == "write_file":
+                            self.ledger.record_write(_rp, step, content=act.get("content"))
+                            recorded_fp = _rp
+                        elif kind == "edit_file":
+                            self.ledger.record_write(_rp, step)  # re-read the edited file from disk
+                            recorded_fp = _rp
                     if ok and kind in ("write_file", "edit_file") and act.get("path"):
                         self._mutated.add(os.path.realpath(os.path.join(self.session.cwd, act["path"])))
                         self._verified = False
@@ -586,7 +736,12 @@ class Agent:
                             h = error_hint(obs)
                             if h:
                                 tag += f"  ↳ {h}\n"
-                    self.messages.append({"role": "user", "content": f"{tag}Observation:\n{shape(obs, budget)}"})
+                    obs_msg = {"role": "user", "content": f"{tag}Observation:\n{shape(obs, budget)}"}
+                    self.messages.append(obs_msg)
+                    # P4.1: bind this file's observation to its message so a later
+                    # compaction can detect (by identity) when it leaves context.
+                    if recorded_fp:
+                        self.ledger.set_obs_msg(recorded_fp, obs_msg)
                 finally:
                     # ONE step record per iteration. Guarded so a raising backend is
                     # surfaced (the original exception propagates) — not masked by a
