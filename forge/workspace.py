@@ -52,13 +52,65 @@ def _walk_files(root, cap):
     return sorted(out)
 
 
-def build_tree(root, cap=180):
+def _source_files(root, cap):
+    """The raw candidate file list (git-tracked, else walked), IGNORE_EXT-filtered.
+    Shared by build_tree and the symbol index so both see the same universe."""
     files = _git_files(root)
     if files is None:
         files = _walk_files(root, cap)
-    files = [f for f in files if os.path.splitext(f)[1].lower() not in IGNORE_EXT]
+    return [f for f in files if os.path.splitext(f)[1].lower() not in IGNORE_EXT]
+
+
+def _recency_scores(root, n=100):
+    """path -> recency rank (0 = touched by the newest commit) from one
+    `git log --name-only`. Empty dict when this isn't a git repo — callers then
+    fall back to manifest-proximity + depth, so no-git degrades gracefully."""
+    try:
+        r = subprocess.run(["git", "-C", root, "log", "--name-only", "--pretty=format:", "-n", str(n)],
+                           capture_output=True, text=True, timeout=10)
+        if r.returncode != 0:
+            return {}
+    except (OSError, subprocess.SubprocessError):
+        return {}
+    scores, rank = {}, 0
+    for line in r.stdout.splitlines():
+        p = line.strip()
+        if p and p not in scores:
+            scores[p] = rank
+            rank += 1
+    return scores
+
+
+_MANIFEST_NAMES = {name for name, _ in PROJECT_MARKERS}
+
+
+def _rank(files, root):
+    """Order files by importance: (git recency, near a manifest, then deeper
+    files first, then name) — so the top-K shown when truncated is the useful
+    sample, not the lexically-first one."""
+    scores = _recency_scores(root)
+    manifest_dirs = {os.path.dirname(f) for f in files if os.path.basename(f) in _MANIFEST_NAMES}
+    unseen = len(scores) + len(files) + 1   # files no commit touched rank after all seen files
+    def key(f):
+        near = 0 if os.path.dirname(f) in manifest_dirs else 1
+        return (scores.get(f, unseen), near, -f.count("/"), f)
+    return sorted(files, key=key)
+
+
+def _rollup(files):
+    """One line per top-level directory with its true file count — so every
+    directory stays visible in the briefing even when the file tree is truncated."""
+    counts = {}
+    for f in files:
+        top = f.split("/", 1)[0] if "/" in f else "(root)"
+        counts[top] = counts.get(top, 0) + 1
+    return [f"  {d}{'' if d == '(root)' else '/'} — {counts[d]} file(s)" for d in sorted(counts)]
+
+
+def build_tree(root, cap=180):
+    files = _source_files(root, cap)
     total = len(files)                      # true count (before capping the display)
-    shown = sorted(files)[:cap]
+    shown = sorted(_rank(files, root)[:cap])   # SELECT by rank, render alphabetically
     lines, seen = [], set()
     for f in shown:
         parts = f.split("/")
@@ -68,8 +120,12 @@ def build_tree(root, cap=180):
                 seen.add(prefix)
                 lines.append("  " * d + parts[d] + "/")
         lines.append("  " * (len(parts) - 1) + parts[-1])
-    truncated = "" if total <= cap else f"\n  … +{total - cap} more files (tree truncated for display)"
-    return "\n".join(lines) + truncated, total
+    out = "\n".join(lines)
+    if total > cap:
+        out += (f"\n  … +{total - cap} more files not shown (tree is the top {cap} by recency; "
+                "every directory is summarized below)")
+        out += "\n\nAll directories (file counts):\n" + "\n".join(_rollup(files))
+    return out, total
 
 
 def detect_project(root):
@@ -138,9 +194,31 @@ def environment(cwd):
     return "ENVIRONMENT\n" + "\n".join(lines)
 
 
-def context(root, learnings=None):
-    """The workspace briefing pinned into the agent's context at session start."""
-    tree, n = build_tree(root)
+SMALL_CTX = 8192          # below this the briefing drops to env + rollup tree, no symbols
+
+
+def _key_symbols(root, limit=40):
+    """The top ~`limit` defined symbols, recency-first, for large-ctx briefings."""
+    try:
+        from . import index
+        syms = index.refresh(root)
+    except Exception:
+        return []
+    scores = _recency_scores(root)
+    unseen = len(scores) + len(syms) + 1
+    syms.sort(key=lambda s: (scores.get(s["path"], unseen), s.get("lineno", 0)))
+    return syms[:limit]
+
+
+def context(root, learnings=None, budget=None):
+    """The workspace briefing pinned into the agent's context at session start.
+
+    `budget` is the model's effective context window (tokens). Small windows get a
+    compact env + directory-rollup tree; large windows get the ranked file tree
+    plus a "Key symbols" map from the symbol index."""
+    small = budget is not None and budget < SMALL_CTX
+    cap = 25 if small else 180
+    tree, n = build_tree(root, cap=cap)
     ptype, markers = detect_project(root)
     parts = [
         environment(root),
@@ -149,12 +227,16 @@ def context(root, learnings=None):
     ]
     if ptype:
         parts.append(f"Project type: {ptype} (markers: {', '.join(markers)})")
-    parts += [
-        f"\n{n} project files (git-tracked, node_modules excluded). File tree"
-        + (f" (first 180 of {n} shown)" if n > 180 else "") + f":\n{tree}",
-    ]
+    shown_note = f" (top {cap} of {n} by recency; every dir in the rollup below)" if n > cap else ""
+    parts.append(f"\n{n} project files (git-tracked, node_modules excluded). File tree{shown_note}:\n{tree}")
     if learnings:
         parts.append("\nWhat the fleet has already learned about this repo:\n" + "\n".join(f"- {f}" for f in learnings))
+    if not small:
+        syms = _key_symbols(root)
+        if syms:
+            parts.append("\nKey symbols (name — file:line · signature):\n"
+                         + "\n".join(f"- {s['name']} — {s['path']}:{s['lineno']}  {s['signature']}" for s in syms))
     parts.append("\nYou already know this layout. Work on the right files directly; only list/read to confirm details. "
+                 "For a big file, read_file {path, outline:true} maps its defs/classes before you read exact ranges. "
                  "For any repo-wide command, use `git ls-files` (these files, node_modules excluded) — never `find . -exec`.")
     return "\n".join(parts)

@@ -45,6 +45,7 @@ ACTION_SCHEMA = {
         "context": {"type": "integer", "description": "grep: lines of context to show around each match (default 2, max 5)"},
         "offset": {"type": "integer", "description": "start line for read_file (1-based)"},
         "limit": {"type": "integer", "description": "max lines for read_file"},
+        "outline": {"type": "boolean", "description": "read_file: return only the file's symbol map (defs/classes with line numbers) instead of its text — turns a 2000-line file into a ~60-line map; then read exact ranges with offset/limit"},
         "target": {"type": "string", "description": "which session to message (fleet_send): its project name, dir, or id"},
         "message": {"type": "string", "description": "the message text (say, or fleet_send)"},
     },
@@ -58,6 +59,8 @@ Actions:
                                   immediately and keeps running — then test it (curl, client, ...),
                                   check output with `tail <log>`, stop with `kill <pid>`
   read_file   {path}              read a file
+  read_file   {path, outline:true}  map a big file: its defs/classes with line numbers (.py/.js/.ts/.go/.rs),
+                                  then read a symbol's body with offset/limit
   write_file  {path, content}     create/overwrite a file with full content
   edit_file   {path, old, new}    surgically replace an exact snippet (preferred for changes)
   list_files  {path?}             list a directory
@@ -574,6 +577,24 @@ def execute(action, cwd, stop=None):
                 return f"no such file: {action.get('path')}", False
             if os.path.isdir(path):
                 return f"{action.get('path')} is a directory — use list_files or glob", False
+            if action.get("outline"):
+                from . import index
+                with open(path, errors="replace") as f:
+                    text = f.read()
+                nlines = text.count("\n") + 1
+                syms = index.extract_symbols(path, text)
+                if not syms:
+                    return (f"{action.get('path')}: no symbols to outline "
+                            f"(outline supports .py/.js/.ts/.go/.rs) — {nlines} lines; "
+                            "read it directly with offset/limit.", True)
+                rows = []
+                for s in syms:
+                    ind = "    " if s["kind"] == "method" else "  "
+                    rows.append(f"{ind}{s['lineno']:>5}  {s['signature']}")
+                head = f"OUTLINE {action.get('path')} — {len(syms)} symbols in {nlines} lines:\n"
+                tail = "\n[outline only — read a symbol's body with offset/limit, e.g. {offset:<lineno>, limit:40}.]"
+                preview, off_note = _maybe_offload(head + "\n".join(rows), "outline", cwd)
+                return preview + off_note + tail, True
             with open(path, errors="replace") as f:
                 lines = f.readlines()
             total = len(lines)

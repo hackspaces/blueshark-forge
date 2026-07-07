@@ -32,10 +32,19 @@ def _new_session(model, cwd, name=None):
     return s
 
 
-def _workspace_ctx(cwd):
+def _ctx_budget(backend):
+    """The starting rung's effective context window, for sizing the briefing.
+    Best-effort — a probe failure just yields None (→ full briefing)."""
+    try:
+        return backend.effective_ctx()
+    except Exception:
+        return None
+
+
+def _workspace_ctx(cwd, budget=None):
     from . import workspace, fleet
     try:
-        return workspace.context(cwd, learnings=fleet.learnings(cwd))
+        return workspace.context(cwd, learnings=fleet.learnings(cwd), budget=budget)
     except Exception:
         return None
 
@@ -65,7 +74,7 @@ def cmd_chat(args):
     cwd = os.path.abspath(args.dir)
     s = _new_session(ladder[0].name, cwd, name=args.name)
     try:
-        run(ladder, s, verbose=args.verbose, workspace=_workspace_ctx(cwd))
+        run(ladder, s, verbose=args.verbose, workspace=_workspace_ctx(cwd, _ctx_budget(ladder[0])))
     finally:
         s.deregister()
 
@@ -99,7 +108,7 @@ def cmd_run(args):
         elif kind == "inbox":
             print(f"  ✉ {k['sender']}: {k['text'][:70]}")
     agent = Agent(_make_ladder(args.model), s, on_event=on_event, max_steps=args.max_steps, autonomous=True,
-                  workspace=_workspace_ctx(os.path.abspath(args.dir)))
+                  workspace=_workspace_ctx(os.path.abspath(args.dir), _ctx_budget(ladder[0])))
     try:
         reply = agent.send(args.task)
         if not state["said"]:

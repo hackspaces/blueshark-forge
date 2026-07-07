@@ -5,8 +5,10 @@ harness invariants, tools, config, fleet, and workspace logic.
 """
 import json
 import os
+import subprocess
 import sys
 import tempfile
+import time
 import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -2614,6 +2616,150 @@ class TestFileStateLedger(unittest.TestCase):
         self.assertTrue(obs[0][1])
         self.assertTrue(obs[1][1])                          # read → edit works with no re-read
         self.assertEqual(_read(fp), "value = 2\n")
+
+
+class TestRepoMap(unittest.TestCase):
+    """P4.4 — ranked symbol-aware repo map, token-budgeted briefing, outline reads."""
+
+    _GENV = {**os.environ, "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_SYSTEM": os.devnull}
+
+    def _git_repo(self):
+        d = tempfile.mkdtemp()
+        subprocess.run(["git", "init", "-q"], cwd=d, env=self._GENV, check=True)
+        subprocess.run(["git", "config", "user.email", "t@t"], cwd=d, env=self._GENV)
+        subprocess.run(["git", "config", "user.name", "t"], cwd=d, env=self._GENV)
+        return d
+
+    def _commit(self, d, msg):
+        subprocess.run(["git", "add", "-A"], cwd=d, env=self._GENV, check=True)
+        subprocess.run(["git", "-c", "commit.gpgsign=false", "commit", "-qm", msg],
+                       cwd=d, env=self._GENV, check=True)
+
+    # ---- 1. outline read mode ------------------------------------------------
+    def test_outline_returns_signatures_with_linenos(self):
+        d = tempfile.mkdtemp()
+        _write(os.path.join(d, "m.py"),
+               "import os\n\n\ndef alpha(a, b=2) -> int:\n    return a\n\n\n"
+               "class Widget(Base):\n    def run(self, fast=False):\n        return 1\n")
+        out, ok = execute({"action": "read_file", "path": "m.py", "outline": True}, d)
+        self.assertTrue(ok)
+        self.assertIn("def alpha(a, b=2) -> int", out)      # signature reconstructed
+        self.assertIn("class Widget(Base)", out)
+        self.assertIn("def run(self, fast=False)", out)     # a method too
+        self.assertIn("4", out)                              # alpha's line number
+        self.assertIn("OUTLINE", out)
+        # and it is NOT the raw body
+        self.assertNotIn("return a", out)
+
+    def test_outline_skips_syntax_error_file_gracefully(self):
+        d = tempfile.mkdtemp()
+        _write(os.path.join(d, "bad.py"), "def broken(:\n    pass\n")
+        out, ok = execute({"action": "read_file", "path": "bad.py", "outline": True}, d)
+        self.assertTrue(ok)                                  # no crash, still a usable observation
+        self.assertIn("no symbols", out)
+
+    def test_outline_unsupported_language(self):
+        d = tempfile.mkdtemp()
+        _write(os.path.join(d, "notes.txt"), "hello\nworld\n")
+        out, ok = execute({"action": "read_file", "path": "notes.txt", "outline": True}, d)
+        self.assertTrue(ok)
+        self.assertIn("no symbols", out)
+
+    def test_action_schema_and_tool_help_document_outline(self):
+        from forge.tools import ACTION_SCHEMA, TOOL_HELP
+        self.assertIn("outline", ACTION_SCHEMA["properties"])
+        self.assertEqual(ACTION_SCHEMA["properties"]["outline"]["type"], "boolean")
+        self.assertIn("outline", TOOL_HELP)
+
+    # ---- 2. ranked tree + rollups -------------------------------------------
+    def test_ranked_tree_by_recency_keeps_every_dir_via_rollup(self):
+        from forge import workspace
+        d = self._git_repo()
+        for name in ("aaa", "mmm", "zzz"):
+            os.makedirs(os.path.join(d, name))
+        for i in range(6):
+            _write(os.path.join(d, "aaa", f"old{i}.py"), f"x = {i}\n")
+        _write(os.path.join(d, "mmm", "mid.py"), "y = 1\n")
+        self._commit(d, "init")
+        # a later commit touches a lexically-LAST file — recency must float it up
+        _write(os.path.join(d, "zzz", "fresh.py"), "def hot():\n    return 1\n")
+        self._commit(d, "hot")
+        tree, n = workspace.build_tree(d, cap=3)
+        self.assertEqual(n, 8)
+        self.assertIn("fresh.py", tree)                      # recent file made the top-3
+        for dirname in ("aaa/", "mmm/", "zzz/"):             # every top-level dir survives truncation
+            self.assertIn(dirname, tree)
+        self.assertIn("more files not shown", tree)
+
+    def test_no_git_tree_degrades_gracefully(self):
+        from forge import workspace
+        d = tempfile.mkdtemp()                               # NOT a git repo
+        os.makedirs(os.path.join(d, "pkg"))
+        for i in range(5):
+            _write(os.path.join(d, "pkg", f"f{i}.py"), "z = 1\n")
+        self.assertEqual(workspace._recency_scores(d), {})   # no crash, empty scores
+        tree, n = workspace.build_tree(d, cap=2)
+        self.assertEqual(n, 5)
+        self.assertIn("pkg/", tree)                          # rollup still lists the dir
+
+    # ---- 3. symbol index -----------------------------------------------------
+    def test_index_extracts_python_and_regex_langs(self):
+        from forge import index
+        d = tempfile.mkdtemp()
+        _write(os.path.join(d, "a.py"), "def f():\n    pass\n\nclass C:\n    def m(self):\n        pass\n")
+        _write(os.path.join(d, "b.js"), "export function g(x){}\nclass D {}\n")
+        _write(os.path.join(d, "c.go"), "package main\nfunc H() {}\ntype T struct {}\n")
+        _write(os.path.join(d, "d.rs"), "pub fn r() {}\nstruct S {}\n")
+        py = {s["name"] for s in index.extract_symbols(os.path.join(d, "a.py"))}
+        self.assertEqual(py, {"f", "C", "C.m"})
+        self.assertIn("g", {s["name"] for s in index.extract_symbols(os.path.join(d, "b.js"))})
+        self.assertIn("H", {s["name"] for s in index.extract_symbols(os.path.join(d, "c.go"))})
+        self.assertIn("r", {s["name"] for s in index.extract_symbols(os.path.join(d, "d.rs"))})
+
+    def test_index_refresh_is_incremental_by_mtime_size(self):
+        from forge import index
+        d = tempfile.mkdtemp()
+        idxdir = tempfile.mkdtemp()
+        _write(os.path.join(d, "one.py"), "def a():\n    pass\n")
+        _write(os.path.join(d, "two.py"), "def b():\n    pass\n")
+        files = ["one.py", "two.py"]
+
+        calls = {"n": 0}
+        real = index.extract_symbols
+        def spy(path, text=None):
+            calls["n"] += 1
+            return real(path, text)
+        index.extract_symbols = spy
+        try:
+            syms = index.refresh(d, files=files, index_dir=idxdir)
+            self.assertEqual({s["name"] for s in syms}, {"a", "b"})
+            self.assertEqual(calls["n"], 2)                  # both parsed on the cold run
+            index.refresh(d, files=files, index_dir=idxdir)  # nothing changed
+            self.assertEqual(calls["n"], 2)                  # ZERO re-extraction (incremental)
+            time.sleep(0.01)
+            _write(os.path.join(d, "two.py"), "def b():\n    pass\n\ndef c():\n    pass\n")
+            out = index.refresh(d, files=files, index_dir=idxdir)
+            self.assertEqual(calls["n"], 3)                  # only the changed file re-parsed
+            self.assertIn("c", {s["name"] for s in out})
+        finally:
+            index.extract_symbols = real
+        # the persisted jsonl is keyed per file
+        self.assertTrue(os.path.exists(index.index_path(d, idxdir)))
+
+    # ---- 4. token-budgeted briefing -----------------------------------------
+    def test_context_respects_small_vs_large_budget(self):
+        from forge import workspace
+        d = tempfile.mkdtemp()
+        os.environ["FORGE_INDEX_DIR"] = tempfile.mkdtemp()
+        try:
+            _write(os.path.join(d, "svc.py"), "def handler():\n    return 1\n")
+            small = workspace.context(d, budget=4096)
+            large = workspace.context(d, budget=65536)
+            self.assertNotIn("Key symbols", small)           # tiny window → no symbol map
+            self.assertIn("Key symbols", large)              # roomy window → symbols included
+            self.assertIn("handler", large)
+        finally:
+            os.environ.pop("FORGE_INDEX_DIR", None)
 
 
 if __name__ == "__main__":
