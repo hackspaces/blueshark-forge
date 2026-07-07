@@ -16,6 +16,7 @@ Mac/Apple-Silicon tuning (env-overridable):
 Ollama uses Metal automatically. Set OLLAMA_FLASH_ATTENTION=1 in the environment
 for faster, lower-memory attention.
 """
+import hashlib
 import json
 import os
 import socket
@@ -280,3 +281,50 @@ def make_backend(spec, engine="ollama", base_url=None, api_key=None):
         return OllamaBackend(spec)
     url = base_url or ENGINE_URLS.get(engine, "http://localhost:8000/v1")
     return OpenAICompatBackend(spec, url, api_key)
+
+
+def record_digest(messages):
+    """A stable fingerprint of a prompt: md5 of the LAST 2000 chars of its JSON.
+    The tail is what changes turn-to-turn (fresh observations, appended turns),
+    so it discriminates steps while staying robust to a giant unchanging head.
+    Shared by RecordingBackend (record) and ReplayBackend strict mode (verify)."""
+    return hashlib.md5(json.dumps(messages)[-2000:].encode("utf-8")).hexdigest()
+
+
+class RecordingBackend:
+    """P3.3 flight recorder. Wraps a real backend and, per chat/stream call,
+    appends a cassette row {digest, raw, prompt_tokens} to the FORGE_RECORD file —
+    turning a live run into a replayable transcript at zero extra inference. Every
+    other attribute (name / effective_ctx / context_window / last_prompt_tokens /
+    warm / …) delegates to the inner backend, so the Agent sees a normal backend."""
+
+    def __init__(self, inner, path):
+        self._inner = inner
+        self._path = path
+
+    def _record(self, messages, raw):
+        row = {"digest": record_digest(messages), "raw": raw,
+               "prompt_tokens": getattr(self._inner, "last_prompt_tokens", 0)}
+        with open(self._path, "a") as f:
+            f.write(json.dumps(row) + "\n")
+
+    def chat(self, messages, schema=None, temperature=0.0):
+        raw = self._inner.chat(messages, schema=schema, temperature=temperature)
+        self._record(messages, raw)
+        return raw
+
+    def stream(self, messages, schema=None, temperature=0.0):
+        raw = ""
+        for chunk in self._inner.stream(messages, schema=schema, temperature=temperature):
+            raw += chunk
+            yield chunk
+        # last_prompt_tokens is populated by the inner stream's usage frame, which
+        # arrives at the end — so record only once the stream is fully drained.
+        self._record(messages, raw)
+
+    def __getattr__(self, name):
+        # Only reached for attributes NOT set on the wrapper (name/effective_ctx/
+        # context_window/last_prompt_tokens/warm/…) — forward them to the inner
+        # backend so it stays a drop-in. _inner is set first in __init__, so this
+        # never recurses on the wrapper's own private attrs.
+        return getattr(self._inner, name)

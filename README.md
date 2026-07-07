@@ -104,8 +104,25 @@ forge receipts              trust audit trail — verdicts on "done" claims
 forge learnings [dir]       durable facts forge has learned about a repo
 forge trace [sid|last]      replay a session's step trace as a table
 forge bench [--report]      harness-lift eval: same model bare vs full harness
+forge replay [sid|last]     re-drive a recorded session through the harness, no model
 forge --version
 ```
+
+### Flight recorder + replay
+
+Every step's raw model output — malformed ones included — is logged into the
+session transcript. `forge replay <sid>` re-drives a **real** agent loop from those
+raws with **no model and no GPU**, then reports the first step where a changed
+harness diverges (a different gate/action/compaction point) and the terminal state
+— so a harness change is validated against real small-model behavior at zero
+inference cost. `forge replay <sid> --to-fixture <name>` snapshots the session's
+raws into `tests/fixtures/<name>.jsonl`, and `tests/test_replay.py` sweeps every
+fixture as a regression test. `--strict` also asserts each recorded prompt digest
+matches (loose, the default, is robust to prompt-wording changes). Set
+`FORGE_RECORD=<path>` to additionally mirror every model call into a `{digest, raw,
+prompt_tokens}` cassette. Replay reconstructs the harness-**decision** path; full
+fidelity of the file-system half needs a workspace snapshot (a `setup.sh`, like the
+bench fixtures), so replay runs in a throwaway dir and never touches your files.
 
 ### Harness-lift benchmark
 
@@ -220,6 +237,7 @@ forge receipts                 trust audit trail — verdicts on "done" claims
 forge learnings [dir]          durable facts learned in a repo
 forge trace [sid|last]         replay a session's per-step trace as a table
 forge bench [--report]         harness-lift eval: same model bare vs full harness
+forge replay [sid|last]        re-drive a recorded session through the harness, no model
 ```
 
 ## Architecture

@@ -390,6 +390,12 @@ class Agent:
                     prompt = self.messages + ([pin] if pin else [])
                     self.on_event("thinking")
                     raw = self._generate(prompt)
+                    # P3.3 flight recorder: persist the RAW model output of every
+                    # step — including the malformed ones the parse below discards
+                    # (the valuable ones). prompt_tokens is the exact count for THIS
+                    # generation, so a replay can reproduce compaction timing.
+                    self.session.log("model", v=TRACE_V, raw=raw, tier=self.tier,
+                                     prompt_tokens=getattr(self.backend, "last_prompt_tokens", 0))
 
                     try:
                         act = json.loads(raw)

@@ -1,0 +1,4 @@
+{"type": "meta", "model": "ollama:qwen3:4b", "cwd": "/recorded/session", "mode": "auto", "window": 8192, "expected": "replayed cleanly"}
+{"type": "user", "text": "say hi from the shell then report done"}
+{"type": "model", "tier": 0, "prompt_tokens": 640, "raw": "{\"thought\":\"greet via the shell\",\"action\":\"bash\",\"command\":\"echo forge-replay-ok\"}"}
+{"type": "model", "tier": 0, "prompt_tokens": 690, "raw": "{\"thought\":\"the echo worked, nothing left to do\",\"action\":\"say\",\"message\":\"replayed cleanly\"}"}

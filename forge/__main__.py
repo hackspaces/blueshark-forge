@@ -15,7 +15,7 @@ import signal
 
 from . import __version__
 
-from .backends import make_backend, ForgeError
+from .backends import make_backend, ForgeError, RecordingBackend
 from . import session as sessmod
 from .util import slurp, dump
 from . import config as cfgmod
@@ -48,8 +48,15 @@ def _make_ladder(spec):
     eng = cfg.get("engine", "ollama")
     url = cfg.get("base_url") or None
     key = cfg.get("api_key") or None
-    return [make_backend(s.strip(), engine=eng, base_url=url, api_key=key)
-            for s in spec.split(",") if s.strip()]
+    ladder = [make_backend(s.strip(), engine=eng, base_url=url, api_key=key)
+              for s in spec.split(",") if s.strip()]
+    # P3.3 flight recorder: FORGE_RECORD=<path> wraps every rung so each model call
+    # appends a {digest, raw, prompt_tokens} cassette row. Unset → zero wrapping,
+    # zero behavior change.
+    rec = os.environ.get("FORGE_RECORD")
+    if rec:
+        ladder = [RecordingBackend(b, rec) for b in ladder]
+    return ladder
 
 
 def cmd_chat(args):
@@ -247,6 +254,28 @@ def cmd_trace(args):
               f"{fill:>5}  {oks:>4}  {flags:<30}  {('?' if ms is None else ms):>6}")
 
 
+def cmd_replay(args):
+    """P3.3 — re-drive a recorded session through the harness with NO model.
+    `sid` defaults to 'last'. With --to-fixture, snapshot the session's raws into
+    tests/fixtures/<NAME>.jsonl instead of replaying."""
+    import glob
+    from . import replay as replaymod
+    sid = args.sid
+    if sid == "last":
+        files = glob.glob(os.path.join(sessmod.SESSIONS, "*.jsonl"))
+        if not files:
+            print("no sessions found."); return
+        sid = os.path.basename(max(files, key=os.path.getmtime))[:-len(".jsonl")]
+    if args.to_fixture:
+        try:
+            path = replaymod.write_fixture(sid, args.to_fixture)
+        except ValueError as e:
+            print(f"✗ {e}", file=sys.stderr); sys.exit(1)
+        print(f"wrote fixture {path}")
+        return
+    print(replaymod.replay(sid, strict=args.strict))
+
+
 def cmd_bench(args):
     """P3.2 — harness-lift eval. Run each task through the real Agent.send loop for
     every selected lever-config (bare vs full, plus any ablation), append rows to
@@ -317,6 +346,11 @@ def main():
     p_tr = sub.add_parser("trace", help="pretty-print a session's step trace")
     p_tr.add_argument("sid", nargs="?", default="last", help="session id (or 'last', the default)")
 
+    p_rp = sub.add_parser("replay", help="re-drive a recorded session through the harness with NO model")
+    p_rp.add_argument("sid", nargs="?", default="last", help="session id (or 'last', the default)")
+    p_rp.add_argument("--strict", action="store_true", help="assert each recorded prompt digest matches (trips on any prompt change)")
+    p_rp.add_argument("--to-fixture", dest="to_fixture", metavar="NAME", help="snapshot this session's raws into tests/fixtures/<NAME>.jsonl")
+
     p_bench = sub.add_parser("bench", help="harness-lift eval: same model bare vs full harness + per-lever ablation")
     p_bench.add_argument("--tasks", help="comma-separated subset of bench task names (default: all)")
     p_bench.add_argument("--max-steps", type=int, default=40)
@@ -342,7 +376,7 @@ def main():
                               api_key=args.api_key, models=models))
     dispatch = {"run": cmd_run, "status": cmd_status, "send": cmd_send, "up": cmd_up,
                 "down": cmd_down, "receipts": cmd_receipts, "learnings": cmd_learnings,
-                "trace": cmd_trace, "bench": cmd_bench}
+                "trace": cmd_trace, "bench": cmd_bench, "replay": cmd_replay}
     (dispatch.get(args.cmd) or cmd_chat)(args)
 
 
