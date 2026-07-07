@@ -498,6 +498,64 @@ class TestFindSession(unittest.TestCase):
             self.assertEqual([h["sid"] for h in hits], ["claude-ymp"])
 
 
+class TestRenderWrap(unittest.TestCase):
+    """Reply text wraps at word boundaries with a 2-space margin."""
+
+    def _ui(self, width=40):
+        from forge.repl import UI
+        out = []
+        return UI(out.append, width=lambda: width), out
+
+    def test_stream_wraps_at_word_boundaries(self):
+        ui, out = self._ui(40)
+        ui("token", text="The files here are: .claude, .git, CONTRIBUTING.md plus several more words to overflow")
+        ui("say", message="")
+        text = "".join(out)
+        self.assertTrue(all(len(l) <= 38 for l in text.splitlines()))
+        flat = " ".join(text.split())
+        self.assertIn("CONTRIBUTING.md", flat)          # never split mid-word
+
+    def test_stream_word_split_across_chunks(self):
+        ui, out = self._ui(40)
+        for ch in ("Hel", "lo wor", "ld and more text that keeps going well past the width"):
+            ui("token", text=ch)
+        ui("say", message="")
+        flat = " ".join("".join(out).split())
+        self.assertIn("Hello world", flat)
+
+    def test_block_wrap_indents_every_line(self):
+        ui, out = self._ui(40)
+        ui("say", message="one two three four five six seven eight nine ten eleven twelve thirteen")
+        lines = [l for l in "".join(out).splitlines() if l]
+        self.assertTrue(all(l.startswith("  ") and len(l) <= 38 for l in lines))
+
+
+class TestBoxLayout(unittest.TestCase):
+    """The input box wraps the logical line across its writable rows."""
+
+    def _screen(self, w=24, rows=2):
+        from forge.tui import Screen
+        s = Screen.__new__(Screen)      # no tty / signal setup
+        s.w, s.rows = w, rows
+        return s
+
+    def test_short_line_stays_on_row0(self):
+        segs, crow, ccol = self._screen()._layout(2, "hello", 5)
+        self.assertEqual(segs[0], "hello")
+        self.assertEqual((crow, ccol), (0, 7))
+
+    def test_wraps_to_second_row(self):
+        # w=24 -> inner=20, caps=[18, 20]
+        segs, crow, ccol = self._screen()._layout(2, "a" * 30, 30)
+        self.assertEqual((segs[0], segs[1]), ("a" * 18, "a" * 12))
+        self.assertEqual((crow, ccol), (1, 12))
+
+    def test_scrolls_when_overflowing_the_box(self):
+        segs, crow, ccol = self._screen()._layout(2, "b" * 50, 50)
+        self.assertEqual(crow, 1)                       # cursor stays visible
+        self.assertLessEqual(ccol, 19)
+
+
 class TestTuiHelpers(unittest.TestCase):
     """Pure helpers from the TUI: ANSI-aware clipping and raw-mode key decoding."""
 

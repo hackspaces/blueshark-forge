@@ -73,22 +73,26 @@ def _read_key(fd):
 
 class Screen:
     """A bottom-pinned terminal: the conversation scrolls in the top region while
-    a fixed footer (activity · rule · prompt · status) stays anchored at the
-    bottom — the way Claude Code / htop-style TUIs do it, via a DECSTBM scroll
-    region. The activity row (the 'working…' spinner) sits ABOVE the input rule,
-    visually in the flow of the streamed output.
+    a fixed footer stays anchored at the bottom — the way Claude Code /
+    htop-style TUIs do it, via a DECSTBM scroll region. Footer layout:
+
+        ⠋ working… (12s)                      <- activity, in the output flow
+        ╭──────────────────────────────╮
+        │ ❯ your input, wrapping onto  │      <- a rounded box with two
+        │ a second line as you type    │         writable rows
+        ╰──────────────────────────────╯
+        model · 9% context · /help            <- status
 
     All transcript output goes through `emit()`; the footer is painted with
     absolute positioning, wrapped in save/restore so it never disturbs the
     scroll cursor. Degrades to plain stdout when not a TTY."""
 
-    def __init__(self, footer=4):
-        self.footer = footer
+    def __init__(self):
         self.enabled = _supported()
         self._lock = threading.Lock()   # serialize stdout between the agent + the spinner
         self._redraw = None             # repaint hook, set while the editor is live
         self._entered = False
-        self._activity = ""             # the 'working…' line above the rule
+        self._activity = ""             # the 'working…' line above the box
         self._resize()
         if self.enabled:
             try:
@@ -99,6 +103,8 @@ class Screen:
     def _resize(self):
         size = shutil.get_terminal_size((80, 24))
         self.w, self.h = size.columns, size.lines
+        self.rows = 2 if self.h >= 14 else 1          # writable lines in the box
+        self.footer = self.rows + 4                   # activity · top · rows · bottom · status
 
     def _winch(self, *_):
         """Terminal resized: re-pin the scroll region to the new height and
@@ -137,17 +143,44 @@ class Screen:
             sys.stdout.write(text)
             sys.stdout.flush()
 
-    def _paint(self, prompt, text, status, cursor_col=None):
+    def _layout(self, plen, text, cur):
+        """Wrap the logical input across the box's writable rows, keeping the
+        cursor visible. Returns (segments, cursor_row, cursor_col) where col is
+        an offset into the row's content area."""
+        inner = max(8, self.w - 4)                    # inside '│ ' … ' │'
+        caps = [inner - plen] + [inner] * (self.rows - 1)
+        total = sum(caps)
+        start = max(0, cur - (total - 1))             # scroll left if overlong
+        vis = text[start:start + total]
+        segs, i = [], 0
+        for c in caps:
+            segs.append(vis[i:i + c]); i += c
+        rel = cur - start
+        if rel < caps[0] or self.rows == 1:
+            return segs, 0, plen + min(rel, caps[0])
+        return segs, 1 + (rel - caps[0]) // inner, (rel - caps[0]) % inner
+
+    def _paint(self, prompt, text, status, cur=None, dim=False):
+        """Repaint the footer. `text` is the plain logical input line; it wraps
+        across the box's writable rows."""
         base = self.h - self.footer + 1
-        rule = f"{DIM}{'─' * self.w}{RST}"
-        rows = [_clip(f"{DIM}{self._activity}{RST}", self.w), rule,
-                _clip(f"{prompt}{text}", self.w), _clip(f"{DIM}{status}{RST}", self.w)][-self.footer:]
+        plen = _vis(prompt)
+        segs, crow, ccol = self._layout(plen, text, len(text) if cur is None else cur)
+        style = DIM if dim else ""
+        lines = [_clip(f"{MG}{self._activity}{RST}" if self._activity else "", self.w),
+                 f"{DIM}╭{'─' * (self.w - 2)}╮{RST}"]
+        pad0 = max(0, (self.w - 4) - plen - len(segs[0]))
+        lines.append(f"{DIM}│{RST} {prompt}{style}{segs[0]}{RST}{' ' * pad0} {DIM}│{RST}")
+        for s in segs[1:]:
+            lines.append(f"{DIM}│{RST} {style}{s}{RST}{' ' * max(0, (self.w - 4) - len(s))} {DIM}│{RST}")
+        lines.append(f"{DIM}╰{'─' * (self.w - 2)}╯{RST}")
+        lines.append(_clip(f"{DIM}{status}{RST}", self.w))
         for i in range(self.footer):
             sys.stdout.write(f"\033[{base + i};1H\033[K")
-            if i < len(rows):
-                sys.stdout.write(rows[i])
-        if cursor_col is not None:
-            sys.stdout.write(f"\033[{base + self.footer - 2};{cursor_col}H")
+            if i < len(lines):
+                sys.stdout.write(lines[i])
+        if cur is not None:
+            sys.stdout.write(f"\033[{base + 2 + crow};{3 + ccol}H")
         sys.stdout.flush()
 
     def set_status(self, status):
@@ -175,7 +208,7 @@ class Screen:
         if not self.enabled:
             return
         sys.stdout.write("\0337")
-        self._paint(prompt, f"{DIM}{text}{RST}", "")
+        self._paint(prompt, text, "", dim=True)
         sys.stdout.write("\0338")
         sys.stdout.flush()
 
@@ -192,14 +225,10 @@ class Screen:
         fd = sys.stdin.fileno()
         old = termios.tcgetattr(fd)
         buf, cur, hidx, saved = [], 0, len(history), ""
-        plen = _vis(prompt)
         sys.stdout.write("\0337")   # save the scroll-region cursor for the duration of editing
 
         def draw():
-            text = "".join(buf)
-            avail = max(4, self.w - plen - 1)
-            start = max(0, cur - avail) if cur > avail else 0
-            self._paint(prompt, text[start:start + avail], status, cursor_col=1 + plen + (cur - start))
+            self._paint(prompt, "".join(buf), status, cur=cur)
 
         self._redraw = draw
         try:

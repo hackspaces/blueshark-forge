@@ -51,23 +51,74 @@ class Spinner:
 
 
 class UI:
-    """Renders agent events into the scrolling transcript via `emit`. The spinner
-    lives in the pinned footer (owned by run()), not here."""
-    def __init__(self, emit, verbose=False):
-        self.emit = emit; self.verbose = verbose; self.t0 = None
+    """Renders agent events into the scrolling transcript via `emit`. Reply text
+    is word-wrapped with a 2-space margin — never split mid-word — whether it
+    streams token by token or arrives whole. The spinner lives in the pinned
+    footer (owned by run()), not here."""
+    INDENT = "  "
+
+    def __init__(self, emit, verbose=False, width=lambda: 100):
+        self.emit = emit; self.verbose = verbose; self.width = width; self.t0 = None
         self.streamed = False; self.said = False
+        self._col = 0; self._pend = ""
     def new_turn(self):
         self.streamed = False; self.said = False
+        self._col = 0; self._pend = ""
     def _line(self, s=""):
         self.emit(s + "\n")
+    def _wrap_width(self):
+        return max(24, min(self.width() - 2, 100))
+
+    def wrap_block(self, text):
+        """Wrap a whole reply: word boundaries, 2-space margin, paragraphs kept."""
+        import textwrap
+        out = []
+        for para in text.split("\n"):
+            if not para.strip():
+                out.append("")
+                continue
+            out.append(textwrap.fill(para, width=self._wrap_width(),
+                                     initial_indent=self.INDENT, subsequent_indent=self.INDENT,
+                                     break_long_words=False, break_on_hyphens=False))
+        return "\n".join(out)
+
+    def _stream(self, chunk):
+        """Emit streamed text with live word-wrapping: hold back a partial word
+        until its end arrives, break lines before a word that would overflow."""
+        import re as _re
+        W = self._wrap_width()
+        for piece in _re.split(r"(\s+)", chunk):
+            if not piece:
+                continue
+            if not piece.isspace():
+                self._pend += piece
+                continue
+            self._flush_word()
+            if "\n" in piece:
+                self.emit("\n" * min(piece.count("\n"), 2) + self.INDENT)
+                self._col = len(self.INDENT)
+            elif self._col >= W:
+                self.emit("\n" + self.INDENT); self._col = len(self.INDENT)
+            else:
+                self.emit(" "); self._col += 1
+
+    def _flush_word(self):
+        if not self._pend:
+            return
+        if self._col + len(self._pend) > self._wrap_width() and self._col > len(self.INDENT):
+            self.emit("\n" + self.INDENT); self._col = len(self.INDENT)
+        self.emit(self._pend); self._col += len(self._pend)
+        self._pend = ""
+
     def __call__(self, kind, **k):
         if kind == "token":
             if not self.streamed:
-                self.emit("\n"); self.streamed = True
-            self.emit(k["text"])
+                self.emit("\n" + self.INDENT); self._col = len(self.INDENT); self.streamed = True
+            self._stream(k["text"])
         elif kind == "say":
             self.said = True
-            self.emit("\n" if self.streamed else f"\n{k.get('message','')}\n")
+            self._flush_word()
+            self.emit("\n" if self.streamed else f"\n{self.wrap_block(k.get('message',''))}\n")
         elif kind == "plan":
             self._render_plan(k["plan"])
         elif kind == "action":
@@ -196,8 +247,8 @@ def _expand_ats(text, cwd):
 
 def run(backend, session, verbose=False, workspace=None):
     from .tui import Screen, FooterSpinner
-    screen = Screen(footer=4)   # activity (working…) · rule · input · status
-    ui = UI(screen.emit, verbose)
+    screen = Screen()           # activity (working…) · boxed 2-line input · status
+    ui = UI(screen.emit, verbose, width=lambda: screen.w)
     ladder = backend if isinstance(backend, list) else [backend]
     agent = Agent(ladder, session, on_event=ui, workspace=workspace, autonomous=True)
     ptype = ""
@@ -277,4 +328,4 @@ def _run_loop(screen, ui, agent, session, status_line, models, ctx, ptype):
         if reply == "(stopped)":
             screen.emit(f"{DIM}  ⊘ stopped. what next?{RST}\n")
         elif reply is not None and not ui.said:        # fallback (step limit / malformed)
-            screen.emit(f"\n{reply}\n")
+            screen.emit(f"\n{ui.wrap_block(reply)}\n")
