@@ -219,8 +219,16 @@ def cmd_learnings(args):
     facts = fleet.learnings(os.path.abspath(args.dir))
     if not facts:
         print("(no learnings yet for this repo)"); return
-    for f in facts:
-        print(f"• {f}")
+    for r in facts:
+        mark = "✓" if r.get("verified") else " "
+        print(f"{mark} {r.get('fact', '')}")
+
+
+def cmd_forget(args):
+    from . import fleet
+    n = fleet.forget(os.path.abspath(args.dir), args.pattern)
+    tail = f" matching '{args.pattern}'" if args.pattern else ""
+    print(f"forgot {n} fact(s){tail}")
 
 
 def cmd_trace(args):
@@ -352,6 +360,9 @@ def main():
     p_ln = sub.add_parser("learnings", help="facts learned in a repo")
     p_ln.add_argument("dir", nargs="?", default=os.getcwd())
 
+    p_fg = sub.add_parser("forget", help="prune learned facts (optionally matching a pattern)")
+    p_fg.add_argument("pattern", nargs="?", default=None, help="substring; omit to clear all facts for --dir")
+
     p_tr = sub.add_parser("trace", help="pretty-print a session's step trace")
     p_tr.add_argument("sid", nargs="?", default="last", help="session id (or 'last', the default)")
 
@@ -385,7 +396,7 @@ def main():
                               api_key=args.api_key, models=models))
     dispatch = {"run": cmd_run, "status": cmd_status, "send": cmd_send, "up": cmd_up,
                 "down": cmd_down, "receipts": cmd_receipts, "learnings": cmd_learnings,
-                "trace": cmd_trace, "bench": cmd_bench, "replay": cmd_replay}
+                "forget": cmd_forget, "trace": cmd_trace, "bench": cmd_bench, "replay": cmd_replay}
     (dispatch.get(args.cmd) or cmd_chat)(args)
 
 

@@ -526,6 +526,102 @@ class TestFleet(unittest.TestCase):
             fleet._learn_path = orig
 
 
+class TestLearnV2(unittest.TestCase):
+    """P4.6 — validated LEARN v2: classify → run/existence-check → supersede → forget.
+    Executable facts run a REAL subprocess (sh) against a temp fixture — allowed, as
+    it is not a model call — while the store is redirected off ~/.forge."""
+
+    def setUp(self):
+        from forge import fleet
+        self.fleet = fleet
+        store = tempfile.mkdtemp()
+        self._orig_lp = fleet._learn_path
+        fleet._learn_path = lambda cwd, _s=store: os.path.join(_s, "l.jsonl")
+
+    def tearDown(self):
+        self.fleet._learn_path = self._orig_lp
+
+    def test_passing_command_verified(self):
+        d = tempfile.mkdtemp()            # no markers → detect returns None → really runs
+        self.fleet._store_learnings(d, ['Always run `sh -c "exit 0"` first'], "s1")
+        recs = self.fleet.learnings(d)
+        self.assertEqual(len(recs), 1)
+        self.assertEqual(recs[0]["kind"], "executable")
+        self.assertTrue(recs[0]["verified"])
+        self.assertEqual(recs[0]["method"], "run")
+
+    def test_failing_command_stored_unverified_not_dropped(self):
+        d = tempfile.mkdtemp()
+        fact = 'Run `sh -c "exit 3"` to check'
+        self.fleet._store_learnings(d, [fact], "s1")
+        recs = self.fleet.learnings(d)
+        self.assertEqual(len(recs), 1)                       # NOT discarded
+        self.assertFalse(recs[0]["verified"])                # stored UNVERIFIED
+        self.assertEqual(recs[0]["fact"], fact)
+
+    def test_path_fact_existence_checked(self):
+        d = tempfile.mkdtemp()
+        _write(os.path.join(d, "present.py"), "x=1")
+        self.fleet._store_learnings(d, ["The entry point lives in present.py",
+                                        "Config is in absent.toml"], "s1")
+        recs = {r["fact"]: r for r in self.fleet.learnings(d)}
+        self.assertEqual(recs["The entry point lives in present.py"]["kind"], "path")
+        self.assertTrue(recs["The entry point lives in present.py"]["verified"])
+        self.assertFalse(recs["Config is in absent.toml"]["verified"])
+
+    def test_detect_crosscheck_short_circuits_without_running(self):
+        d = tempfile.mkdtemp()
+        _write(os.path.join(d, "pyproject.toml"), "[project]\nname='x'\n")
+        # detect_test_cmd(d) → 'pytest -q'; the fact AGREES so it must never isolate/run.
+        orig = self.fleet._isolate
+        self.fleet._isolate = lambda cwd: (_ for _ in ()).throw(AssertionError("must not run"))
+        try:
+            self.fleet._store_learnings(d, ["The test command is `pytest -q`"], "s1")
+        finally:
+            self.fleet._isolate = orig
+        recs = self.fleet.learnings(d)
+        self.assertEqual(len(recs), 1)
+        self.assertTrue(recs[0]["verified"])
+        self.assertEqual(recs[0]["method"], "detect")
+
+    def test_contradiction_supersedes_by_key(self):
+        d = tempfile.mkdtemp()
+        self.fleet._store_learnings(d, ['The check command is `sh -c "exit 0"`'], "s1")
+        self.fleet._store_learnings(d, ['The check command is `sh -c "exit 1"`'], "s2")
+        recs = self.fleet.learnings(d)
+        self.assertEqual(len(recs), 1)                       # superseded, not appended
+        self.assertIn("exit 1", recs[0]["fact"])             # newest wins
+        self.assertFalse(recs[0]["verified"])
+
+    def test_learnings_verified_first(self):
+        d = tempfile.mkdtemp()
+        _write(os.path.join(d, "here.py"), "x=1")
+        self.fleet._store_learnings(d, ["Prefer small commits over big ones",  # note → None
+                                        "The loader is in here.py"], "s1")      # path → True
+        recs = self.fleet.learnings(d)
+        self.assertEqual(len(recs), 2)
+        self.assertTrue(recs[0]["verified"])                 # verified fact sorts first
+        self.assertIn("here.py", recs[0]["fact"])
+
+    def test_forget_removes_matching_then_all(self):
+        d = tempfile.mkdtemp()
+        self.fleet._store_learnings(d, ["Prefer tabs over spaces",
+                                        "Deploy with the red button"], "s1")
+        self.assertEqual(len(self.fleet.learnings(d)), 2)
+        self.assertEqual(self.fleet.forget(d, "tabs"), 1)
+        self.assertEqual([r["fact"] for r in self.fleet.learnings(d)],
+                         ["Deploy with the red button"])
+        self.assertEqual(self.fleet.forget(d), 1)            # no pattern clears the rest
+        self.assertEqual(self.fleet.learnings(d), [])
+
+    def test_store_returns_fresh_strings_for_daemon(self):
+        # daemon.learn_pass relies on _store_learnings returning fact STRINGS.
+        d = tempfile.mkdtemp()
+        fresh = self.fleet._store_learnings(d, ["Prefer small commits"], "s1")
+        self.assertEqual(fresh, ["Prefer small commits"])
+        self.assertTrue(all(isinstance(x, str) for x in fresh))
+
+
 class TestWorkspace(unittest.TestCase):
     def test_detect_project(self):
         from forge import workspace
@@ -545,6 +641,35 @@ class TestWorkspace(unittest.TestCase):
         self.assertEqual(label, "")
         self.assertEqual(markers, [])
         self.assertNotIn("Project type", workspace.context(d))
+
+    def test_instructions_file_pinned_above_learnings(self):
+        # P4.6: the first-found FORGE.md/AGENTS.md/CLAUDE.md is pinned as
+        # user-authored PROJECT INSTRUCTIONS, above the fleet's learnings.
+        from forge import workspace
+        d = tempfile.mkdtemp()
+        _write(os.path.join(d, "CLAUDE.md"), "claude fallback rules")
+        _write(os.path.join(d, "AGENTS.md"), "agents rules body")
+        ctx = workspace.context(d, learnings=[{"fact": "L1", "verified": True},
+                                              {"fact": "L2", "verified": False}])
+        self.assertIn("PROJECT INSTRUCTIONS", ctx)
+        self.assertIn("agents rules body", ctx)              # AGENTS.md beats CLAUDE.md
+        self.assertNotIn("claude fallback rules", ctx)
+        self.assertLess(ctx.index("PROJECT INSTRUCTIONS"), ctx.index("already learned"))
+        self.assertIn("✓ L1", ctx)                           # verified learning annotated
+        self.assertIn("- L2", ctx)                           # unverified learning plain
+        _write(os.path.join(d, "FORGE.md"), "forge top-priority rules")
+        ctx2 = workspace.context(d)
+        self.assertIn("forge top-priority rules", ctx2)      # FORGE.md wins over all
+        self.assertNotIn("agents rules body", ctx2)
+
+    def test_instructions_file_capped(self):
+        from forge import workspace
+        d = tempfile.mkdtemp()
+        _write(os.path.join(d, "FORGE.md"), "x" * 5000)
+        name, text = workspace._instructions(d)
+        self.assertEqual(name, "FORGE.md")
+        self.assertLessEqual(len(text), workspace.INSTRUCTIONS_CAP + 40)
+        self.assertIn("truncated", text)
 
 
 class TestEdgeCases(unittest.TestCase):

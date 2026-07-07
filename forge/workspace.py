@@ -196,6 +196,42 @@ def environment(cwd):
 
 SMALL_CTX = 8192          # below this the briefing drops to env + rollup tree, no symbols
 
+INSTRUCTION_FILES = ("FORGE.md", "AGENTS.md", "CLAUDE.md")  # first-found wins
+INSTRUCTIONS_CAP = 3000    # chars of user-authored instructions pinned into the briefing
+LEARN_RENDER_CAP = 12      # top-N learnings shown (already verified-first from fleet.learnings)
+
+
+def _instructions(root, cap=INSTRUCTIONS_CAP):
+    """The first-found per-repo instructions file at the repo root — FORGE.md,
+    else AGENTS.md, else CLAUDE.md — capped to `cap` chars. Returns (name, text)
+    or (None, None). These are USER-authored rules and outrank anything the fleet
+    merely learned, so context() pins them above the learnings section."""
+    for name in INSTRUCTION_FILES:
+        p = os.path.join(root, name)
+        if not os.path.isfile(p):
+            continue
+        try:
+            with open(p, encoding="utf-8", errors="replace") as fh:
+                text = fh.read(cap + 1)
+        except OSError:
+            continue
+        text = text.strip()
+        if not text:
+            continue
+        if len(text) > cap:
+            text = text[:cap].rstrip() + "\n…(instructions truncated)"
+        return name, text
+    return None, None
+
+
+def _render_learning(x):
+    """Render one learning for the briefing. A LEARN v2 record (dict) gets a ✓ when
+    the harness verified it; a bare string (legacy / caller-supplied) prints plain."""
+    if isinstance(x, dict):
+        mark = "✓ " if x.get("verified") else ""
+        return f"- {mark}{x.get('fact', '')}"
+    return f"- {x}"
+
 
 def _key_symbols(root, limit=40):
     """The top ~`limit` defined symbols, recency-first, for large-ctx briefings."""
@@ -229,8 +265,12 @@ def context(root, learnings=None, budget=None):
         parts.append(f"Project type: {ptype} (markers: {', '.join(markers)})")
     shown_note = f" (top {cap} of {n} by recency; every dir in the rollup below)" if n > cap else ""
     parts.append(f"\n{n} project files (git-tracked, node_modules excluded). File tree{shown_note}:\n{tree}")
+    name, instr = _instructions(root)
+    if instr:
+        parts.append(f"\nPROJECT INSTRUCTIONS (user-authored — follow these):\n{instr}")
     if learnings:
-        parts.append("\nWhat the fleet has already learned about this repo:\n" + "\n".join(f"- {f}" for f in learnings))
+        parts.append("\nWhat the fleet has already learned about this repo:\n"
+                     + "\n".join(_render_learning(x) for x in learnings[:LEARN_RENDER_CAP]))
     if not small:
         syms = _key_symbols(root)
         if syms:

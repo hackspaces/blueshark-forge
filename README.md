@@ -79,6 +79,13 @@ Then just talk to it — it already knows your files, git state, and machine:
 It works autonomously: it picks the files, makes the changes, runs the tests to
 verify, and reports back — only asking when it genuinely needs you.
 
+**Repo rules.** Drop a `FORGE.md` (or `AGENTS.md`, or `CLAUDE.md`) at the repo
+root and forge pins it into every session as top-priority, user-authored
+instructions — above anything the fleet has merely learned. The fleet's own
+learned facts are validated before they stick: a claimed test command is run once
+in an isolated copy (or matched against the detected one) and a ✓ marks the ones
+the harness actually confirmed.
+
 **In the chat:**
 - `Esc` — clear the input line, or (mid-run) **stop the agent**
 - `@path` — pull a file's contents into your message
@@ -101,7 +108,8 @@ forge status                show every live forge session and what it's doing
 forge send <target> <msg>   message another running session
 forge up  /  forge down     start / stop the fleet autopilot (verify + coordinate + learn)
 forge receipts              trust audit trail — verdicts on "done" claims
-forge learnings [dir]       durable facts forge has learned about a repo
+forge learnings [dir]       durable facts forge has learned about a repo (✓ = harness-verified)
+forge forget [pattern]      prune learned facts (substring match, or all)
 forge trace [sid|last]      replay a session's step trace as a table
 forge bench [--report]      harness-lift eval: same model bare vs full harness
 forge replay [sid|last]     re-drive a recorded session through the harness, no model
@@ -234,7 +242,8 @@ forge up                       start the autopilot (TRUST + COORDINATE + LEARN)
 forge down                     stop it
 forge send <target> <msg>      message another session (it absorbs it mid-work)
 forge receipts                 trust audit trail — verdicts on "done" claims
-forge learnings [dir]          durable facts learned in a repo
+forge learnings [dir]          durable facts learned in a repo (✓ = harness-verified)
+forge forget [pattern]         prune learned facts (substring match, or all)
 forge trace [sid|last]         replay a session's per-step trace as a table
 forge bench [--report]         harness-lift eval: same model bare vs full harness
 forge replay [sid|last]        re-drive a recorded session through the harness, no model

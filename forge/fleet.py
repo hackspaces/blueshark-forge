@@ -533,30 +533,207 @@ def _learn_path(cwd):
     return os.path.join(LEARN_DIR, re.sub(r"[^A-Za-z0-9]", "-", cwd) + ".jsonl")
 
 
-def learnings(cwd):
+MAX_FACTS = 50            # per-repo cap; oldest-unverified evicted first
+
+
+def _load_records(cwd):
+    """Every stored LEARN v2 record for this repo, unsorted, as dicts."""
     p = _learn_path(cwd)
     if not os.path.exists(p):
         return []
     out = []
-    for line in slurp(p).splitlines(keepends=True):
+    for line in slurp(p).splitlines():
         try:
             d = json.loads(line)
             if d.get("fact"):
-                out.append(d["fact"])
+                out.append(d)
         except json.JSONDecodeError:
             pass
     return out
 
 
+def _write_records(cwd, records):
+    with open(_learn_path(cwd), "w") as f:
+        for d in records:
+            f.write(json.dumps(d) + "\n")
+
+
+def learnings(cwd):
+    """Learned facts for this repo as LEARN v2 records, VERIFIED-FIRST then newest.
+    (Records are dicts: {fact, kind, sid, ts, verified, last_confirmed, ...}.)"""
+    recs = _load_records(cwd)
+    recs.sort(key=lambda d: (0 if d.get("verified") else 1, -(d.get("ts") or 0)))
+    return recs
+
+
+# ---- LEARN v2: classify → validate → supersede ------------------------------
+_CMD_RUNNERS = frozenset((
+    "npm", "pnpm", "yarn", "pytest", "py.test", "python", "python3", "make", "go",
+    "cargo", "ruby", "rake", "node", "tox", "bash", "sh", "mvn", "gradle", "poetry",
+    "pip", "deno", "bun", "phpunit", "dotnet", "ctest", "cmake", "just", "task"))
+
+
+def _is_command(s):
+    s = (s or "").strip()
+    if not s:
+        return False
+    head = s.split()[0].rsplit("/", 1)[-1]
+    return head in _CMD_RUNNERS or s.startswith("./")
+
+
+def _extract_command(fact):
+    """The runnable command a fact asserts, or None. Prefers a backticked command
+    (`npm test`); falls back to an explicit 'command is X' phrasing."""
+    for m in re.finditer(r"`([^`]+)`", fact):
+        if _is_command(m.group(1)):
+            return m.group(1).strip()
+    m = re.search(r"\b(?:command|tests?|build|lint|check)\b[^`\n]{0,40}?\bis\b[:\s]+([^.;\n]+)", fact, re.I)
+    if m:
+        cand = m.group(1).strip().strip("`\"'")
+        if _is_command(cand):
+            return cand
+    return None
+
+
+def _extract_path(fact):
+    """A filesystem path the fact references, or None (a dir/file with a real
+    extension — version numbers like 3.10 are excluded by the alpha-led suffix)."""
+    m = re.search(r"([\w.\-/]*/[\w.\-]+\.[A-Za-z][\w]*)", fact)     # dir/.../file.ext
+    if m:
+        return m.group(1)
+    m = re.search(r"\b([\w\-]+\.[A-Za-z][\w]*)\b", fact)            # bare file.ext
+    if m:
+        return m.group(1)
+    return None
+
+
+def _classify(fact):
+    """(kind, payload): 'executable'+cmd, 'path'+path, or 'note'+None."""
+    cmd = _extract_command(fact)
+    if cmd:
+        return "executable", cmd
+    path = _extract_path(fact)
+    if path:
+        return "path", path
+    return "note", None
+
+
+def _norm_cmd(c):
+    return re.sub(r"\s+", " ", (c or "").strip())
+
+
+def _fact_key(fact, kind=None, payload=None):
+    """Normalized supersede key. Two executable/path facts that share the same
+    surrounding phrasing but a DIFFERENT command/path contradict → same key, so the
+    newer one replaces the older (e.g. 'the test command is `npm test`' vs
+    '… `pytest -q`')."""
+    norm = lambda s: re.sub(r"[^a-z0-9]+", " ", (s or "").lower()).strip()
+    if kind == "executable" and payload:
+        return "cmd:" + norm(fact.replace(payload, ""))
+    if kind == "path" and payload:
+        return "path:" + norm(fact.replace(payload, ""))
+    return "note:" + norm(fact)
+
+
+def _run_fact(cmd, cwd):
+    """Run a claimed command ONCE in an isolated copy of the repo (reusing verify()'s
+    _isolate). Returns True on exit 0, False on any nonzero/timeout — never raises.
+    A False here means UNVERIFIED (the suite may be legitimately red), not 'discard'."""
+    import subprocess
+    if not os.path.isdir(cwd):
+        return None
+    work, cleanup = _isolate(cwd)
+    try:
+        p = subprocess.run(cmd, cwd=work, shell=True, capture_output=True, text=True, timeout=60)
+        return p.returncode == 0
+    except Exception:
+        return False
+    finally:
+        cleanup()
+
+
+def _validate_fact(fact, cwd, detected):
+    """Classify a fact and, when it is checkable, set its verified bit deterministically.
+    Executable facts: cross-check against detect_test_cmd for FREE first (agreement →
+    verified without ever running); otherwise run once. Path facts: existence check.
+    Notes stay verified=None."""
+    kind, payload = _classify(fact)
+    verified, method = None, None
+    if kind == "executable":
+        if detected and _norm_cmd(payload) == _norm_cmd(detected):
+            verified, method = True, "detect"          # agrees with the deterministic detector
+        else:
+            verified, method = _run_fact(payload, cwd), "run"
+    elif kind == "path":
+        verified, method = os.path.exists(os.path.join(cwd, payload)), "exists"
+    return kind, payload, verified, method
+
+
+def _cap_records(records):
+    """Enforce MAX_FACTS, evicting oldest-UNVERIFIED first so verified facts survive."""
+    if len(records) <= MAX_FACTS:
+        return records
+    verified = [r for r in records if r.get("verified")]
+    rest = [r for r in records if not r.get("verified")]
+    rest.sort(key=lambda r: r.get("ts") or 0, reverse=True)   # newest unverified first
+    keep_rest = rest[:max(0, MAX_FACTS - len(verified))]
+    return (verified + keep_rest)[:MAX_FACTS]
+
+
 def _store_learnings(cwd, facts, sid):
+    """Validate, dedupe, and supersede fresh facts into the repo's LEARN store.
+    Returns the list of fresh fact STRINGS (the daemon's learn_pass shares these)."""
     norm = lambda s: re.sub(r"[^a-z0-9]+", " ", s.lower()).strip()
-    have = {norm(f) for f in learnings(cwd)}
-    fresh = [f for f in facts if f and norm(f) not in have]
+    existing = _load_records(cwd)
+    have = {norm(d["fact"]) for d in existing}
+    try:
+        detected = detect_test_cmd(cwd) if os.path.isdir(cwd) else None
+    except Exception:
+        detected = None
+    by_key, order = {}, []
+    for d in existing:
+        k = d.get("key") or _fact_key(d["fact"], d.get("kind"), d.get("cmd") or d.get("path"))
+        if k not in by_key:
+            order.append(k)
+        by_key[k] = d
+    fresh, now = [], time.time()
+    for fact in facts:
+        if not fact or norm(fact) in have:
+            continue
+        have.add(norm(fact))
+        kind, payload, verified, method = _validate_fact(fact, cwd, detected)
+        k = _fact_key(fact, kind, payload)
+        rec = {"fact": fact, "kind": kind, "sid": sid, "ts": now,
+               "verified": verified, "last_confirmed": now if verified else None,
+               "method": method, "key": k}
+        if kind == "executable" and payload:
+            rec["cmd"] = payload
+        elif kind == "path" and payload:
+            rec["path"] = payload
+        if k not in by_key:
+            order.append(k)
+        by_key[k] = rec                # supersede any prior fact under this key
+        fresh.append(fact)
     if fresh:
-        with open(_learn_path(cwd), "a") as f:
-            for fact in fresh:
-                f.write(json.dumps({"fact": fact, "ts": time.time(), "sid": sid}) + "\n")
+        _write_records(cwd, _cap_records([by_key[k] for k in order]))
     return fresh
+
+
+def forget(cwd, pattern=None):
+    """Prune learned facts. With `pattern`, drop facts whose text contains it
+    (case-insensitive); without, clear the repo's store. Returns the count removed."""
+    recs = _load_records(cwd)
+    if not recs:
+        return 0
+    if pattern:
+        pat = pattern.lower()
+        kept = [r for r in recs if pat not in r.get("fact", "").lower()]
+    else:
+        kept = []
+    removed = len(recs) - len(kept)
+    if removed:
+        _write_records(cwd, kept)
+    return removed
 
 
 def harvest(sid, cwd, model):
