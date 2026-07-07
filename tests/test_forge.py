@@ -2968,5 +2968,198 @@ class TestJitRetrieval(unittest.TestCase):
             os.environ.pop("FORGE_INDEX_DIR", None)
 
 
+class TestResume(unittest.TestCase):
+    """P4.7 — reconstruct working memory from a transcript for `forge --resume`.
+    Transcripts are built with real Session.log into a temp SESSIONS dir; no model
+    calls, no daemon, no network."""
+
+    def setUp(self):
+        self.sdir = tempfile.mkdtemp()
+        self._orig_sessions = sm.SESSIONS
+        self._orig_registry = sm.registry
+        sm.SESSIONS = self.sdir
+        sm.registry = lambda: []              # nothing live unless a test says so
+
+    def tearDown(self):
+        sm.SESSIONS = self._orig_sessions
+        sm.registry = self._orig_registry
+
+    def _sess(self, sid, cwd):
+        return sm.Session(sid, cwd, "m")
+
+    def test_load_reconstructs_summary_plan_and_tail(self):
+        from forge import resume as rz
+        d = tempfile.mkdtemp()
+        s = self._sess("recon1", d)
+        s.log("meta", v=1, forge="x", model="m", ladder=["m"], cwd=d, mode="auto", briefing="abc")
+        s.log("user", text="do the thing")
+        s.log("plan", items=["[x] step one", "[~] step two"])
+        s.log("action", action="read_file", args={"path": "a.py"}, thought="reading a")
+        s.log("observation", text="line1\nline2", ok=True)
+        s.log("compact", v=1, summary="earlier we set up X and Y", window=8192)
+        s.log("action", action="bash", args={"command": "ls"}, thought="listing")
+        s.log("observation", text="a.py\nb.py", ok=True)
+        s.log("assistant", text="all set", thought="done")
+
+        data = rz.load("recon1")
+        self.assertIsNotNone(data)
+        # last compaction summary → the '[Earlier progress]' note
+        self.assertIn("earlier we set up X and Y", data["summary_note"]["content"])
+        self.assertIn("Earlier progress", data["summary_note"]["content"])
+        # last plan restored
+        self.assertEqual(data["plan"], ["[x] step one", "[~] step two"])
+        # tail: action→assistant JSON, observation→user 'Observation:' message,
+        # the final say synthesized back into an action:say object
+        roles = [m["role"] for m in data["tail_msgs"]]
+        self.assertEqual(roles[0], "user")                       # the user turn
+        self.assertIn("assistant", roles)
+        self.assertTrue(any(m["role"] == "user" and m["content"].startswith("Observation:")
+                            for m in data["tail_msgs"]))
+        last = data["tail_msgs"][-1]
+        self.assertEqual(last["role"], "assistant")
+        self.assertIn('"say"', last["content"])
+        self.assertIn("all set", last["content"])
+        # a synthesized action carries the command from args (lossy but present)
+        self.assertTrue(any('"ls"' in m["content"] for m in data["tail_msgs"] if m["role"] == "assistant"))
+        # read action captured for ledger seeding
+        self.assertIn("a.py", data["read_ts"])
+
+    def test_load_without_compact_or_plan_is_graceful(self):
+        from forge import resume as rz
+        d = tempfile.mkdtemp()
+        s = self._sess("bare1", d)
+        s.log("meta", cwd=d)
+        s.log("user", text="hi")
+        s.log("assistant", text="hello")
+        data = rz.load("bare1")
+        self.assertIsNone(data["summary_note"])
+        self.assertEqual(data["plan"], [])
+        self.assertEqual(data["read_ts"], {})
+        self.assertEqual(rz.load("no-such-sid"), None)
+
+    def test_apply_keeps_head_splices_summary_and_tail(self):
+        from forge import resume as rz
+        d = tempfile.mkdtemp()
+        s = self._sess("ap1", d)
+        s.log("meta", cwd=d)
+        s.log("compact", summary="the state so far", window=8192)
+        s.log("user", text="continue please")
+        s.log("assistant", text="ok")
+        data = rz.load("ap1")
+
+        agent = Agent(ScriptBackend([]), sm.EphemeralSession(d, "m"))
+        head = list(agent.messages)                              # system-only head (workspace=None)
+        note = rz.apply(agent, data)
+        self.assertEqual(agent.messages[:len(head)], head)       # fresh head untouched
+        self.assertIn("the state so far", agent.messages[len(head)]["content"])
+        self.assertEqual(len(agent.meta), len(agent.messages))   # parallel meta stays aligned
+        self.assertIn("resumed ap1", note)
+
+    def test_apply_seeds_only_unchanged_files(self):
+        from forge import resume as rz
+        d = tempfile.mkdtemp()
+        _write(os.path.join(d, "keep.py"), "x = 1\n")
+        _write(os.path.join(d, "stale.py"), "y = 2\n")
+        s = self._sess("seed1", d)
+        s.log("meta", cwd=d)
+        s.log("action", action="read_file", args={"path": "keep.py"}, thought="r")
+        s.log("action", action="read_file", args={"path": "stale.py"}, thought="r")
+        s.log("assistant", text="done")
+        data = rz.load("seed1")
+        # stale.py is modified AFTER its recorded read → its mtime is now newer
+        future = time.time() + 1000
+        os.utime(os.path.join(d, "stale.py"), (future, future))
+
+        agent = Agent(ScriptBackend([]), sm.EphemeralSession(d, "m"))
+        rz.apply(agent, data)
+        keep_fp = os.path.realpath(os.path.join(d, "keep.py"))
+        stale_fp = os.path.realpath(os.path.join(d, "stale.py"))
+        self.assertTrue(agent.ledger.current(keep_fp))           # unchanged → seeded & current
+        self.assertIsNone(agent.ledger.get(stale_fp))            # changed → NOT seeded (stays unread)
+
+    def test_live_pid_session_refuses_resume(self):
+        from forge import resume as rz
+        sm.registry = lambda: [{"sid": "livesid", "pid": os.getpid()}]
+        self.assertTrue(rz.is_live("livesid"))
+        self.assertFalse(rz.is_live("deadsid"))
+
+    def test_last_picks_newest_non_live_for_cwd(self):
+        from forge import resume as rz
+        d1 = tempfile.mkdtemp()
+        d2 = tempfile.mkdtemp()
+        self._sess("old1", d1).log("meta", cwd=d1)
+        self._sess("new1", d1).log("meta", cwd=d1)
+        self._sess("other1", d2).log("meta", cwd=d2)     # different cwd — must be ignored
+        os.utime(os.path.join(self.sdir, "old1.jsonl"), (1000, 1000))
+        os.utime(os.path.join(self.sdir, "new1.jsonl"), (2000, 2000))
+        os.utime(os.path.join(self.sdir, "other1.jsonl"), (3000, 3000))
+
+        self.assertEqual(rz.latest_sid(d1), "new1")              # newest for d1
+        self.assertEqual(rz.resolve_sid("last", d1), "new1")
+        # a live newest is skipped → the next-newest non-live wins
+        sm.registry = lambda: [{"sid": "new1", "pid": os.getpid()}]
+        self.assertEqual(rz.latest_sid(d1), "old1")
+
+    def test_resolve_explicit_sid_and_prefix(self):
+        from forge import resume as rz
+        d = tempfile.mkdtemp()
+        self._sess("abcd1234ef", d).log("meta", cwd=d)
+        self.assertEqual(rz.resolve_sid("abcd1234ef", d), "abcd1234ef")
+        self.assertEqual(rz.resolve_sid("abcd12", d), "abcd1234ef")   # unambiguous prefix
+        self.assertIsNone(rz.resolve_sid("nomatch", d))
+
+    def test_agent_logs_plan_records_for_resume(self):
+        # DO item 1: the plan-update branch persists a 'plan' record so resume can
+        # restore the living plan. A record fires only when the plan actually changes.
+        d = tempfile.mkdtemp()
+        sess = _RecSession(d)
+        plan_a = '{"thought":"t","action":"list_files","path":".","plan":["[ ] a","[ ] b"]}'
+        plan_a2 = '{"thought":"t","action":"list_files","path":".","plan":["[ ] a","[ ] b"]}'
+        plan_b = '{"thought":"t","action":"say","message":"done","plan":["[x] a","[~] b"]}'
+        a = Agent(ScriptBackend([plan_a, plan_a2, plan_b]), sess, max_steps=6)
+        a.send("go")
+        plans = [f["items"] for k, f in sess.logs if k == "plan"]
+        self.assertEqual(plans[0], ["[ ] a", "[ ] b"])
+        self.assertEqual(plans[-1], ["[x] a", "[~] b"])
+        self.assertEqual(len(plans), 2)                          # unchanged repeat did not re-log
+
+
+class TestPromptHistory(unittest.TestCase):
+    """P4.7 — prompt history persists to ~/.forge/history across sessions."""
+
+    def test_history_round_trip_and_flatten(self):
+        from forge import repl
+        d = tempfile.mkdtemp()
+        orig = repl.HISTORY_PATH
+        repl.HISTORY_PATH = os.path.join(d, "history")
+        try:
+            self.assertEqual(repl._load_history(), [])
+            repl._append_history("first prompt")
+            repl._append_history("second prompt")
+            self.assertEqual(repl._load_history(), ["first prompt", "second prompt"])
+            repl._append_history("multi\nline")             # newline flattened
+            repl._append_history("   ")                     # blank ignored
+            hist = repl._load_history()
+            self.assertEqual(hist[-1], "multi line")
+            self.assertNotIn("   ", hist)
+        finally:
+            repl.HISTORY_PATH = orig
+
+    def test_history_trims_to_cap(self):
+        from forge import repl
+        d = tempfile.mkdtemp()
+        orig_path, orig_cap = repl.HISTORY_PATH, repl.HISTORY_CAP
+        repl.HISTORY_PATH = os.path.join(d, "history")
+        repl.HISTORY_CAP = 5
+        try:
+            for i in range(12):
+                repl._append_history(f"prompt {i}")
+            hist = repl._load_history()                     # load trims to the cap
+            self.assertEqual(len(hist), 5)
+            self.assertEqual(hist[-1], "prompt 11")
+        finally:
+            repl.HISTORY_PATH, repl.HISTORY_CAP = orig_path, orig_cap
+
+
 if __name__ == "__main__":
     unittest.main()

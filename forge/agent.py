@@ -1025,6 +1025,9 @@ class Agent:
                         if act["plan"] != self.plan:
                             self.plan = act["plan"]
                             self.on_event("plan", plan=self.plan)
+                            # P4.7: persist plan changes so a --resume can restore the
+                            # living plan from the transcript (mirrors meta/compact).
+                            self.session.log("plan", items=self.plan)
 
                     kind = act.get("action")
                     trace["action"] = kind

@@ -102,6 +102,7 @@ forge run "fix the type errors in src/ and run the build"
 
 ```
 forge                       chat with an agent in the current repo
+forge --resume <sid|last>   resume a prior session from its transcript
 forge run "<task>"          run one task to completion, autonomously
 forge setup                 detect hardware / choose engine / write config
 forge status                show every live forge session and what it's doing
@@ -115,6 +116,18 @@ forge bench [--report]      harness-lift eval: same model bare vs full harness
 forge replay [sid|last]     re-drive a recorded session through the harness, no model
 forge --version
 ```
+
+### Resume a session
+
+Every session's transcript (`~/.forge/sessions/<id>.jsonl`) is reconstructable
+memory, not just telemetry. `forge --resume <sid>` (or `--resume last`, the newest
+session for the current repo) rebuilds an agent from it: a **fresh** workspace
+briefing as the head (re-oriented in the repo as it is now, not a stale snapshot),
+the last compaction summary as `[Earlier progress]`, the recent turns replayed, the
+living plan restored, and the read-file ledger seeded — but only for files still
+unchanged on disk, so read-before-edit stays honest and anything touched since is
+re-read. A session that is still running (live pid) is refused. Prompt history
+persists to `~/.forge/history` across sessions.
 
 ### Flight recorder + replay
 

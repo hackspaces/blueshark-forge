@@ -2,6 +2,7 @@
 
   forge                       chat with an agent (default model) in the cwd
   forge --model gemma2:9b     pick any model (Ollama spec, or openai:...)
+  forge --resume <sid|last>   resume a prior session from its transcript
   forge run "<task>"          one-shot: run a task to completion, non-interactive
   forge status                list live forge sessions
 """
@@ -72,9 +73,24 @@ def cmd_chat(args):
     from .repl import run
     ladder = _make_ladder(args.model)
     cwd = os.path.abspath(args.dir)
+    resume_data = None
+    if getattr(args, "resume", None):
+        from . import resume as resumemod
+        sid = resumemod.resolve_sid(args.resume, cwd)
+        if not sid:
+            print(f"✗ no resumable session found for {args.resume!r} in {cwd}", file=sys.stderr)
+            sys.exit(1)
+        if resumemod.is_live(sid):
+            print(f"✗ session {sid} is still running — refusing to resume a live session", file=sys.stderr)
+            sys.exit(1)
+        resume_data = resumemod.load(sid)
+        if not resume_data:
+            print(f"✗ session {sid} has no transcript to resume", file=sys.stderr)
+            sys.exit(1)
     s = _new_session(ladder[0].name, cwd, name=args.name)
     try:
-        run(ladder, s, verbose=args.verbose, workspace=_workspace_ctx(cwd, _ctx_budget(ladder[0])))
+        run(ladder, s, verbose=args.verbose,
+            workspace=_workspace_ctx(cwd, _ctx_budget(ladder[0])), resume=resume_data)
     finally:
         s.deregister()
 
@@ -337,6 +353,8 @@ def main():
     ap.add_argument("--dir", default=os.getcwd())
     ap.add_argument("--name", default=None)
     ap.add_argument("--verbose", action="store_true")
+    ap.add_argument("--resume", metavar="SID|last", default=None,
+                    help="resume a prior session from its transcript ('last' = newest for this dir)")
     ap.add_argument("--version", action="version", version=f"forge {__version__}")
     sub = ap.add_subparsers(dest="cmd")
 

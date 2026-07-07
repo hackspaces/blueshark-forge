@@ -4,6 +4,7 @@ A live plan panel, clean tool-step rendering with pass/fail and timing, a spinne
 while the model thinks, and the agent's reply set apart. Designed so watching a
 small local model work is legible and fast to read."""
 import itertools
+import os
 import sys
 import threading
 import time
@@ -249,6 +250,43 @@ def _expand_ats(text, cwd):
     return out
 
 
+# ---- persistent prompt history (P4.7) ----------------------------------------
+HISTORY_PATH = os.path.expanduser("~/.forge/history")
+HISTORY_CAP = 1000          # keep the last N prompts across sessions
+
+
+def _load_history():
+    """The persisted prompt history (last HISTORY_CAP lines), newest last. Rewrites
+    the file trimmed when it has grown past the cap. Best-effort — any error yields
+    an empty history rather than blocking startup."""
+    try:
+        with open(HISTORY_PATH, encoding="utf-8", errors="replace") as f:
+            lines = [ln.rstrip("\n") for ln in f if ln.strip()]
+    except OSError:
+        return []
+    if len(lines) > HISTORY_CAP:
+        lines = lines[-HISTORY_CAP:]
+        try:
+            with open(HISTORY_PATH, "w", encoding="utf-8") as f:
+                f.write("\n".join(lines) + "\n")
+        except OSError:
+            pass
+    return lines
+
+
+def _append_history(line):
+    """Append one prompt to the on-disk history. Newlines are flattened so one
+    prompt stays one line. Best-effort and never raises."""
+    if not line or not line.strip():
+        return
+    try:
+        os.makedirs(os.path.dirname(HISTORY_PATH), exist_ok=True)
+        with open(HISTORY_PATH, "a", encoding="utf-8") as f:
+            f.write(line.replace("\n", " ") + "\n")
+    except OSError:
+        pass
+
+
 MODES = ("auto", "plan", "manual")
 MODE_HINT = {
     "auto":   "acts freely, no questions",
@@ -299,12 +337,18 @@ def _on_wake(ui, agent, session, budget_left):
     return "\n".join(f"[fleet message from {m['from']}]: {m['text']}" for m in act)
 
 
-def run(backend, session, verbose=False, workspace=None):
+def run(backend, session, verbose=False, workspace=None, resume=None):
     from .tui import Screen, FooterSpinner, ApprovalGate
     screen = Screen()           # activity (working…) · boxed 2-line input · status
     ui = UI(screen.emit, verbose, width=lambda: screen.w)
     ladder = backend if isinstance(backend, list) else [backend]
     agent = Agent(ladder, session, on_event=ui, workspace=workspace, autonomous=True)
+    if resume:                  # P4.7: splice reconstructed memory onto the fresh Agent
+        from . import resume as resumemod
+        try:
+            resumemod.apply(agent, resume)
+        except Exception:
+            pass
     ptype = ""
     if workspace:
         for line in workspace.splitlines():
@@ -350,7 +394,10 @@ def _run_loop(screen, ui, agent, session, status_line, gate, models, ctx, ptype)
     from .tui import FooterSpinner, WAKE
     screen.emit(_banner(models, ctx, session.cwd, ptype))
     screen.emit(f"{DIM}  Esc clears/stops · shift+tab: auto/plan/manual · /files explorer · type while it works to queue · /help{RST}\n\n")
-    history = []
+    resumed = getattr(agent, "_resume_info", None)   # P4.7: set by resume.apply()
+    if resumed:
+        screen.emit(f"{MG}  ⟲ {resumed}{RST}\n\n")
+    history = _load_history()                        # P4.7: prompt history persists across sessions
     pending = []                                        # messages queued for the NEXT turn
     prefill = ""                                        # e.g. "@file " picked in the explorer
     # Wake-on-inbox (P2.3): off by default, so behaviour is unchanged unless opted in.
@@ -384,6 +431,7 @@ def _run_loop(screen, ui, agent, session, status_line, gate, models, ctx, ptype)
                     continue
                 wake_budget = WAKE_BUDGET               # a human turn resets the autonomous chain
                 history.append(user)
+                _append_history(user)                  # P4.7: persist to ~/.forge/history
                 if user in ("/exit", "/quit"):
                     break
                 screen.emit(f"\n{GR}❯{RST} {user}\n")   # echo into the transcript
@@ -423,6 +471,7 @@ def _run_loop(screen, ui, agent, session, status_line, gate, models, ctx, ptype)
 
         def queue_msg(txt):
             history.append(txt)
+            _append_history(txt)                        # P4.7: persist to ~/.forge/history
             session.push("user", txt)                   # absorbed between agent steps
             screen.emit(f"{DIM}  ⧉ queued: {txt[:90]}{RST}\n")
 
