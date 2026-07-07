@@ -148,13 +148,17 @@ class TestWorkspace(unittest.TestCase):
         label, markers = workspace.detect_project(d)
         self.assertIn("Node", label)
 
-    def test_detect_inferred_language(self):
+    def test_no_marker_means_no_claim(self):
+        # stray source files must NOT get a directory labeled as a project
+        # (a home dir with one .go file is not 'a Go project')
         from forge import workspace
         d = tempfile.mkdtemp()
         _write(os.path.join(d, "a.py"), "x=1")
-        _write(os.path.join(d, "b.py"), "y=2")
-        label, _ = workspace.detect_project(d)
-        self.assertIn("Python", label)
+        _write(os.path.join(d, "b.go"), "package main")
+        label, markers = workspace.detect_project(d)
+        self.assertEqual(label, "")
+        self.assertEqual(markers, [])
+        self.assertNotIn("Project type", workspace.context(d))
 
 
 class TestEdgeCases(unittest.TestCase):

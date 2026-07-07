@@ -72,12 +72,11 @@ def build_tree(root, cap=180):
     return "\n".join(lines) + truncated, total
 
 
-EXT_LANG = {".py": "Python", ".js": "JavaScript", ".ts": "TypeScript", ".jsx": "JavaScript",
-            ".tsx": "TypeScript", ".rs": "Rust", ".go": "Go", ".java": "Java", ".rb": "Ruby",
-            ".php": "PHP", ".swift": "Swift", ".c": "C", ".cpp": "C++", ".sh": "Shell"}
-
-
 def detect_project(root):
+    """Project type from HARD EVIDENCE only — a manifest at the root (go.mod,
+    package.json, pyproject.toml, ...). No markers → no claim: guessing a
+    language from stray source files mislabels non-project dirs (a home
+    directory with one .go file is not 'a Go project')."""
     hits = [(label, name) for name, label in PROJECT_MARKERS if os.path.exists(os.path.join(root, name))]
     labels = []
     for label, _ in hits:
@@ -85,17 +84,7 @@ def detect_project(root):
             labels.append(label)
     if labels:
         return ", ".join(labels), [name for _, name in hits]
-    # fallback: infer language from the most common source extension
-    counts = {}
-    files = _git_files(root) or _walk_files(root, 200)
-    for f in files:
-        lang = EXT_LANG.get(os.path.splitext(f)[1].lower())
-        if lang:
-            counts[lang] = counts.get(lang, 0) + 1
-    if counts:
-        top = max(counts, key=counts.get)
-        return f"{top} (inferred)", []
-    return "unknown", []
+    return "", []
 
 
 def _ver(tool, arg="--version"):
@@ -157,7 +146,10 @@ def context(root, learnings=None):
         environment(root),
         "",
         f"WORKSPACE: {root}",
-        f"Project type: {ptype}" + (f" (markers: {', '.join(markers)})" if markers else ""),
+    ]
+    if ptype:
+        parts.append(f"Project type: {ptype} (markers: {', '.join(markers)})")
+    parts += [
         f"\n{n} project files (git-tracked, node_modules excluded). File tree"
         + (f" (first 180 of {n} shown)" if n > 180 else "") + f":\n{tree}",
     ]
