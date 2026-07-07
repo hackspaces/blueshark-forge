@@ -247,6 +247,43 @@ def cmd_trace(args):
               f"{fill:>5}  {oks:>4}  {flags:<30}  {('?' if ms is None else ms):>6}")
 
 
+def cmd_bench(args):
+    """P3.2 — harness-lift eval. Run each task through the real Agent.send loop for
+    every selected lever-config (bare vs full, plus any ablation), append rows to
+    ~/.forge/bench/results.jsonl, and (with --report) print the lift + ablation
+    tables. 'bare' = every lever off; the loop still demands JSON and bails after 5
+    malformed replies, so a bare pass-rate substantially measures format compliance
+    — that is the honest harness-lift story."""
+    from . import bench
+    tasks = bench.list_tasks()
+    if args.tasks:
+        want = {t.strip() for t in args.tasks.split(",") if t.strip()}
+        tasks = [t for t in tasks if t in want]
+    if not tasks:
+        print("no bench tasks found (looked in bench/)."); return
+    configs = bench.configs_for(args)
+    rows = []
+    for task in tasks:
+        task_dir = os.path.join(bench.bench_dir(), task)
+        for label, levers in configs:
+            ladder = _make_ladder(args.model)
+            print(f"· {task}  [{label}]  {args.model} …", flush=True)
+            try:
+                row = bench.run_task(task_dir, ladder, levers,
+                                     max_steps=args.max_steps, model=args.model)
+            except ForgeError as e:
+                print(f"  ✗ {e}", file=sys.stderr); continue
+            verdict = {True: "PASS", False: "FAIL", None: "no-verdict"}[row["pass"]]
+            print(f"  {verdict}  steps={row['steps']} {row['seconds']}s "
+                  f"malformed={row['malformed']} loops={row['loops']} esc={row['escalations']}")
+            rows.append(row)
+    bench.append_results(rows)
+    print(f"\n{len(rows)} run(s) appended to {bench.RESULTS}")
+    if args.report:
+        print()
+        print(bench.report(rows))
+
+
 def main():
     ap = argparse.ArgumentParser(prog="forge")
     # default LOCAL LADDER comes from ~/.forge/config.json (written by `forge setup`)
@@ -280,6 +317,16 @@ def main():
     p_tr = sub.add_parser("trace", help="pretty-print a session's step trace")
     p_tr.add_argument("sid", nargs="?", default="last", help="session id (or 'last', the default)")
 
+    p_bench = sub.add_parser("bench", help="harness-lift eval: same model bare vs full harness + per-lever ablation")
+    p_bench.add_argument("--tasks", help="comma-separated subset of bench task names (default: all)")
+    p_bench.add_argument("--max-steps", type=int, default=40)
+    p_bench.add_argument("--bare", action="store_true", help="also run with NO harness (every lever off)")
+    p_bench.add_argument("--no-compact", dest="no_compact", action="store_true", help="ablate: full harness minus compaction")
+    p_bench.add_argument("--no-loop-detect", dest="no_loop_detect", action="store_true", help="ablate: full harness minus loop detection")
+    p_bench.add_argument("--no-read-gate", dest="no_read_gate", action="store_true", help="ablate: full harness minus read-before-edit")
+    p_bench.add_argument("--single-rung", dest="single_rung", action="store_true", help="ablate: full harness minus escalation")
+    p_bench.add_argument("--report", action="store_true", help="print the lift + ablation tables after running")
+
     p_setup = sub.add_parser("setup", help="detect hardware, choose an engine, pull/point at models, write config")
     p_setup.add_argument("--auto", action="store_true", help="no prompts (Ollama, RAM-sized ladder)")
     p_setup.add_argument("--engine", help="ollama | vllm | llamacpp | mlx | lmstudio | tgi | sglang | openai")
@@ -295,7 +342,7 @@ def main():
                               api_key=args.api_key, models=models))
     dispatch = {"run": cmd_run, "status": cmd_status, "send": cmd_send, "up": cmd_up,
                 "down": cmd_down, "receipts": cmd_receipts, "learnings": cmd_learnings,
-                "trace": cmd_trace}
+                "trace": cmd_trace, "bench": cmd_bench}
     (dispatch.get(args.cmd) or cmd_chat)(args)
 
 

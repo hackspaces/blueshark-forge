@@ -103,8 +103,25 @@ forge up  /  forge down     start / stop the fleet autopilot (verify + coordinat
 forge receipts              trust audit trail — verdicts on "done" claims
 forge learnings [dir]       durable facts forge has learned about a repo
 forge trace [sid|last]      replay a session's step trace as a table
+forge bench [--report]      harness-lift eval: same model bare vs full harness
 forge --version
 ```
+
+### Harness-lift benchmark
+
+`forge bench` measures what the *harness* buys, not the weights: it runs each task
+fixture (`bench/<task>/` — `prompt.txt` + optional `setup.sh`/`verify.sh`) through
+the real agent loop twice, once **bare** (every scaffolding lever off) and once with
+the **full** harness, and prints the pass-rate lift. Per-lever ablation flags
+(`--no-compact`, `--no-loop-detect`, `--no-read-gate`, `--single-rung`) drop one
+lever from the full set so you can see which lever earned its complexity. Results
+append to `~/.forge/bench/results.jsonl`.
+
+Honest framing: "bare" turns off constrained decoding, but the loop still demands a
+JSON action every step and gives up after 5 malformed replies — so a bare pass-rate
+substantially measures *format compliance* (can the raw model hold the action
+contract at all). That is exactly the harness-lift story worth telling: the
+scaffolding is what makes a small local model usable.
 
 ### In the chat
 
@@ -202,6 +219,7 @@ forge send <target> <msg>      message another session (it absorbs it mid-work)
 forge receipts                 trust audit trail — verdicts on "done" claims
 forge learnings [dir]          durable facts learned in a repo
 forge trace [sid|last]         replay a session's per-step trace as a table
+forge bench [--report]         harness-lift eval: same model bare vs full harness
 ```
 
 ## Architecture

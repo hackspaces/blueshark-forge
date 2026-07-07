@@ -25,6 +25,21 @@ from .tools import ACTION_SCHEMA, TOOL_HELP, execute, shape, error_hint
 STUCK_AT = int(os.environ.get("FORGE_STUCK_THRESHOLD", "7"))  # failures before escalating a rung
 TRACE_V = 1  # P3.1 schema version stamped on every meta/step/compact/loop/malformed record
 
+# P3.2 harness levers — the switchable scaffolding mechanisms `forge bench` ablates
+# to measure harness-lift (same model bare vs full). Each name gates exactly one
+# mechanism site in the loop below; the DEFAULT (levers=None -> ALL_LEVERS) turns
+# every lever on, which is byte-for-byte identical to the pre-P3.2 harness.
+ALL_LEVERS = frozenset({
+    "schema",       # constrained decoding (grammar-forced action JSON)
+    "workspace",    # workspace-briefing injection at session start
+    "plan_pin",     # pin the living plan into context each turn
+    "loop_detect",  # break 3x-repeat and per-command fail loops
+    "read_gate",    # read-before-edit guard
+    "alias_repair", # normalize path-field aliases (filename/file/...)
+    "escalation",   # bump to a stronger ladder rung when stuck
+    "compaction",   # summarize old turns near the context limit
+})
+
 # P2.1 done-gate: a bash command that IS (a run of) a test suite marks the turn
 # verified. Covers every form detect_test_cmd emits (pytest/npm test/make test/
 # cargo test) plus the common runners, so a model that runs its own tests before
@@ -138,7 +153,7 @@ BE AUTONOMOUS — this is the core of how you work. When the user asks for somet
 
 class Agent:
     def __init__(self, backend, session, max_steps=60, on_event=None, autonomous=False,
-                 system=None, allowed=None, workspace=None):
+                 system=None, allowed=None, workspace=None, levers=None):
         # `backend` may be a single backend or a LADDER (list, cheapest→strongest
         # local models). The harness starts cheap and escalates a rung when stuck.
         self.ladder = backend if isinstance(backend, list) else [backend]
@@ -148,9 +163,14 @@ class Agent:
         self.max_steps = max_steps
         self.on_event = on_event or (lambda *a, **k: None)
         self.allowed = allowed
+        # P3.2 levers: which scaffolding mechanisms are active this run. None = the
+        # full harness (ALL_LEVERS); frozenset() = bare (every lever off). `_lv(name)`
+        # gates each mechanism site so the default path is unchanged.
+        self.levers = frozenset(levers) if levers is not None else ALL_LEVERS
+        self._lv = lambda n: n in self.levers
         base = (system if system is not None else SYSTEM) + (AUTONOMOUS if autonomous else "")
         self.messages = [{"role": "system", "content": base}]
-        if workspace:
+        if workspace and self._lv("workspace"):
             self.messages.append({"role": "user", "content": workspace})
             self.messages.append({"role": "assistant", "content": '{"thought":"Oriented in the workspace. Ready.","action":"say","message":"Ready."}'})
         self.head_len = len(self.messages)  # system (+ workspace) — never compacted away
@@ -240,11 +260,12 @@ class Agent:
     def _generate(self, prompt):
         """Stream the model's action. When it turns out to be a `say`, emit the
         message text live (token by token) via on_event('token')."""
+        schema = ACTION_SCHEMA if self._lv("schema") else None
         if not hasattr(self.backend, "stream"):
-            return self.backend.chat(prompt, schema=ACTION_SCHEMA)
+            return self.backend.chat(prompt, schema=schema)
         raw, emitted, is_say = "", 0, False
         try:
-            for chunk in self.backend.stream(prompt, schema=ACTION_SCHEMA):
+            for chunk in self.backend.stream(prompt, schema=schema):
                 if self.stop.is_set():
                     break
                 raw += chunk
@@ -363,8 +384,9 @@ class Agent:
                 _t0 = time.monotonic()
                 try:
                     self._absorb_inbox()
-                    self._compact()
-                    pin = self._pin_plan()
+                    if self._lv("compaction"):
+                        self._compact()
+                    pin = self._pin_plan() if self._lv("plan_pin") else None
                     prompt = self.messages + ([pin] if pin else [])
                     self.on_event("thinking")
                     raw = self._generate(prompt)
@@ -419,7 +441,7 @@ class Agent:
                     # normalize aliases, and reject pathless file actions with an exact fix
                     # (an empty path must never fall through: it used to resolve to the cwd
                     # and hit the read-before-edit guard with a nonsense message).
-                    if kind in ("read_file", "write_file", "edit_file") and not act.get("path"):
+                    if self._lv("alias_repair") and kind in ("read_file", "write_file", "edit_file") and not act.get("path"):
                         for alias in ("filename", "file", "filepath", "file_path", "name"):
                             if isinstance(act.get(alias), str) and act[alias]:
                                 act["path"] = act[alias]
@@ -458,7 +480,7 @@ class Agent:
                     sig = f"{kind}:{act.get('command') or act.get('path') or act.get('pattern') or ''}:{act.get('offset', '')}"
                     trace["sig"] = sig
                     recent.append(sig)
-                    if recent[-3:].count(sig) >= 3:
+                    if self._lv("loop_detect") and recent[-3:].count(sig) >= 3:
                         trace["loop_trip"] = True
                         self.on_event("loop")
                         self.session.log("loop", v=TRACE_V, step=step, sig=sig, cause="repeat")
@@ -469,7 +491,7 @@ class Agent:
                     # read-before-edit: never edit or overwrite an EXISTING file the model
                     # hasn't actually read — this forces it to work from real content, not a
                     # guess (the exact failure mode that made a weak model hallucinate code).
-                    if kind in ("edit_file", "write_file"):
+                    if self._lv("read_gate") and kind in ("edit_file", "write_file"):
                         fp = os.path.realpath(os.path.join(self.session.cwd, act["path"]))
                         if os.path.isfile(fp) and fp not in self.read_files:
                             obs = (f"Blocked: read {act.get('path')} before editing or overwriting it — "
@@ -525,7 +547,7 @@ class Agent:
                         total_fails += 1
                         tag = "  ⚠ this action FAILED — diagnose the cause before retrying.\n"
                         # per-command repeat (survives interleaved successes, unlike a consecutive counter)
-                        if fail_counts[sig] >= 3:
+                        if self._lv("loop_detect") and fail_counts[sig] >= 3:
                             trace["loop_trip"] = True
                             self.on_event("loop")
                             self.session.log("loop", v=TRACE_V, step=step, sig=sig, cause="fail", count=fail_counts[sig])
@@ -535,7 +557,7 @@ class Agent:
                         # stuck: escalate to a stronger LOCAL model (same task, same
                         # context) rather than grinding or giving up. All still local.
                         if total_fails >= STUCK_AT:
-                            if self.tier < len(self.ladder) - 1:
+                            if self._lv("escalation") and self.tier < len(self.ladder) - 1:
                                 self.tier += 1
                                 self.backend = self.ladder[self.tier]
                                 trace["escalated"] = True
