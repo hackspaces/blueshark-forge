@@ -1955,6 +1955,220 @@ class TestStepTrace(unittest.TestCase):
         self.assertFalse(a._compacted)                      # transient flag was cleared
 
 
+class _FillBackend:
+    """A fake backend with a controllable window + prompt-token count (like the
+    TestObservationShaping fakes) for exercising the compaction triggers offline."""
+    name = "fill"
+
+    def __init__(self, window=8192, tokens=0):
+        self._w = window
+        self.last_prompt_tokens = tokens
+
+    def effective_ctx(self):
+        return self._w
+
+    def stream(self, messages, schema=None, temperature=0.0):
+        yield '{"thought":"x","action":"say","message":"done"}'
+
+    def chat(self, messages, schema=None, temperature=0.0):
+        return "SUMMARY"
+
+
+class TestStructuralCompaction(unittest.TestCase):
+    """P4.2 — the zero-model-call deterministic pass that reclaims mechanically
+    redundant window BEFORE the LLM summarizer, plus the hard floor that escapes a
+    full-window wedge, and the post-pass fill recompute so the 70% gate sees the
+    reclaimed space instead of the stale token count."""
+
+    def _agent(self, d, window=4000, tokens=3000):
+        # tokens/window put fill above the 0.55 structural trigger by default
+        return Agent(_FillBackend(window=window, tokens=tokens), _RecSession(d))
+
+    def _pad(self, a, n=10):
+        """Fill the middle so the target message is older than the recent-8 window."""
+        for i in range(n):
+            a.messages.append({"role": "assistant", "content": f"pad{i}"})
+            a.meta.append({"kind": "msg"})
+
+    def test_superseded_read_is_stubbed_live_copy_kept(self):
+        d = tempfile.mkdtemp()
+        p = os.path.join(d, "f.py")
+        _write(p, "a = 1\n" * 50)
+        rp = os.path.realpath(p)
+        a = self._agent(d)
+        old = {"role": "user", "content": "Observation:\n" + "a = 1\n" * 50}
+        a.messages.append(old)
+        a.ledger.record_read(rp, 1)
+        a.ledger.set_obs_msg(rp, old)
+        a.meta.append({"kind": "obs", "action": "read_file", "path": rp, "step": 1})
+        self._pad(a)
+        # a later re-read/edit rebinds the ledger's live copy to a NEW observation
+        new = {"role": "user", "content": "Observation:\n(fresh copy)"}
+        a.messages.append(new)
+        a.ledger.set_obs_msg(rp, new)
+        a.meta.append({"kind": "obs", "action": "read_file", "path": rp, "step": 12})
+        a._structural_compact(step=13)
+        self.assertIn("superseded", old["content"])          # older read stubbed
+        self.assertNotIn("a = 1\na = 1", old["content"])      # its full body is gone
+        self.assertIn("(fresh copy)", new["content"])         # the live copy is untouched
+        self.assertTrue(a._reclaimed)
+
+    def test_live_read_is_never_stubbed(self):
+        # the correctness guard: the bound (in-context) read must survive, else the
+        # model passes read-before-edit on content it no longer holds.
+        d = tempfile.mkdtemp()
+        p = os.path.join(d, "f.py")
+        _write(p, "a = 1\n" * 50)
+        rp = os.path.realpath(p)
+        a = self._agent(d)
+        obs = {"role": "user", "content": "Observation:\n" + "a = 1\n" * 50}
+        a.messages.append(obs)
+        a.ledger.record_read(rp, 1)
+        a.ledger.set_obs_msg(rp, obs)          # this IS the live binding
+        a.meta.append({"kind": "obs", "action": "read_file", "path": rp, "step": 1})
+        self._pad(a)
+        a._structural_compact(step=13)
+        self.assertIn("a = 1\na = 1", obs["content"])   # untouched — still the live copy
+        self.assertFalse(a._reclaimed)
+
+    def test_write_echo_collapses_to_path_bytes_sha1(self):
+        d = tempfile.mkdtemp()
+        a = self._agent(d)
+        big = "x = 1\n" * 500
+        echo = {"role": "assistant",
+                "content": json.dumps({"thought": "w", "action": "write_file", "path": "f.py", "content": big})}
+        a.messages.append(echo)
+        a.meta.append({"kind": "write_echo", "action": "write_file", "path": os.path.join(d, "f.py"), "step": 1})
+        self._pad(a)
+        a._structural_compact(step=12)
+        self.assertIn("[elided", echo["content"])
+        self.assertNotIn(big, echo["content"])
+        obj = json.loads(echo["content"])                # shape preserved → valid JSON
+        self.assertEqual(obj["action"], "write_file")
+        self.assertEqual(obj["path"], "f.py")
+        self.assertIn("sha1", obj["content"])            # path+bytes+sha1 stub
+        self.assertIn(str(len(big.encode())), obj["content"])
+        self.assertTrue(a._reclaimed)
+
+    def test_stale_failed_obs_shrinks_recent_one_survives(self):
+        d = tempfile.mkdtemp()
+        a = self._agent(d)
+        err = "Traceback (most recent call last):\n" + "  frame line\n" * 100
+        stale = {"role": "user",
+                 "content": "  ⚠ this action FAILED — diagnose the cause before retrying.\nObservation:\n" + err}
+        a.messages.append(stale)
+        a.meta.append({"kind": "obs", "action": "bash", "path": None, "step": 1, "ok": False})
+        recent_fail = {"role": "user",
+                       "content": "  ⚠ this action FAILED — diagnose the cause before retrying.\nObservation:\n" + err}
+        a.messages.append(recent_fail)
+        a.meta.append({"kind": "obs", "action": "bash", "path": None, "step": 11, "ok": False})
+        self._pad(a)
+        a._structural_compact(step=13)              # step-1 fail is 12 old (>3); step-11 is 2 old (<=3)
+        self.assertIn("first error line kept", stale["content"])
+        self.assertIn("Traceback (most recent call last):", stale["content"])   # first line kept
+        self.assertNotIn("frame line\n  frame line", stale["content"])          # tail elided
+        self.assertNotIn("first error line kept", recent_fail["content"])       # too recent → untouched
+        self.assertTrue(a._reclaimed)
+
+    def test_wedge_above_window_is_escaped_by_floor(self):
+        # head + tail alone exceed the window: _compact's len(middle) < 4 returns
+        # silently and the session is permanently wedged. The floor is the escape.
+        d = tempfile.mkdtemp()
+        a = Agent(_FillBackend(window=8192, tokens=7000), _RecSession(d))
+        for i in range(12):
+            a.messages.append({"role": "user", "content": "Observation:\n" + "z" * 2500})
+            a.meta.append({"kind": "obs", "action": "bash", "step": i, "ok": True})
+        ceiling = 0.70 * 8192
+
+        def used():
+            return sum(len(m["content"]) for m in a.messages) // 4
+
+        self.assertGreater(used(), ceiling)          # genuinely wedged
+        a._compact()                                 # middle is empty → silent return, no relief
+        self.assertGreater(used(), ceiling)
+        a._floor()                                   # the hard floor truncates the oldest tail obs
+        self.assertLessEqual(used(), ceiling)        # escaped
+        self.assertTrue(a._reclaimed)
+        # the head (system prompt) is NEVER truncated
+        self.assertNotIn("hard-truncated", a.messages[0]["content"])
+
+    def test_fill_recomputed_after_structural_pass(self):
+        # judge correction: _fill returns the STALE last_prompt_tokens, so reclaimed
+        # space is invisible until the next model call and the 70% gate misfires.
+        d = tempfile.mkdtemp()
+        a = self._agent(d, window=4000, tokens=3900)      # ~97% by the stale token count
+        big = "x = 1\n" * 600
+        echo = {"role": "assistant",
+                "content": json.dumps({"action": "write_file", "path": "f.py", "content": big})}
+        a.messages.append(echo)
+        a.meta.append({"kind": "write_echo", "action": "write_file", "path": os.path.join(d, "f.py"), "step": 1})
+        self._pad(a)
+        self.assertEqual(a._fill()[0], 3900)              # BEFORE: trusts the stale count
+        a._structural_compact(step=12)
+        fresh = sum(len(m["content"]) for m in a.messages) // 4
+        self.assertEqual(a._fill()[0], fresh)             # AFTER: fresh char estimate
+        self.assertLess(a._fill()[0], 3900)               # reclaimed space is now visible
+
+    def test_below_trigger_is_a_noop(self):
+        d = tempfile.mkdtemp()
+        a = self._agent(d, window=4000, tokens=100)       # 2.5% fill — well under 0.55
+        big = "x = 1\n" * 500
+        echo = {"role": "assistant",
+                "content": json.dumps({"action": "write_file", "path": "f.py", "content": big})}
+        a.messages.append(echo)
+        a.meta.append({"kind": "write_echo", "action": "write_file", "path": os.path.join(d, "f.py"), "step": 1})
+        self._pad(a)
+        before = echo["content"]
+        a._structural_compact(step=12)
+        self.assertEqual(echo["content"], before)         # nothing reclaimed below the trigger
+        self.assertNotIn("[elided", echo["content"])
+        self.assertFalse(a._reclaimed)
+
+    def test_meta_stays_aligned_and_no_meta_key_leaks(self):
+        # drive a REAL compaction rewrite and assert the parallel meta list stays
+        # index-aligned and that no `_meta` key ever rides inside a sent message.
+        class CB:
+            name = "cb"
+            last_prompt_tokens = 900
+            def effective_ctx(self): return 1000
+            def stream(self, m, schema=None, temperature=0.0):
+                yield '{"thought":"x","action":"say","message":"done"}'
+            def chat(self, m, schema=None, temperature=0.0): return "S"
+
+        d = tempfile.mkdtemp()
+        a = Agent(CB(), _RecSession(d), max_steps=3)
+        for i in range(20):
+            a.messages.append({"role": "user" if i % 2 else "assistant", "content": f"m{i}"})
+        result = a.send("go")
+        self.assertEqual(result, "done")
+        self.assertEqual(len(a.meta), len(a.messages))                       # index-aligned across the rewrite
+        self.assertTrue(all("_meta" not in m for m in a.messages))           # no _meta key ever sent
+        self.assertTrue(all(set(m.keys()) <= {"role", "content"} for m in a.messages))
+
+    def test_meta_tagged_at_funnel_points_over_a_real_turn(self):
+        # a real read_file + write_file turn tags the ledger's obs and the write echo
+        # in the parallel meta list, aligned with self.messages.
+        d = tempfile.mkdtemp()
+        _write(os.path.join(d, "r.py"), "x = 1\n")
+        actions = [
+            '{"thought":"r","action":"read_file","path":"r.py"}',
+            '{"thought":"w","action":"write_file","path":"n.py","content":"y = 2\\n"}',
+            '{"thought":"d","action":"say","message":"done"}',
+        ]
+        from forge import fleet
+        orig = fleet.detect_test_cmd
+        fleet.detect_test_cmd = lambda cwd: None            # no done-gate suite
+        try:
+            a = Agent(ScriptBackend(actions), _RecSession(d), max_steps=6)
+            a.send("go")
+        finally:
+            fleet.detect_test_cmd = orig
+        self.assertEqual(len(a.meta), len(a.messages))      # aligned the whole turn
+        kinds = [r.get("kind") for r in a.meta]
+        self.assertIn("write_echo", kinds)                  # the write echo was tagged
+        self.assertTrue(any(r.get("kind") == "obs" and r.get("action") == "read_file" for r in a.meta))
+
+
 class TestTraceCmd(unittest.TestCase):
     """P3.1 — `forge trace <sid|last>` renders the meta header + a step table."""
 

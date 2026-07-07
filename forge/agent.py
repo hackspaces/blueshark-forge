@@ -26,6 +26,12 @@ from .tools import ACTION_SCHEMA, TOOL_HELP, execute, shape, error_hint
 STUCK_AT = int(os.environ.get("FORGE_STUCK_THRESHOLD", "7"))  # failures before escalating a rung
 TRACE_V = 1  # P3.1 schema version stamped on every meta/step/compact/loop/malformed record
 
+# P4.2 structural compaction: the zero-model-call deterministic pass runs when the
+# window is this full, BEFORE the LLM summarizer (~0.70). Failed-action observation
+# bodies older than this many steps are shrunk to their first error line.
+STRUCT_FILL = 0.55
+FAILED_OBS_AGE = 3
+
 # P3.2 harness levers — the switchable scaffolding mechanisms `forge bench` ablates
 # to measure harness-lift (same model bare vs full). Each name gates exactly one
 # mechanism site in the loop below; the DEFAULT (levers=None -> ALL_LEVERS) turns
@@ -187,6 +193,13 @@ class Agent:
         self.mode = "auto"             # auto | plan | manual (set by the UI)
         self.approve = lambda desc: "yes"   # manual-mode hook: 'yes' | 'always' | 'no'
         self._compacted = False        # P3.1: transient — set by _compact, read+cleared by the step trace
+        # P4.2 structural compaction: a parallel, index-aligned metadata list — NOT a
+        # key inside the message dicts (prompt = self.messages + [pin] is sent to the
+        # backend verbatim and endpoints may reject unknown fields). Each record is
+        # {kind, action, path, step, ...}; it is re-synced/rewritten around every
+        # structural or LLM compaction of self.messages.
+        self.meta = [{"kind": "head"} for _ in self.messages]
+        self._reclaimed = False        # a structural/floor pass reclaimed window THIS step
         from . import config as _cfg
         self.approvals = set(_cfg.get("approvals") or [])   # 'always'-approved action keys
         # P3.1 meta record: one machine-readable header per session so a dead
@@ -209,6 +222,12 @@ class Agent:
         count from the last response and the model's REAL context window when the
         backend reports them; falls back to a char estimate before the first call."""
         window = self.backend.effective_ctx() if hasattr(self.backend, "effective_ctx") else backends.ctx_cap()
+        if self._reclaimed:
+            # P4.2: a structural/floor pass reclaimed window THIS step, but
+            # last_prompt_tokens is still the STALE count from the previous response —
+            # so the reclaimed space is invisible and the 55%/70% gates misfire.
+            # Recompute the char estimate so the LLM _compact decides on the real size.
+            return sum(len(m["content"]) for m in self.messages) // 4, window
         used = getattr(self.backend, "last_prompt_tokens", 0)
         if not used:  # no real count yet (first turn) — estimate from chars
             used = sum(len(m["content"]) for m in self.messages) // 4
@@ -231,6 +250,7 @@ class Agent:
         used, window = self._fill()
         if used < 0.70 * window:
             return
+        self._sync_meta()                   # P4.2: meta must be aligned before we slice it
         head = self.messages[:self.head_len]
         tail = self.messages[-12:]          # keep plenty of recent context so reads aren't lost → no re-read loop
         middle = self.messages[self.head_len:-12]
@@ -240,6 +260,11 @@ class Agent:
         summary = self._summarize(middle)
         note = {"role": "user", "content": "[Earlier progress, summarized to save context:]\n" + summary}
         self.messages = head + [note] + tail
+        # P4.2: rewrite the parallel meta list on the SAME boundaries so it stays
+        # index-aligned with self.messages, and mark the window reclaimed so _fill
+        # reports the fresh (smaller) size instead of the stale token count.
+        self.meta = self.meta[:self.head_len] + [{"kind": "summary"}] + self.meta[-12:]
+        self._reclaimed = True
         # P4.1: any read/write observation that fell out of the retained window is
         # no longer in context — evict it so read-before-edit mechanically re-forces
         # a read. Then tell the model which files it DOES still hold.
@@ -274,6 +299,136 @@ class Agent:
         for e in list(self.ledger.entries.values()):
             if e.in_context and (e.obs_msg is None or id(e.obs_msg) not in live):
                 self.ledger.evict(e.realpath)
+
+    # ---- P4.2 parallel meta list + structural (deterministic) compaction ----
+    def _sync_meta(self):
+        """Pad/trim the parallel meta list so it aligns 1:1 with self.messages.
+        Messages appended outside the tagged funnel points get a neutral record —
+        this keeps every index valid before a structural walk reads self.meta[i]."""
+        n = len(self.messages)
+        if len(self.meta) < n:
+            self.meta.extend({"kind": "msg"} for _ in range(n - len(self.meta)))
+        elif len(self.meta) > n:
+            del self.meta[n:]
+
+    def _tag_last(self, rec):
+        """Enrich the meta record for the most-recently-appended message."""
+        self._sync_meta()
+        if self.meta:
+            self.meta[-1] = rec
+
+    def _write_echo_stub(self, content):
+        """Collapse a write_file assistant-JSON echo — whose `content` field is the
+        ENTIRE file, never truncated — to a path+bytes+sha1 stub, keeping the JSON
+        shape so the model still reads a consistent history. The file is on disk, so
+        this is lossless. Returns the stub string, or None if it can't be collapsed."""
+        try:
+            act = json.loads(content)
+        except (json.JSONDecodeError, TypeError):
+            return None
+        if act.get("action") != "write_file":
+            return None
+        body = act.get("content")
+        if not isinstance(body, str):
+            return None
+        raw = body.encode("utf-8", "replace")
+        stub = dict(act)
+        stub["content"] = f"[elided — {len(raw)} bytes written, sha1 {hashlib.sha1(raw).hexdigest()[:12]}; recover from disk]"
+        try:
+            return json.dumps(stub)
+        except (TypeError, ValueError):
+            return None
+
+    def _first_error_line(self, content, step):
+        """Shrink a stale failed-action observation body to just its first error
+        line (the salient part) — the rest of the traceback is rarely re-consulted."""
+        marker = "Observation:\n"
+        idx = content.find(marker)
+        body = content[idx + len(marker):] if idx != -1 else content
+        first = next((ln.strip() for ln in body.splitlines() if ln.strip()), "")
+        if not first:
+            return None
+        return (f"  ⚠ earlier failed action (step {step}) — first error line kept:\n"
+                f"Observation:\n{first}\n[error tail elided; re-run the action to see the full failure]")
+
+    def _structural_compact(self, step):
+        """P4.2 — a zero-model-call deterministic compaction pass, run each step
+        BEFORE the LLM _compact. It reclaims mechanically-redundant window losslessly
+        (every stub is recoverable from disk / the ledger): (a) an older read_file
+        observation for a path since re-read/edited/rewritten is stubbed (the ledger
+        knows the live copy); (b) a write_file assistant-JSON echo — the entire file
+        content — collapses to a path+bytes+sha1 stub; (c) a failed-action observation
+        body older than N steps shrinks to its first error line. It walks only the
+        settled middle (never the head, never the most recent 8 messages) and marks
+        the window reclaimed so the 70% LLM gate decides on the fresh size."""
+        used, window = self._fill()
+        if used < STRUCT_FILL * window or len(self.messages) <= self.head_len + 8:
+            return
+        self._sync_meta()
+        # The ledger's CURRENT per-path observation binding: a read obs message whose
+        # identity is not the live one has been superseded by a later read/edit/write.
+        live = {e.realpath: id(e.obs_msg)
+                for e in self.ledger.entries.values() if e.obs_msg is not None}
+        changed = False
+        for i in range(self.head_len, len(self.messages) - 8):
+            m = self.messages[i]
+            rec = self.meta[i]
+            kind = rec.get("kind")
+            content = m.get("content", "")
+            if kind == "write_echo" and "[elided" not in content:
+                stub = self._write_echo_stub(content)
+                if stub is not None and len(stub) < len(content):
+                    m["content"] = stub
+                    changed = True
+            elif (kind == "obs" and rec.get("action") == "read_file" and rec.get("path")
+                    and "[superseded" not in content):
+                p = rec["path"]
+                if p in live and live[p] != id(m):
+                    rel = os.path.relpath(p, self.session.cwd)
+                    stub = (f"Observation:\n[read of {rel} at step {rec.get('step')} superseded — you "
+                            "re-read or edited it later; the old copy is dropped. read_file it again if needed.]")
+                    if len(stub) < len(content):
+                        m["content"] = stub
+                        changed = True
+            elif (kind == "obs" and rec.get("ok") is False and rec.get("step") is not None
+                    and step - rec["step"] > FAILED_OBS_AGE and "[error tail elided" not in content):
+                stub = self._first_error_line(content, rec.get("step"))
+                if stub is not None and len(stub) < len(content):
+                    m["content"] = stub
+                    changed = True
+        if changed:
+            self._reclaimed = True
+            self.session.log("struct_compact", v=TRACE_V, step=step, window=window)
+
+    def _floor(self):
+        """P4.2 — the hard floor after the LLM _compact. The wedge case: tail is
+        messages[-12:] and observations can each be thousands of chars, so head+tail
+        alone can exceed a small window; _compact's `len(middle) < 4` guard then
+        returns without summarizing and the session is PERMANENTLY wedged with no
+        recourse. So if the window is still over the ceiling, hard-truncate the oldest
+        tail observation bodies (head is never touched) until back under it. Lossy,
+        but the only escape — and the truncated text is recoverable from disk."""
+        window = self.backend.effective_ctx() if hasattr(self.backend, "effective_ctx") else backends.ctx_cap()
+        ceiling = 0.70 * window
+
+        def cfill():
+            return sum(len(m["content"]) for m in self.messages) // 4
+
+        if cfill() <= ceiling:
+            return
+        truncated = False
+        i = self.head_len
+        while cfill() > ceiling and i < len(self.messages) - 2:
+            body = self.messages[i].get("content", "")
+            if len(body) > 400 and "[hard-truncated" not in body:
+                self.messages[i]["content"] = (
+                    body[:200] + f"\n[... {len(body) - 200} chars hard-truncated to escape a "
+                    "full-window wedge; re-read from disk if needed]")
+                truncated = True
+            i += 1
+        if truncated:
+            self._reclaimed = True
+            self.session.log("floor", v=TRACE_V, window=window, used=cfill())
 
     def _pin_plan(self):
         if self.plan:
@@ -499,11 +654,16 @@ class Agent:
                     # the gate and the read cache consult the ledger this step.
                     self.ledger.refresh()
                     if self._lv("compaction"):
-                        self._compact()
+                        self._structural_compact(step)   # P4.2: deterministic pass first (zero model calls)
+                        self._compact()                  # then the LLM summarizer at 70%
+                        self._floor()                    # then the hard floor: escape a full-window wedge
                     pin = self._pin_plan() if self._lv("plan_pin") else None
                     prompt = self.messages + ([pin] if pin else [])
                     self.on_event("thinking")
                     raw = self._generate(prompt)
+                    # P4.2: the real prompt-token count now reflects any compaction —
+                    # stop overriding _fill with the char estimate.
+                    self._reclaimed = False
                     # P3.3 flight recorder: persist the RAW model output of every
                     # step — including the malformed ones the parse below discards
                     # (the valuable ones). prompt_tokens is the exact count for THIS
@@ -524,6 +684,14 @@ class Agent:
                         continue
                     bad = 0
                     self.messages.append({"role": "assistant", "content": raw})
+                    # P4.2 meta: tag the assistant echo. A write_file echo carries the
+                    # ENTIRE file content verbatim → mark it for structural collapse.
+                    if act.get("action") == "write_file" and act.get("path"):
+                        self._tag_last({"kind": "write_echo", "action": "write_file",
+                                        "path": os.path.realpath(os.path.join(self.session.cwd, act["path"])),
+                                        "step": step})
+                    else:
+                        self._tag_last({"kind": "assistant", "action": act.get("action"), "step": step})
 
                     # plan update
                     if isinstance(act.get("plan"), list) and act["plan"]:
@@ -738,6 +906,9 @@ class Agent:
                                 tag += f"  ↳ {h}\n"
                     obs_msg = {"role": "user", "content": f"{tag}Observation:\n{shape(obs, budget)}"}
                     self.messages.append(obs_msg)
+                    # P4.2 meta: tag this observation (kind/action/path/step/ok) so the
+                    # structural pass can stub superseded reads and shrink stale failures.
+                    self._tag_last({"kind": "obs", "action": kind, "path": recorded_fp, "step": step, "ok": ok})
                     # P4.1: bind this file's observation to its message so a later
                     # compaction can detect (by identity) when it leaves context.
                     if recorded_fp:
