@@ -18,7 +18,7 @@ from forge import ledger as ledger_mod     # noqa: E402
 from forge.agent import Agent              # noqa: E402
 from forge.ledger import Ledger            # noqa: E402
 from forge.backends import make_backend, OllamaBackend, OpenAICompatBackend  # noqa: E402
-from forge.tools import (execute, _fuzzy_replace, _syntax_error, _which,  # noqa: E402
+from forge.tools import (execute, dry_run, _fuzzy_replace, _syntax_error, _which,  # noqa: E402
                          shape, overflow_dir, _maybe_offload, MAX_OUTPUT,
                          error_hint, _closest_region, _group_grep)
 
@@ -1432,6 +1432,245 @@ class TestActionGrammar(unittest.TestCase):
         self.assertNotIn("bash", consts)
         self.assertNotIn("edit_file", consts)
         self.assertEqual(b.schema, build_schema(a._legal_actions(), "plan"))
+
+
+class TestDryRun(unittest.TestCase):
+    """P5.2 deterministic pre-execution verifier: dry_run(act, cwd) -> (score, reason).
+    A CLEAR miss is 0.0 (caught for free), an exact/unverifiable action is 1.0, a
+    unique whitespace-tolerant edit is 0.7. Read-only — never writes."""
+
+    def setUp(self):
+        self.d = tempfile.mkdtemp()
+
+    def _p(self, name):
+        return os.path.join(self.d, name)
+
+    # ---- edit_file: exact hit / fuzzy / miss / ambiguous / no-file -------------
+    def test_edit_exact_unique_match_scores_1(self):
+        _write(self._p("f.py"), "x = 1\n")
+        s, _ = dry_run({"action": "edit_file", "path": "f.py", "old": "x = 1", "new": "x = 2"}, self.d)
+        self.assertEqual(s, 1.0)
+
+    def test_edit_whitespace_only_diff_scores_fuzzy_0_7(self):
+        # file is 4-space-indented; the model's `old` is 8-space-indented — not an
+        # exact substring, but a unique whitespace-tolerant match.
+        _write(self._p("f.py"), "    x = 1\n")
+        s, _ = dry_run({"action": "edit_file", "path": "f.py", "old": "        x = 1", "new": "y"}, self.d)
+        self.assertEqual(s, 0.7)
+
+    def test_edit_old_absent_scores_0(self):
+        _write(self._p("f.py"), "x = 1\n")
+        s, why = dry_run({"action": "edit_file", "path": "f.py", "old": "NOPE", "new": "q"}, self.d)
+        self.assertEqual(s, 0.0)
+        self.assertIn("not found", why)
+
+    def test_edit_ambiguous_old_scores_0(self):
+        _write(self._p("f.py"), "x = 1\nx = 1\n")
+        s, why = dry_run({"action": "edit_file", "path": "f.py", "old": "x = 1", "new": "q"}, self.d)
+        self.assertEqual(s, 0.0)
+        self.assertIn("2 times", why)
+
+    def test_edit_missing_file_scores_0(self):
+        s, why = dry_run({"action": "edit_file", "path": "gone.py", "old": "x", "new": "y"}, self.d)
+        self.assertEqual(s, 0.0)
+        self.assertIn("no such file", why)
+
+    def test_edit_empty_old_scores_0(self):
+        _write(self._p("f.py"), "x = 1\n")
+        s, _ = dry_run({"action": "edit_file", "path": "f.py", "old": "", "new": "y"}, self.d)
+        self.assertEqual(s, 0.0)
+
+    # ---- write_file .py: compile pass / fail ----------------------------------
+    def test_write_py_compiles_scores_1(self):
+        s, _ = dry_run({"action": "write_file", "path": "a.py", "content": "def f():\n    return 1\n"}, self.d)
+        self.assertEqual(s, 1.0)
+
+    def test_write_py_syntax_error_scores_0(self):
+        s, why = dry_run({"action": "write_file", "path": "a.py", "content": "x = = 1\n"}, self.d)
+        self.assertEqual(s, 0.0)
+        self.assertIn("SyntaxError", why)
+
+    # ---- write_file .json: valid / invalid ------------------------------------
+    def test_write_json_valid_scores_1(self):
+        s, _ = dry_run({"action": "write_file", "path": "a.json", "content": '{"a": 1}'}, self.d)
+        self.assertEqual(s, 1.0)
+
+    def test_write_json_invalid_scores_0(self):
+        s, why = dry_run({"action": "write_file", "path": "a.json", "content": '{"a": }'}, self.d)
+        self.assertEqual(s, 0.0)
+        self.assertIn("invalid json", why)
+
+    def test_write_other_extension_has_no_probe(self):
+        s, _ = dry_run({"action": "write_file", "path": "a.txt", "content": "anything at all"}, self.d)
+        self.assertEqual(s, 1.0)
+
+    # ---- bash: builtin / assignment / path / on-PATH / missing / unparseable --
+    def test_bash_builtin_head_scores_1(self):
+        # `cd` is a shell builtin not on PATH — must NOT false-negative. Only the
+        # head token is inspected, so `cd x && make` is fine too.
+        s, _ = dry_run({"action": "bash", "command": "cd sub && ls"}, self.d)
+        self.assertEqual(s, 1.0)
+
+    def test_bash_var_assignment_prefix_scores_1(self):
+        s, why = dry_run({"action": "bash", "command": "VAR=1 make target"}, self.d)
+        self.assertEqual(s, 1.0)
+        self.assertIn("assignment", why)
+
+    def test_bash_on_path_scores_1(self):
+        s, _ = dry_run({"action": "bash", "command": "ls -la"}, self.d)
+        self.assertEqual(s, 1.0)
+
+    def test_bash_path_like_head_scores_1(self):
+        s, _ = dry_run({"action": "bash", "command": "./run.sh --now"}, self.d)
+        self.assertEqual(s, 1.0)
+
+    def test_bash_missing_command_scores_0(self):
+        s, why = dry_run({"action": "bash", "command": "forge-no-such-cmd-xyzzy foo"}, self.d)
+        self.assertEqual(s, 0.0)
+        self.assertIn("not found", why)
+
+    def test_bash_unparseable_scores_0(self):
+        s, why = dry_run({"action": "bash", "command": 'echo "unbalanced'}, self.d)
+        self.assertEqual(s, 0.0)
+        self.assertIn("parse", why)
+
+    def test_bash_empty_scores_0(self):
+        s, _ = dry_run({"action": "bash", "command": "   "}, self.d)
+        self.assertEqual(s, 0.0)
+
+    # ---- read_file: exists / missing ------------------------------------------
+    def test_read_existing_scores_1(self):
+        _write(self._p("here.txt"), "hi")
+        s, _ = dry_run({"action": "read_file", "path": "here.txt"}, self.d)
+        self.assertEqual(s, 1.0)
+
+    def test_read_missing_scores_0(self):
+        s, why = dry_run({"action": "read_file", "path": "absent.txt"}, self.d)
+        self.assertEqual(s, 0.0)
+        self.assertIn("no such file", why)
+
+    def test_action_without_a_probe_scores_1(self):
+        # list_files / grep / glob have no cheap check — never penalize them.
+        for act in ({"action": "list_files"}, {"action": "grep", "pattern": "x"}):
+            s, _ = dry_run(act, self.d)
+            self.assertEqual(s, 1.0)
+
+
+class TestResample(unittest.TestCase):
+    """P5.2 best-of-N: a greedy action that dry_run scores 0 is not executed — the
+    harness re-asks the SAME prompt at rising temperature, scores each candidate,
+    and executes the argmax. The winner REPLACES messages[-1] (the transcript must
+    match what ran); all-miss falls back to the greedy original; `say` is never
+    dry-run; resamples never lengthen the message list."""
+
+    def _assistants(self, agent):
+        return [m["content"] for m in agent.messages if m["role"] == "assistant"]
+
+    def test_greedy_miss_then_good_resample_executes_winner(self):
+        d = tempfile.mkdtemp()
+        _write(os.path.join(d, "r.py"), "x = 1\n")
+        miss = '{"thought":"blind","action":"edit_file","path":"r.py","old":"NOPE","new":"x = 2"}'
+        win = '{"thought":"good","action":"edit_file","path":"r.py","old":"x = 1","new":"x = 2"}'
+        miss2 = '{"thought":"bad2","action":"edit_file","path":"r.py","old":"ALSO NOPE","new":"z"}'
+        actions = [
+            '{"thought":"read","action":"read_file","path":"r.py"}',   # call 0 (greedy)
+            miss,                                                        # call 1 (greedy edit — miss)
+            win,                                                        # call 2 (resample t=0.5 — 1.0)
+            miss2,                                                      # call 3 (resample t=0.8 — 0)
+            '{"thought":"done","action":"say","message":"done"}',      # call 4 (greedy)
+        ]
+        sess = _RecSession(d)
+        a = Agent(ScriptBackend(actions), sess, max_steps=8)
+        a.send("change x")
+        # the resampled winner ran, not the miss
+        self.assertEqual(_read(os.path.join(d, "r.py")), "x = 2\n")
+        # transcript matches what ran: the winner is an assistant echo, the miss is gone
+        assistants = self._assistants(a)
+        self.assertIn(win, assistants)
+        self.assertNotIn(miss, assistants)
+        # a resample telemetry record was logged with v=TRACE_V and the win
+        recs = [f for k, f in sess.logs if k == "resample"]
+        self.assertEqual(len(recs), 1)
+        self.assertEqual(recs[0]["v"], 1)
+        self.assertTrue(recs[0]["replaced"])
+        self.assertEqual(recs[0]["base_score"], 0.0)
+        self.assertEqual(recs[0]["best_score"], 1.0)
+        self.assertEqual(recs[0]["samples"], 2)
+
+    def test_all_samples_miss_executes_greedy_original(self):
+        d = tempfile.mkdtemp()
+        _write(os.path.join(d, "r.py"), "x = 1\n")
+        miss = '{"thought":"blind","action":"edit_file","path":"r.py","old":"NOPE","new":"q"}'
+        actions = [
+            '{"thought":"read","action":"read_file","path":"r.py"}',
+            miss,                                                                       # greedy miss
+            '{"thought":"m2","action":"edit_file","path":"r.py","old":"NOPETWO","new":"q"}',   # resample miss
+            '{"thought":"m3","action":"edit_file","path":"r.py","old":"NOPE3","new":"q"}',     # resample miss
+            '{"thought":"done","action":"say","message":"done"}',
+        ]
+        sess = _RecSession(d)
+        a = Agent(ScriptBackend(actions), sess, max_steps=8)
+        a.send("change x")
+        # nothing matched → the greedy original still ran (teaching failure), file unchanged
+        self.assertEqual(_read(os.path.join(d, "r.py")), "x = 1\n")
+        # the greedy miss stayed as the assistant echo (not replaced)
+        self.assertIn(miss, self._assistants(a))
+        recs = [f for k, f in sess.logs if k == "resample"]
+        self.assertEqual(len(recs), 1)
+        self.assertFalse(recs[0]["replaced"])
+        self.assertEqual(recs[0]["best_score"], 0.0)
+
+    def test_say_is_never_dry_run(self):
+        import forge.agent as agent_mod
+        d = tempfile.mkdtemp()
+        _write(os.path.join(d, "r.py"), "x = 1\n")
+        seen = []
+        orig = agent_mod.dry_run
+
+        def spy(act, cwd):
+            seen.append(act.get("action"))
+            return orig(act, cwd)
+
+        actions = [
+            '{"thought":"read","action":"read_file","path":"r.py"}',
+            '{"thought":"done","action":"say","message":"all set"}',
+        ]
+        agent_mod.dry_run = spy
+        try:
+            a = Agent(ScriptBackend(actions), _RecSession(d), max_steps=6)
+            a.send("look")
+        finally:
+            agent_mod.dry_run = orig
+        # read_file was dry-run; say never reached dry_run
+        self.assertIn("read_file", seen)
+        self.assertNotIn("say", seen)
+
+    def test_resample_does_not_lengthen_the_message_list(self):
+        # a resampled step (greedy miss + 2 rejected/accepted candidates = 3 model
+        # calls) must leave the same number of messages as a plain 3-action turn.
+        def run(actions):
+            d = tempfile.mkdtemp()
+            _write(os.path.join(d, "r.py"), "x = 1\n")
+            a = Agent(ScriptBackend(actions), _RecSession(d), max_steps=8)
+            a.send("go")
+            return a
+
+        resample_turn = run([
+            '{"thought":"read","action":"read_file","path":"r.py"}',
+            '{"thought":"blind","action":"edit_file","path":"r.py","old":"NOPE","new":"x = 2"}',  # miss
+            '{"thought":"good","action":"edit_file","path":"r.py","old":"x = 1","new":"x = 2"}',  # win
+            '{"thought":"m","action":"edit_file","path":"r.py","old":"NOPE2","new":"z"}',         # miss
+            '{"thought":"done","action":"say","message":"done"}',
+        ])
+        control_turn = run([
+            '{"thought":"read","action":"read_file","path":"r.py"}',
+            '{"thought":"good","action":"edit_file","path":"r.py","old":"x = 1","new":"x = 2"}',  # direct
+            '{"thought":"done","action":"say","message":"done"}',
+        ])
+        # both executed exactly read+edit+say; the two extra resample generations
+        # added no messages, so the transcripts are the same length.
+        self.assertEqual(len(resample_turn.messages), len(control_turn.messages))
+        self.assertEqual(len(self._assistants(resample_turn)), 3)
 
 
 class TestBackgroundBash(unittest.TestCase):

@@ -22,7 +22,7 @@ from . import __version__
 from . import backends
 from .ledger import Ledger
 from .tools import (ACTION_SCHEMA, ACTION_VARIANTS, ALL_ACTIONS, TOOL_HELP,
-                    build_schema, required_fields, execute, shape, error_hint)
+                    build_schema, required_fields, execute, dry_run, shape, error_hint)
 
 STUCK_AT = int(os.environ.get("FORGE_STUCK_THRESHOLD", "7"))  # failures before escalating a rung
 TRACE_V = 1  # P3.1 schema version stamped on every meta/step/compact/loop/malformed record
@@ -795,25 +795,28 @@ class Agent:
                 out.append(f)
         return out
 
-    def _generate(self, prompt, schema=None):
+    def _generate(self, prompt, schema=None, temperature=0.0, stream_say=True):
         """Stream the model's action. When it turns out to be a `say`, emit the
         message text live (token by token) via on_event('token'). `schema` overrides
         the per-step grammar (P5.1 uses it to force a single action's variant on a
-        missing-required resend); otherwise the legal-action grammar is built here."""
+        missing-required resend); otherwise the legal-action grammar is built here.
+        `temperature` drives the P5.2 best-of-N resample (greedy stays t=0.0);
+        `stream_say=False` suppresses live token emission for a throwaway resample
+        candidate that may or may not be chosen."""
         if self._lv("schema"):
             if schema is None:
                 schema = build_schema(self._legal_actions(), self.mode)
         else:
             schema = None
         if not hasattr(self.backend, "stream"):
-            return self.backend.chat(prompt, schema=schema)
+            return self.backend.chat(prompt, schema=schema, temperature=temperature)
         raw, emitted, is_say = "", 0, False
         try:
-            for chunk in self.backend.stream(prompt, schema=schema):
+            for chunk in self.backend.stream(prompt, schema=schema, temperature=temperature):
                 if self.stop.is_set():
                     break
                 raw += chunk
-                if not is_say and '"say"' in raw:
+                if stream_say and not is_say and '"say"' in raw:
                     is_say = True
                 if is_say:
                     msg = _partial_message(raw)
@@ -864,6 +867,53 @@ class Agent:
         kind2 = act2.get("action")
         trace["resent"] = True
         return act2, kind2, self._missing_required(kind2, act2)
+
+    def _resample(self, act, kind, pin, step, base_score, trace):
+        """P5.2 best-of-N: the greedy action is a certain miss (dry_run == 0). Re-ask
+        the SAME prompt at rising temperature, score each candidate with the free
+        verifier, and keep the argmax. The greedy raw is ALREADY messages[-1] (the
+        P3.1 try-body / a P5.1 resend appended it), so the winning candidate REPLACES
+        messages[-1] — otherwise the transcript would show an action that never ran.
+        A candidate that won't parse, is incomplete, is mode-gated, or is a `say` (a
+        turn-ender, not a drop-in for a file action) is skipped. All samples missing
+        → keep the greedy original (the teaching failure), a strict superset of the
+        pre-P5.2 loop. Resamples never lengthen the message list."""
+        best_score, best_act, best_raw = base_score, act, self.messages[-1]["content"]
+        base_prompt = self.messages[:-1] + ([pin] if pin else [])
+        samples = 0
+        for temp in (0.5, 0.8):
+            raw = self._generate(base_prompt, temperature=temp, stream_say=False)
+            samples += 1
+            try:
+                cand = json.loads(raw)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(cand, dict) or cand.get("action") == "say":
+                continue
+            self._alias_path(cand)
+            ck = cand.get("action")
+            if self._missing_required(ck, cand) or self._gate(ck, cand):
+                continue
+            # a candidate that drifts to an edit/write of a file the model hasn't read
+            # must not slip past the read-before-edit gate the greedy already cleared —
+            # skip it (and never probe/leak an unread file's content-existence).
+            if ck in ("edit_file", "write_file") and self._lv("read_gate"):
+                cfp = os.path.realpath(os.path.join(self.session.cwd, cand.get("path", "")))
+                if os.path.isfile(cfp) and not self.ledger.current(cfp):
+                    continue
+            s, _r = dry_run(cand, self.session.cwd)
+            if s > best_score:
+                best_score, best_act, best_raw = s, cand, raw
+        replaced = best_act is not act
+        self.session.log("resample", v=TRACE_V, step=step, samples=samples,
+                         base_score=base_score, best_score=best_score, replaced=replaced)
+        trace["resampled"] = True
+        if replaced:
+            trace["resample_win"] = best_score
+            # replace the greedy assistant echo so the transcript matches what runs
+            self.messages[-1] = {"role": "assistant", "content": best_raw}
+            self._tag_last({"kind": "assistant", "action": best_act.get("action"), "step": step})
+        return best_act, best_act.get("action")
 
     def _absorb_inbox(self):
         for m in self.session.drain():
@@ -1294,6 +1344,23 @@ class Agent:
                                              thought=act.get("thought", ""))
                             self.messages.append({"role": "user", "content": f"⚠ {obs}"})
                             continue
+
+                    # P5.2 deterministic dry-run verifier + best-of-N resample. Runs
+                    # AFTER the read-before-edit gate so an edit_file probe reads the
+                    # SAME realpath the gate just cleared (never an unread file — that
+                    # would leak content-existence the gate blocks). Score the parsed
+                    # action for free: if the greedy sample is a certain miss (score 0
+                    # — `old` absent, .py that won't compile, a command not found),
+                    # don't spend a failure observation running it — resample the SAME
+                    # prompt at rising temperature and execute the best candidate. All
+                    # miss → the greedy original still runs (the teaching failure), so
+                    # this is a strict superset of the pre-P5.2 loop. Gated with the
+                    # `schema` lever (the constrained-decoding bundle): schema off →
+                    # bare baseline, byte-for-byte unchanged, no extra model calls.
+                    if self._lv("schema"):
+                        score, _reason = dry_run(act, self.session.cwd)
+                        if score == 0.0:
+                            act, kind = self._resample(act, kind, pin, step, score, trace)
 
                     # capture the before-content so we can show a real diff after a write
                     before = ""

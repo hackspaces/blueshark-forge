@@ -773,3 +773,102 @@ def execute(action, cwd, stop=None):
         return f"(unknown action: {a})", False
     except Exception as e:
         return f"(error running {a}: {e})", False
+
+
+# ---- P5.2: deterministic pre-execution verifier -------------------------------
+# Shell builtins / keywords whose head token is NOT on PATH but is still a valid
+# command — so `cd x && ...`, `export VAR=1`, `: noop` never read as "not found".
+_SHELL_BUILTINS = frozenset("""
+: . cd pwd echo printf test true false source export unset set eval exec exit
+read return shift local let alias unalias type command builtin help hash getopts
+declare typeset readonly enable pushd popd dirs jobs bg fg wait kill trap umask
+ulimit times suspend logout caller mapfile readarray complete compgen shopt time
+if then else elif fi for while until do done case esac function select in
+""".split())
+_ASSIGN = __import__("re").compile(r"^[A-Za-z_][A-Za-z0-9_]*=")   # VAR=value prefix
+
+
+def _dry_run_bash(cmd):
+    """Score a bash command WITHOUT running it. Only a CLEAR miss is 0: it doesn't
+    shell-parse, or its head token is neither on PATH nor a shell builtin / a
+    VAR=value assignment / a path. Builtins (cd, export), `VAR=1 cmd` and
+    `cd x && make` never false-negative — we only inspect the head token."""
+    try:
+        toks = shlex.split(cmd)
+    except ValueError:
+        return 0.0, "command does not parse (unbalanced quotes)"
+    if not toks:
+        return 0.0, "empty command"
+    head = toks[0]
+    if _ASSIGN.match(head):
+        return 1.0, "assignment prefix"
+    if head in _SHELL_BUILTINS:
+        return 1.0, f"shell builtin: {head}"
+    if "/" in head:                       # a path head — can't cheaply verify, don't false-negative
+        return 1.0, "path-like command"
+    if _which(head):
+        return 1.0, f"on PATH: {head}"
+    return 0.0, f"command not found: {head}"
+
+
+def dry_run(act, cwd):
+    """Deterministic <1ms verifier scoring a PARSED action before it executes.
+    Returns (score, reason): 1.0 = will almost certainly succeed, 0.7 = a unique
+    whitespace-tolerant edit match, 0.0 = a CLEAR miss the harness can catch for
+    free (edit `old` absent/ambiguous, .py that won't compile, .json that won't
+    parse, read of a missing file, a bash head that isn't a command/builtin).
+    Any action without a cheap check scores 1.0 — best-of-N must never penalize an
+    unverifiable-but-valid action. Read-only: reuses _resolve / the edit count
+    logic / _fuzzy_replace / compile / json.loads in a probe; never writes."""
+    a = act.get("action")
+    try:
+        if a == "edit_file":
+            p = _resolve(cwd, act.get("path", ""))
+            if not p or not os.path.isfile(p):
+                return 0.0, "no such file"
+            old = act.get("old", "")
+            if not old:
+                return 0.0, "empty `old`"
+            with open(p, errors="replace") as f:
+                text = f.read()
+            n = text.count(old)
+            if n == 1:
+                return 1.0, "exact unique match"
+            if n > 1:
+                return 0.0, f"`old` appears {n} times (ambiguous)"
+            _, matched, _how = _fuzzy_replace(text, old, act.get("new", ""))
+            return (0.7, "unique fuzzy match") if matched else (0.0, "`old` not found")
+        if a == "write_file":
+            p = _resolve(cwd, act.get("path", ""))
+            if not p:
+                return 0.0, "path escapes the workspace"
+            content = act.get("content", "")
+            ext = os.path.splitext(p)[1].lower()
+            if ext == ".py":
+                try:
+                    compile(content, p, "exec")
+                    return 1.0, "compiles"
+                except SyntaxError as e:
+                    return 0.0, f"SyntaxError at line {e.lineno}: {e.msg}"
+            if ext == ".json":
+                if os.path.basename(p) in _JSONC_NAMES or not content.strip():
+                    return 1.0, "jsonc/empty — no strict probe"
+                try:
+                    json.loads(content)
+                    return 1.0, "valid json"
+                except ValueError as e:
+                    return 0.0, f"invalid json: {e}"
+            return 1.0, "no probe for this extension"
+        if a == "read_file":
+            p = _resolve(cwd, act.get("path", ""))
+            if not p:
+                return 0.0, "path escapes the workspace"
+            return (1.0, "file exists") if os.path.exists(p) else (0.0, "no such file")
+        if a == "bash":
+            cmd = (act.get("command") or "").strip()
+            if not cmd:
+                return 0.0, "empty command"
+            return _dry_run_bash(cmd)
+        return 1.0, "no probe for this action"
+    except Exception as e:                # a probe must NEVER block execution
+        return 1.0, f"probe skipped: {e}"
