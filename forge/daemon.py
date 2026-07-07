@@ -37,7 +37,8 @@ def log(msg):
 
 class Forged:
     def __init__(self, model, interval=20):
-        self.model = model
+        self.model = model                       # raw spec (comma ladder), for logs
+        self.models = [m.strip() for m in model.split(",") if m.strip()] or [model]
         self.interval = interval
 
     def verify_pass(self):
@@ -56,18 +57,21 @@ class Forged:
                 log(f'TRUST: "{e["name"]}" already harness-verified this turn → skip')
                 continue
             log(f'TRUST: "{e["name"]}" claims done → verifying ({self.model})')
-            r = fleet.verify(text[:1500], e["cwd"], self.model)
+            files = fleet.edited_files(e["sid"], e["cwd"])   # scope per session — cheap
+            r = fleet.verify(text[:1500], e["cwd"], self.models, files=files)
             with open(fleet.RECEIPTS, "a") as f:
                 f.write(json.dumps({"ts": time.time(), "sid": e["sid"], "cwd": e["cwd"],
                                     "verdict": r["verdict"], "evidence": r["evidence"]}) + "\n")
-            if r["confirmed"]:
+            if r["verdict"] == "CONFIRMED":
                 log(f'  ✓ CONFIRMED ({e["name"]})')
-            else:
-                log(f'  ✗ {r["verdict"]} ({e["name"]}): {r["evidence"][:110]}')
+            elif r["verdict"] == "REFUTED":
+                log(f'  ✗ REFUTED ({e["name"]}): {r["evidence"][:110]}')
                 try:
                     fleet.send(e["sid"], f"[verify] Your completion claim failed independent verification. {r['evidence']} Please fix and re-check.", sender="verifier")
                 except Exception:
                     pass
+            else:   # UNKNOWN — could not independently decide; do NOT accuse an innocent session
+                log(f'  ? UNKNOWN ({e["name"]}): could not independently verify — no order sent')
 
     def guard_pass(self):
         warned = _load("warned.json", {})

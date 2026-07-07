@@ -1458,5 +1458,218 @@ class TestTuiHelpers(unittest.TestCase):
         self.assertEqual(self._feed(b"\x1b[3~x"), [b"\x1b[3~", "x"])  # nothing leaks into input
 
 
+class _VoteBackend:
+    """A fake backend whose .chat returns scripted judge outputs, recording the
+    temperature it was asked to sample at."""
+    name = "vote"
+
+    def __init__(self, raws):
+        self.raws = list(raws)
+        self.i = 0
+        self.temps = []
+
+    def chat(self, messages, schema=None, temperature=0.0):
+        self.temps.append(temperature)
+        r = self.raws[min(self.i, len(self.raws) - 1)]
+        self.i += 1
+        return r
+
+
+class TestVerifierV2(unittest.TestCase):
+    """P2.2 — the rebuilt fleet verifier: worktree/rsync isolation with an
+    uncommitted overlay, claim-scoped test detection, self-consistency verdict
+    voting, and an honest UNKNOWN that never becomes a false REFUTED."""
+
+    # ---- detect_test_cmd: new engines + claim scoping -----------------------
+    def test_detect_test_cmd_go_and_package_managers(self):
+        from forge import fleet
+        d = tempfile.mkdtemp()
+        _write(os.path.join(d, "go.mod"), "module x\n")
+        self.assertEqual(fleet.detect_test_cmd(d), "go test ./...")
+        d2 = tempfile.mkdtemp()
+        _write(os.path.join(d2, "package.json"), '{"scripts":{"test":"jest"}}')
+        self.assertEqual(fleet.detect_test_cmd(d2), "npm test --silent")   # bare npm
+        _write(os.path.join(d2, "yarn.lock"), "")
+        self.assertEqual(fleet.detect_test_cmd(d2), "yarn test")           # lockfile picks the PM
+        _write(os.path.join(d2, "pnpm-lock.yaml"), "")
+        self.assertEqual(fleet.detect_test_cmd(d2), "pnpm test")           # pnpm wins over yarn
+
+    def test_detect_test_cmd_scopes_to_edited_files(self):
+        from forge import fleet
+        d = tempfile.mkdtemp()
+        os.makedirs(os.path.join(d, "tests"))
+        os.makedirs(os.path.join(d, "pkg"))
+        _write(os.path.join(d, "pyproject.toml"), "[project]\nname='x'\n")
+        _write(os.path.join(d, "tests", "test_foo.py"), "def test_x():\n    pass\n")
+        _write(os.path.join(d, "pkg", "mod.py"), "x = 1\n")
+        # files=None → whole suite, exactly as before (backward-compatible)
+        self.assertEqual(fleet.detect_test_cmd(d), "pytest -q")
+        self.assertEqual(fleet.detect_test_cmd(d, files=None), "pytest -q")
+        # an edited test file is run directly
+        self.assertEqual(fleet.detect_test_cmd(d, files=[os.path.join(d, "tests", "test_foo.py")]),
+                         "pytest -q tests/test_foo.py")
+        # a non-test edit maps to its nearest ancestor tests dir
+        self.assertEqual(fleet.detect_test_cmd(d, files=[os.path.join(d, "pkg", "mod.py")]),
+                         "pytest -q tests")
+        # a non-.py edit contributes no scope → whole suite (no false narrowing)
+        self.assertEqual(fleet.detect_test_cmd(d, files=[os.path.join(d, "README.md")]),
+                         "pytest -q")
+
+    # ---- deterministic verdict + pytest-exit-5 = model path -----------------
+    def test_deterministic_verdict_and_pytest_exit5(self):
+        from forge import fleet
+        self.assertEqual(fleet._deterministic_verdict("npm test --silent", 0, "ok")["verdict"], "CONFIRMED")
+        self.assertEqual(fleet._deterministic_verdict("pytest -q", 1, "1 failed")["verdict"], "REFUTED")
+        # pytest exit 5 = "no tests collected" → defer to the model path, NOT REFUTED
+        self.assertIsNone(fleet._deterministic_verdict("pytest -q tests/test_x.py", 5, "no tests ran"))
+        # exit 5 from a non-pytest command is a genuine failure, not "no tests"
+        self.assertEqual(fleet._deterministic_verdict("make test", 5, "boom")["verdict"], "REFUTED")
+
+    # ---- self-consistency voting -------------------------------------------
+    def test_majority_vote(self):
+        from forge import fleet
+        self.assertEqual(fleet._majority(["CONFIRMED", "CONFIRMED", "REFUTED"]), "CONFIRMED")
+        self.assertEqual(fleet._majority(["REFUTED", "REFUTED", "CONFIRMED"]), "REFUTED")
+        self.assertEqual(fleet._majority(["A", "B", "C"]), "UNKNOWN")   # 1-1-1 split
+        self.assertEqual(fleet._majority([]), "UNKNOWN")
+        self.assertEqual(fleet._majority(["CONFIRMED"]), "UNKNOWN")     # <2 agree
+
+    def test_vote_samples_k3_at_temp_and_takes_mode(self):
+        from forge import fleet
+        b = _VoteBackend(["VERDICT: REFUTED", "VERDICT: REFUTED", "VERDICT: CONFIRMED"])
+        self.assertEqual(fleet._vote(b, "evidence"), "REFUTED")         # mode of 3 wins
+        self.assertEqual(b.temps, [0.8, 0.8, 0.8])                      # k=3 @ temp 0.8
+        # unparseable samples are dropped; a lone parseable vote is not a majority
+        b2 = _VoteBackend(["nonsense", "still nonsense", "VERDICT: CONFIRMED"])
+        self.assertEqual(fleet._vote(b2, "e"), "UNKNOWN")
+
+    # ---- isolation: worktree overlay + rsync fallback -----------------------
+    @unittest.skipUnless(__import__("shutil").which("git"), "git required")
+    def test_isolate_worktree_overlays_uncommitted_edit(self):
+        import subprocess
+        from forge import fleet
+        d = tempfile.mkdtemp()
+        env = {**os.environ, "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_SYSTEM": os.devnull}
+        subprocess.run(["git", "init", "-q"], cwd=d, env=env, check=True)
+        subprocess.run(["git", "config", "user.email", "t@t"], cwd=d, env=env)
+        subprocess.run(["git", "config", "user.name", "t"], cwd=d, env=env)
+        _write(os.path.join(d, "tracked.py"), "V = 1\n")
+        subprocess.run(["git", "add", "-A"], cwd=d, env=env)
+        subprocess.run(["git", "-c", "commit.gpgsign=false", "commit", "-qm", "init"], cwd=d, env=env, check=True)
+        # uncommitted working-tree edits — what the claim is actually about
+        _write(os.path.join(d, "tracked.py"), "V = 2  # EDITED uncommitted\n")
+        _write(os.path.join(d, "untracked.py"), "NEW = True\n")
+        work, cleanup = fleet._isolate(d)
+        try:
+            self.assertNotEqual(work, d)                                    # isolated copy
+            self.assertIn("EDITED", _read(os.path.join(work, "tracked.py")))  # overlay carried the edit
+            self.assertTrue(os.path.exists(os.path.join(work, "untracked.py")))  # and the untracked file
+            self.assertTrue(os.path.isdir(os.path.join(work, ".git")) or
+                            os.path.exists(os.path.join(work, ".git")))      # .git preserved (worktree link)
+        finally:
+            cleanup()
+
+    def test_isolate_rsync_fallback_includes_dotgit(self):
+        from forge import fleet
+        d = tempfile.mkdtemp()
+        os.makedirs(os.path.join(d, ".git"))
+        _write(os.path.join(d, ".git", "config"), "[core]\n")   # fake repo → worktree add fails
+        _write(os.path.join(d, "a.py"), "VALUE = 1\n")
+        work, cleanup = fleet._isolate(d)
+        try:
+            self.assertIn("VALUE = 1", _read(os.path.join(work, "a.py")))
+            self.assertTrue(os.path.exists(os.path.join(work, ".git", "config")))  # fallback INCLUDES .git
+        finally:
+            cleanup()
+
+    # ---- verify(): deterministic path + escalate-then-honest-UNKNOWN --------
+    def test_verify_deterministic_confirms_and_refutes(self):
+        from forge import fleet
+        d = tempfile.mkdtemp()                  # non-git → rsync isolation
+        _write(os.path.join(d, "x.py"), "x = 1\n")
+        orig = fleet.detect_test_cmd
+        try:
+            fleet.detect_test_cmd = lambda cwd, files=None: "true"
+            r = fleet.verify("all tests pass", d, ["m"])
+            self.assertEqual(r["verdict"], "CONFIRMED")
+            self.assertTrue(r["confirmed"])
+            self.assertEqual(r["method"], "deterministic")
+            fleet.detect_test_cmd = lambda cwd, files=None: "false"
+            r = fleet.verify("all tests pass", d, ["m"], files=None)
+            self.assertEqual(r["verdict"], "REFUTED")
+            self.assertFalse(r["confirmed"])
+        finally:
+            fleet.detect_test_cmd = orig
+
+    def test_verify_escalates_on_unknown_then_reports_unknown(self):
+        from forge import fleet
+        d = tempfile.mkdtemp()
+        orig_det, orig_iso, orig_gv = fleet.detect_test_cmd, fleet._isolate, fleet._gather_and_vote
+        try:
+            fleet.detect_test_cmd = lambda cwd, files=None: None        # force the model path
+            fleet._isolate = lambda cwd: (d, lambda: None)              # skip real isolation
+            calls = []
+
+            def fake_gv(model, work, claim):
+                calls.append(model)
+                return ("UNKNOWN" if len(calls) == 1 else "CONFIRMED"), "ev"
+            fleet._gather_and_vote = fake_gv
+            r = fleet.verify("done", d, ["small", "big"])
+            self.assertEqual(calls, ["small", "big"])                   # escalated exactly one rung
+            self.assertEqual(r["verdict"], "CONFIRMED")
+            # a single-rung ladder that stays UNKNOWN reports UNKNOWN — never REFUTED
+            calls.clear()
+            fleet._gather_and_vote = lambda m, w, c: (calls.append(m) or ("UNKNOWN", "ev"))
+            r = fleet.verify("done", d, ["only"])
+            self.assertEqual(calls, ["only"])                          # no escalation available
+            self.assertEqual(r["verdict"], "UNKNOWN")
+            self.assertFalse(r["confirmed"])
+        finally:
+            fleet.detect_test_cmd, fleet._isolate, fleet._gather_and_vote = orig_det, orig_iso, orig_gv
+
+    # ---- daemon: order only on REFUTED, UNKNOWN logged distinctly -----------
+    def test_daemon_sends_order_only_on_refuted(self):
+        from forge import daemon, fleet
+        f = daemon.Forged("small,big", interval=1)
+        self.assertEqual(f.models, ["small", "big"])                   # comma ladder → models list
+
+        entry = {"sid": "s1", "name": "n", "cwd": "/repo", "status": "idle"}
+        recs = tempfile.mkdtemp()
+        saved = {"registry": daemon.sessmod.registry, "last_say": fleet.last_say,
+                 "hv": fleet.harness_verified, "ef": fleet.edited_files,
+                 "verify": fleet.verify, "send": fleet.send, "load": daemon._load,
+                 "save": daemon._save, "receipts": fleet.RECEIPTS}
+
+        def run_with(verdict):
+            sent = []
+            daemon.sessmod.registry = lambda: [entry]
+            fleet.last_say = lambda sid: "all tests pass"
+            fleet.harness_verified = lambda sid: False
+            fleet.edited_files = lambda sid, cwd: set()
+            fleet.verify = lambda claim, cwd, models, files=None: {
+                "verdict": verdict, "confirmed": verdict == "CONFIRMED", "evidence": "e"}
+            fleet.send = lambda *a, **k: sent.append((a, k))
+            daemon._load = lambda fn, dflt: {}
+            daemon._save = lambda fn, v: None
+            fleet.RECEIPTS = os.path.join(recs, verdict + ".jsonl")
+            f.verify_pass()
+            return sent, _read(fleet.RECEIPTS)
+        try:
+            for v in ("CONFIRMED", "UNKNOWN"):
+                sent, receipt = run_with(v)
+                self.assertEqual(sent, [], f"{v} must not trigger a refutation order")
+                self.assertIn(v, receipt)                              # verdict logged distinctly
+            sent, receipt = run_with("REFUTED")
+            self.assertEqual(len(sent), 1)                             # only REFUTED sends the order
+            self.assertEqual(sent[0][1].get("sender"), "verifier")
+            self.assertIn("REFUTED", receipt)
+        finally:
+            daemon.sessmod.registry = saved["registry"]; fleet.last_say = saved["last_say"]
+            fleet.harness_verified = saved["hv"]; fleet.edited_files = saved["ef"]
+            fleet.verify = saved["verify"]; fleet.send = saved["send"]
+            daemon._load = saved["load"]; daemon._save = saved["save"]
+            fleet.RECEIPTS = saved["receipts"]
+
+
 if __name__ == "__main__":
     unittest.main()

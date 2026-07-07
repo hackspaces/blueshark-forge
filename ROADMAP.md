@@ -176,7 +176,7 @@ Convert VERIFY-BEFORE-DONE from prose into mechanism, end-to-end: a done-claim i
 
 ### P2.2 · Verifier v2: git-worktree isolation, claim-scoped tests, self-consistency voting, and honest UNKNOWN
 
-**Status: open · Impact 4/5 · Effort M · Depends on: none**
+**Status: done · Impact 4/5 · Effort M · Depends on: none** · note: fleet.verify now isolates via detached git worktree + uncommitted overlay (rsync-incl-.git fallback), scopes pytest to edited files, votes k=3@0.8 over distilled observations with ladder escalation, and reports honest UNKNOWN — daemon sends the refutation order ONLY on REFUTED.
 
 **What.** Rebuild fleet.verify's weak legs: (1) isolate via `git worktree add --detach` instead of rsync (keeps .git so git-dependent tests work, ~instant, no node_modules symlinks writing through to the live repo); (2) scope the test run to the claim by intersecting edited_files(sid) with the test layout so one pre-existing unrelated red test can't refute every claim forever; (3) in the model-fallback path, don't trust one greedy VERDICT regex — distill the verify agent's own observations into a judgment prompt and sample the verdict k=3 at temperature 0.8, majority-voting the token; (4) no majority or UNKNOWN → escalate the verifier one ladder rung; still UNKNOWN → report UNKNOWN as UNKNOWN, and the daemon only sends the 'failed independent verification' order on REFUTED.
 

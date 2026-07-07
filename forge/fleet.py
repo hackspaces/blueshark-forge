@@ -16,6 +16,7 @@ import os
 import re
 import time
 import urllib.request
+from collections import Counter
 
 from . import session as sessmod
 from .util import slurp
@@ -192,13 +193,22 @@ def _seed(cwd):
 CLAIM_RE = re.compile(r"\b(all tests?\s+(pass|passing|green)|tests?\s+(all\s+)?(pass|passing|green)|all green|ready to (merge|review)|task complete|feature (is )?complete|done and (tested|verified)|passing)\b", re.I)
 
 
-def detect_test_cmd(cwd):
-    """Find the project's real test command deterministically."""
+def detect_test_cmd(cwd, files=None):
+    """Find the project's real test command deterministically.
+
+    When `files` (edited absolute paths) is given, SCOPE a pytest run to the
+    nearest test target of those edits so ONE unrelated pre-existing red test
+    can't refute every claim forever. files=None returns the whole-suite command
+    exactly as before (fully backward-compatible)."""
     pj = os.path.join(cwd, "package.json")
     if os.path.exists(pj):
         try:
             scripts = json.loads(slurp(pj)).get("scripts", {})
             if scripts.get("test") and "no test specified" not in scripts["test"]:
+                if os.path.exists(os.path.join(cwd, "pnpm-lock.yaml")):
+                    return "pnpm test"
+                if os.path.exists(os.path.join(cwd, "yarn.lock")):
+                    return "yarn test"
                 return "npm test --silent"
         except (OSError, json.JSONDecodeError):
             pass
@@ -209,11 +219,54 @@ def detect_test_cmd(cwd):
                 return "make test"
         except OSError:
             pass
+    if os.path.exists(os.path.join(cwd, "go.mod")):
+        return "go test ./..."
     if os.path.exists(os.path.join(cwd, "pyproject.toml")) or os.path.isdir(os.path.join(cwd, "tests")):
-        return "pytest -q"
+        scope = _pytest_scope(cwd, files)
+        return ("pytest -q " + scope).rstrip() if scope else "pytest -q"
     if os.path.exists(os.path.join(cwd, "Cargo.toml")):
         return "cargo test"
     return None
+
+
+def _pytest_scope(cwd, files):
+    """The nearest pytest target(s) for the edited files: an edited test file is
+    run directly; a non-test edit maps to its nearest ancestor `tests` dir. Paths
+    are returned relative to cwd so `pytest -q <scope>` runs only the claim's
+    neighborhood. Empty string => fall back to the whole suite."""
+    if not files:
+        return ""
+    cwd = os.path.normpath(cwd)
+    targets = []
+    for f in files:
+        f = os.path.normpath(f)
+        if not f.endswith(".py"):
+            continue
+        base = os.path.basename(f)
+        target = None
+        if base.startswith("test_") or base.endswith("_test.py"):
+            target = f
+        else:
+            d = os.path.dirname(f)
+            while d and d.startswith(cwd):
+                cand = os.path.join(d, "tests")
+                if os.path.isdir(cand):
+                    target = cand
+                    break
+                if d == cwd:
+                    break
+                d = os.path.dirname(d)
+        if target and target not in targets:
+            targets.append(target)
+    rels = []
+    for t in targets:
+        try:
+            rel = os.path.relpath(t, cwd)
+        except ValueError:
+            continue
+        if not rel.startswith(".."):
+            rels.append(rel)
+    return " ".join(rels)
 
 
 # ---- bash mutation heuristic (done-gate) ------------------------------------
@@ -253,56 +306,223 @@ def bash_mutates(command):
     return False
 
 
-def verify(claim, cwd, model):
-    """Verify a completion claim on an ISOLATED COPY of the repo.
+JUDGE_SYSTEM = """You are a strict verification judge. You are given ONLY the raw command output and file contents an independent verifier gathered while checking another agent's completion claim. Decide, FROM THIS EVIDENCE ALONE, whether the claim is CONFIRMED (the evidence positively shows the work is done and its tests/commands pass) or REFUTED (the evidence shows failures, errors, or that the work is not done). Assume nothing that is not present in the evidence. Reply with a single line, exactly one of:
+  VERDICT: CONFIRMED
+  VERDICT: REFUTED"""
 
-    Deterministic core: the harness detects and RUNS the real test command and
-    grounds the verdict in the actual exit code — never the model's judgment.
-    Model fallback: only when there is no detectable test suite does an
-    independent agent reason about the claim.
-    """
+
+def _overlay_uncommitted(cwd, dest):
+    """A detached worktree checks out HEAD — the COMMITTED state — but done-claims
+    are almost always about UNCOMMITTED working-tree edits. Copy every modified /
+    untracked path reported by `git status --porcelain` from the live cwd on top of
+    the worktree so the verifier sees the ACTUAL edits, not the last commit."""
+    import shutil
+    import subprocess
+    try:
+        out = subprocess.run(["git", "-C", cwd, "status", "--porcelain"],
+                             capture_output=True, text=True, timeout=30).stdout
+    except Exception:
+        return
+    for line in out.splitlines():
+        if len(line) < 4:
+            continue
+        status, path = line[:2], line[3:]
+        if " -> " in path:                 # rename/copy — the destination is what exists now
+            path = path.split(" -> ", 1)[1]
+        path = path.strip().strip('"')
+        src, dst = os.path.join(cwd, path), os.path.join(dest, path)
+        if "D" in status and not os.path.exists(src):   # deletion — mirror it into the copy
+            try:
+                if os.path.isdir(dst):
+                    shutil.rmtree(dst, ignore_errors=True)
+                elif os.path.exists(dst):
+                    os.remove(dst)
+            except OSError:
+                pass
+            continue
+        try:
+            if os.path.isdir(src):
+                shutil.copytree(src, dst, dirs_exist_ok=True, symlinks=True)
+            elif os.path.exists(src):
+                os.makedirs(os.path.dirname(dst), exist_ok=True)
+                shutil.copy2(src, dst)
+        except OSError:
+            pass
+
+
+def _rsync_copy(cwd, dest):
+    """Fallback isolation for a non-git cwd: an rsync copy that now INCLUDES .git
+    (the old code excluded it, breaking git-dependent tests). copytree covers the
+    no-rsync case; node_modules is excluded and re-linked by the caller."""
+    import shutil
+    import subprocess
+    try:
+        r = subprocess.run(["rsync", "-a", "--exclude", "node_modules",
+                            cwd.rstrip("/") + "/", dest + "/"],
+                           capture_output=True, timeout=120)
+        if r.returncode == 0:
+            return
+    except Exception:
+        pass
+    try:
+        shutil.copytree(cwd, dest, ignore=shutil.ignore_patterns("node_modules"),
+                        symlinks=True, dirs_exist_ok=True)
+    except Exception:
+        pass
+
+
+def _isolate(cwd):
+    """Make an isolated working copy of `cwd` and return (workdir, cleanup).
+
+    Prefer a detached git worktree (keeps .git, ~instant, no writes through to the
+    live repo) with the uncommitted working-tree edits overlaid on top of HEAD.
+    Fall back to an rsync/copytree copy (INCLUDING .git) when cwd is not a git repo
+    or the worktree can't be created."""
     import shutil
     import subprocess
     import tempfile
+    base = tempfile.mkdtemp(prefix="forge-verify-")
+    work = None
+    cleanup = lambda: shutil.rmtree(base, ignore_errors=True)
+    if os.path.isdir(os.path.join(cwd, ".git")):
+        wt = os.path.join(base, "wt")
+        try:
+            r = subprocess.run(["git", "-C", cwd, "worktree", "add", "--detach", wt],
+                               capture_output=True, text=True, timeout=60)
+            if r.returncode == 0 and os.path.isdir(wt):
+                _overlay_uncommitted(cwd, wt)
+                work = wt
+                def cleanup():
+                    subprocess.run(["git", "-C", cwd, "worktree", "remove", "--force", wt],
+                                   capture_output=True, timeout=30)
+                    shutil.rmtree(base, ignore_errors=True)
+        except Exception:
+            work = None
+    if work is None:
+        work = os.path.join(base, "copy")
+        _rsync_copy(cwd, work)
+    nm = os.path.join(cwd, "node_modules")   # read-only module resolution; never copied
+    if os.path.isdir(nm) and not os.path.exists(os.path.join(work, "node_modules")):
+        try:
+            os.symlink(nm, os.path.join(work, "node_modules"))
+        except OSError:
+            pass
+    return work, cleanup
 
-    tmp = tempfile.mkdtemp(prefix="forge-verify-")
+
+def _deterministic_verdict(cmd, rc, out):
+    """Turn a test-command result into a verdict dict — or None when we must defer
+    to model reasoning instead of falsely REFUTING. pytest exit code 5 means "no
+    tests were collected" (e.g. the claim's scope has no tests) — that is the model
+    path, NOT a refutation."""
+    toks = cmd.split()
+    if toks and toks[0] == "pytest" and rc == 5:
+        return None
+    tail = " ".join(out.strip().splitlines()[-4:])[:220]
+    ok = rc == 0
+    return {"verdict": "CONFIRMED" if ok else "REFUTED", "confirmed": ok,
+            "evidence": f"`{cmd}` exited {rc} — {tail}", "method": "deterministic"}
+
+
+def _observations(agent):
+    """The verifier's OWN command outputs — the only evidence the judge may see.
+    Last ~6000 chars of the agent's Observation messages."""
+    obs = [m.get("content", "") for m in agent.messages
+           if m.get("role") == "user" and "Observation:" in m.get("content", "")]
+    return "\n\n".join(obs)[-6000:]
+
+
+def _majority(votes):
+    """The mode of the votes, but only if at least 2 agree (self-consistency); a
+    1-1-1 split (or too few votes) is honestly UNKNOWN, never silently REFUTED."""
+    if not votes:
+        return "UNKNOWN"
+    tok, n = Counter(votes).most_common(1)[0]
+    return tok if n >= 2 else "UNKNOWN"
+
+
+def _vote(backend, evidence, k=3):
+    """Sample the verdict k times at temperature 0.8 over the SAME distilled
+    evidence and majority-vote the token — self-consistency gives small models
+    their largest accuracy lift exactly here, over evidence already gathered."""
+    prompt = [{"role": "system", "content": JUDGE_SYSTEM},
+              {"role": "user", "content": f"EVIDENCE (the verifier's own command outputs):\n{evidence or '(no evidence was gathered)'}\n\nGiven ONLY this evidence, output your one-line verdict."}]
+    votes = []
+    for _ in range(k):
+        try:
+            raw = backend.chat(prompt, temperature=0.8)
+        except Exception:
+            continue
+        m = re.search(r"VERDICT:\s*(CONFIRMED|REFUTED)", raw, re.I)
+        if m:
+            votes.append(m.group(1).upper())
+    return _majority(votes)
+
+
+def _gather_and_vote(model, work, claim):
+    """Run an independent verify agent to gather evidence, then vote a verdict from
+    its own observations. Returns (verdict, evidence)."""
+    from .agent import Agent
+    backend = make_backend(model)
+    sess = sessmod.EphemeralSession(work, model)
+    agent = Agent(backend, sess, max_steps=18, autonomous=True,
+                  system=VERIFY_SYSTEM, allowed={"bash", "read_file", "list_files", "say"})
     try:
-        # argv form (no shell) — a repo path containing quotes can't inject
-        subprocess.run(["rsync", "-a", "--exclude", ".git", "--exclude", "node_modules",
-                        cwd.rstrip("/") + "/", tmp + "/"], timeout=120)
-        nm = os.path.join(cwd, "node_modules")
-        if os.path.isdir(nm):
-            try:
-                os.symlink(nm, os.path.join(tmp, "node_modules"))
-            except OSError:
-                pass
+        agent.send(f'{_seed(work)}\n\nThe claim to verify: "{claim[:800]}"\n\n'
+                   f'There is no test suite the harness could detect and scope — inspect and reason carefully.')
+    except Exception:
+        pass
+    evidence = _observations(agent)
+    return _vote(backend, evidence), evidence
 
-        cmd = detect_test_cmd(tmp)
+
+def verify(claim, cwd, models, files=None):
+    """Verify a completion claim on an ISOLATED COPY of the repo.
+
+    Deterministic core: the harness detects and RUNS the real test command —
+    scoped to the claim's edited files — and grounds the verdict in the actual
+    exit code, never the model's judgment.
+    Model fallback: when there is no runnable/scoped suite, an independent agent
+    gathers evidence and the verdict is decided by self-consistency voting
+    (k=3 @ 0.8) over that evidence, escalating one ladder rung on UNKNOWN. An
+    honest UNKNOWN is reported as UNKNOWN — never collapsed into REFUTED.
+
+    `models` is the checker ladder (cheapest→strongest); `files` scopes the run.
+    """
+    import subprocess
+
+    if isinstance(models, str):          # tolerate a single spec / comma ladder
+        models = [m.strip() for m in models.split(",") if m.strip()]
+    models = models or ["gemma2:9b"]
+
+    work, cleanup = _isolate(cwd)
+    try:
+        scoped = None
+        if files:
+            scoped = []
+            for f in files:
+                try:
+                    rel = os.path.relpath(f, cwd)
+                except ValueError:
+                    continue
+                if not rel.startswith(".."):
+                    scoped.append(os.path.join(work, rel))
+        cmd = detect_test_cmd(work, files=scoped)
         if cmd:
-            p = subprocess.run(cmd, cwd=tmp, shell=True, capture_output=True, text=True, timeout=180)
-            out = (p.stdout + p.stderr).strip()
-            tail = " ".join(out.splitlines()[-4:])[:220]
-            ok = p.returncode == 0
-            return {
-                "verdict": "CONFIRMED" if ok else "REFUTED",
-                "confirmed": ok,
-                "evidence": f"`{cmd}` exited {p.returncode} — {tail}",
-                "method": "deterministic",
-            }
+            p = subprocess.run(cmd, cwd=work, shell=True, capture_output=True, text=True, timeout=180)
+            det = _deterministic_verdict(cmd, p.returncode, p.stdout + p.stderr)
+            if det is not None:
+                return det
+            # pytest collected nothing → fall through to model reasoning
 
-        # no test suite → independent model reasoning as fallback
-        from .agent import Agent
-        backend = make_backend(model)
-        sess = sessmod.EphemeralSession(tmp, model)
-        agent = Agent(backend, sess, max_steps=18, autonomous=True,
-                      system=VERIFY_SYSTEM, allowed={"bash", "read_file", "list_files", "say"})
-        out = agent.send(f'{_seed(tmp)}\n\nThe claim to verify: "{claim[:800]}"\n\nThere is no obvious test suite — inspect and reason carefully.')
+        verdict, evidence = _gather_and_vote(models[0], work, claim)
+        if verdict == "UNKNOWN" and len(models) > 1:
+            verdict, evidence = _gather_and_vote(models[1], work, claim)
     finally:
-        shutil.rmtree(tmp, ignore_errors=True)
-    m = re.search(r"VERDICT:\s*(CONFIRMED|REFUTED)", out, re.I)
-    verdict = m.group(1).upper() if m else "UNKNOWN"
+        cleanup()
     return {"verdict": verdict, "confirmed": verdict == "CONFIRMED",
-            "evidence": out.strip()[:300], "method": "model"}
+            "evidence": (f"model vote → {verdict}; " + (evidence or "").strip())[:300],
+            "method": "model"}
 
 
 # ---- LEARN ------------------------------------------------------------------
