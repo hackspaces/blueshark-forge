@@ -15,7 +15,7 @@ from forge.agent import Agent              # noqa: E402
 from forge.backends import make_backend, OllamaBackend, OpenAICompatBackend  # noqa: E402
 from forge.tools import (execute, _fuzzy_replace, _syntax_error, _which,  # noqa: E402
                          shape, overflow_dir, _maybe_offload, MAX_OUTPUT,
-                         error_hint, _closest_region)
+                         error_hint, _closest_region, _group_grep)
 
 
 def _write(p, s):
@@ -372,6 +372,81 @@ class TestEdgeCases(unittest.TestCase):
     def test_glob_no_matches(self):
         out, ok = execute({"action": "glob", "pattern": "*.nonexistent"}, self.d)
         self.assertTrue(ok)
+
+    # --- P1.5: grep v2 (rc inspection, literal fallback, per-file grouping) ---
+    def test_grep_invalid_regex_searches_literally(self):
+        # '[' is an unbalanced bracket — a parse error in BOTH rg and grep. It must
+        # NOT be reported as raw parse-error text (a small model reads that as 'no
+        # results'); it retries as a literal string and finds the real occurrence.
+        _write(os.path.join(self.d, "c.py"), "arr = data[0]\n")
+        out, ok = execute({"action": "grep", "pattern": "["}, self.d)
+        self.assertTrue(ok)                              # a bad regex is not a hard failure
+        low = out.lower()
+        self.assertTrue("literally" in low or "invalid regex" in low,
+                        f"invalid regex must be explained, got: {out!r}")
+        self.assertIn("data[0]", out)                    # the literal hit is present, not swallowed
+        self.assertNotIn("parse error", low)             # NOT the raw tool error masquerading as results
+
+    def test_grep_no_match_message_is_deterministic(self):
+        _write(os.path.join(self.d, "a.txt"), "hello\n")
+        out, ok = execute({"action": "grep", "pattern": "zzzznotfound_xyz"}, self.d)
+        self.assertTrue(ok)
+        self.assertTrue(out.startswith("no matches for zzzznotfound_xyz"), out)
+
+    def test_grep_groups_by_file_with_counts(self):
+        _write(os.path.join(self.d, "m.py"), "needle 1\nx\nneedle 2\ny\nneedle 3\n")
+        out, ok = execute({"action": "grep", "pattern": "needle"}, self.d)
+        self.assertTrue(ok)
+        self.assertIn("3 matches, showing", out)         # per-file count header present
+        self.assertIn("m.py", out)                       # filename preserved
+        self.assertIn("needle 1", out)                   # matched line text preserved
+
+    def test_grep_context_field_controls_neighbors(self):
+        _write(os.path.join(self.d, "ctx.py"), "line one\nTARGET here\nline three\n")
+        tight, ok = execute({"action": "grep", "pattern": "TARGET", "context": 0}, self.d)
+        self.assertTrue(ok)
+        self.assertNotIn("line one", tight)              # context 0 → no surrounding lines
+        wide, ok = execute({"action": "grep", "pattern": "TARGET", "context": 1}, self.d)
+        self.assertTrue(ok)
+        self.assertIn("line one", wide)                  # context 1 → neighbor shown
+        self.assertIn("line three", wide)
+
+    def test_grep_context_is_capped(self):
+        # a huge/garbage context must be clamped, never crash the tool
+        _write(os.path.join(self.d, "z.py"), "hit\n")
+        out, ok = execute({"action": "grep", "pattern": "hit", "context": 999}, self.d)
+        self.assertTrue(ok)
+        self.assertIn("hit", out)
+
+    def test_grep_single_file_path_preserves_count_and_name(self):
+        # a grep scoped to ONE explicit file must still report the real count and
+        # filename. rg omits the `file:` prefix for a single explicit file unless
+        # forced with -H; without it the grouper reports a bogus '0 matches' and a
+        # blank filename — the exact 'harness lies to the model' bug this item fixes.
+        _write(os.path.join(self.d, "app.py"), "def foo():\n    return needle\n\nneedle_again = 1\n")
+        out, ok = execute({"action": "grep", "pattern": "needle", "path": "app.py"}, self.d)
+        self.assertTrue(ok)
+        self.assertIn("2 matches", out)          # both hits counted, not swallowed to 0
+        self.assertNotIn("0 matches", out)       # never under-report a real match
+        self.assertIn("app.py", out)             # filename preserved, not blank
+
+    @unittest.skipUnless(_which("rg"), "malformed-glob error is only surfaced by rg")
+    def test_glob_real_error_not_faked_ok(self):
+        # a malformed glob is a real error, not 'no files' — must report ok False
+        _, ok = execute({"action": "glob", "pattern": "["}, self.d)
+        self.assertFalse(ok)
+
+    def test_group_grep_per_file_cap_and_count(self):
+        raw = "\n".join(f"f1.py:{i}:match {i}" for i in range(1, 6))   # 5 matches, one file
+        body, n = _group_grep(raw)
+        self.assertEqual(n, 5)                           # full count reported
+        self.assertIn("f1.py — 5 matches, showing 3:", body)   # capped to first 3 blocks
+
+    def test_group_grep_overall_block_cap(self):
+        raw = "\n".join(f"f{i}.py:1:x" for i in range(50))   # 50 files, 1 match each
+        body, n = _group_grep(raw)
+        self.assertEqual(n, 50)
+        self.assertIn("more file(s)", body)              # >40 blocks → overflow is flagged, not dropped silently
 
     def test_bash_empty_command(self):
         _, ok = execute({"action": "bash", "command": "  "}, self.d)

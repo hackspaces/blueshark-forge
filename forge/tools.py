@@ -42,6 +42,7 @@ ACTION_SCHEMA = {
         "old": {"type": "string", "description": "exact text to replace (edit_file)"},
         "new": {"type": "string", "description": "replacement text (edit_file)"},
         "pattern": {"type": "string", "description": "search pattern (grep = regex in file contents; glob = filename pattern like **/*.py)"},
+        "context": {"type": "integer", "description": "grep: lines of context to show around each match (default 2, max 5)"},
         "offset": {"type": "integer", "description": "start line for read_file (1-based)"},
         "limit": {"type": "integer", "description": "max lines for read_file"},
         "target": {"type": "string", "description": "which session to message (fleet_send): its project name, dir, or id"},
@@ -60,7 +61,7 @@ Actions:
   write_file  {path, content}     create/overwrite a file with full content
   edit_file   {path, old, new}    surgically replace an exact snippet (preferred for changes)
   list_files  {path?}             list a directory
-  grep        {pattern, path?}    search file CONTENTS by regex (ripgrep; structured, fast)
+  grep        {pattern, path?, context?}   search file CONTENTS by regex (ripgrep; ±context lines, grouped by file)
   glob        {pattern}           find files by name (e.g. **/*.py); use this over `find`
   fleet_send  {target, message}   message another session — forge or Claude Code (it receives it mid-work);
                                   target "list" (no message) lists every reachable session
@@ -317,6 +318,86 @@ def _kill_group(p, signal):
         pass
 
 
+def _run_rc(cmd, cwd, timeout=None, stop=None):
+    """Like _run but returns (raw_output, returncode) and does NOT offload.
+    grep/glob must inspect the tool's exit code (rg/grep: 1=no match, 2=bad
+    regex) and group/cap the RAW output BEFORE any offload, so they cannot use
+    _run (which merges stderr, swallows rc, and offloads first)."""
+    import signal
+    timeout = timeout or BASH_TIMEOUT
+    p = subprocess.Popen(cmd, cwd=cwd, shell=True, text=True,
+                         stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                         start_new_session=True)
+    deadline = time.monotonic() + timeout
+    while True:
+        try:
+            out = p.communicate(timeout=0.2)[0]
+            break
+        except subprocess.TimeoutExpired:
+            if stop is not None and stop.is_set():
+                _kill_group(p, signal)
+                return "(stopped by user)", 130
+            if time.monotonic() > deadline:
+                _kill_group(p, signal)
+                return (f"(timed out after {timeout}s — narrow the path or pattern.)", 124)
+    return (out or "").strip(), p.returncode
+
+
+_GREP_MATCH = __import__("re").compile(r"^(.+?):(\d+):")     # a match line: file:lineno:text
+_GREP_ANY = __import__("re").compile(r"^(.+?)[:-](\d+)[:-]")  # a match OR context line
+
+
+def _group_grep(raw, per_file=3, total=40):
+    """Turn rg/grep output (file:line:text match lines, file-line-text context
+    lines, `--` block separators) into a per-file digest: a '<file> — <M>
+    matches, showing <k>:' header followed by the first few match blocks, capped
+    per file and overall so a big grep stays actionable without a follow-up read.
+    Returns (assembled_text, total_match_count). Filenames and matched text are
+    always preserved."""
+    # 1) split on rg's `--` separators into blocks
+    raw_blocks, cur = [], []
+    for ln in raw.split("\n"):
+        if ln.strip() == "--":
+            if cur:
+                raw_blocks.append(cur); cur = []
+        elif ln != "":
+            cur.append(ln)
+    if cur:
+        raw_blocks.append(cur)
+    # 2) a contextless block (context=0) is really one block per match line
+    blocks = []
+    for b in raw_blocks:
+        if any(not _GREP_MATCH.match(ln) for ln in b):
+            blocks.append(b)
+        else:
+            blocks.extend([ln] for ln in b)
+    # 3) group blocks by file in first-appearance order
+    order, groups = [], {}
+    for b in blocks:
+        f = next((_GREP_ANY.match(ln).group(1) for ln in b if _GREP_ANY.match(ln)), "")
+        if f not in groups:
+            groups[f] = []; order.append(f)
+        groups[f].append(b)
+    # 4) assemble with per-file (~3) and overall (~40) block caps
+    parts, shown, grand = [], 0, 0
+    omitted_files = 0
+    for f in order:
+        fb = groups[f]
+        matches = sum(1 for b in fb for ln in b if _GREP_MATCH.match(ln))
+        grand += matches
+        if shown >= total:
+            omitted_files += 1
+            continue
+        take = fb[:per_file][: total - shown]
+        shown += len(take)
+        head = f"{f} — {matches} matches, showing {len(take)}:"
+        parts.append(head + "\n" + "\n".join("\n".join(b) for b in take))
+    body = "\n\n".join(parts)
+    if omitted_files:
+        body += f"\n\n[... {omitted_files} more file(s) with matches omitted — narrow the pattern or path.]"
+    return body, grand
+
+
 def _resolve(cwd, path):
     """Resolve a file path and CONFINE it to the workspace. Returns the absolute
     path, or None if it escapes (absolute path outside cwd, or ../ traversal).
@@ -451,18 +532,40 @@ def execute(action, cwd, stop=None):
             where = _resolve(cwd, action.get("path", "."))   # confine to the workspace, like read_file
             if not where:
                 return "path escapes the workspace — search inside the project", False
-            tool = "rg -n --no-heading" if _which("rg") else "grep -rn"
-            out, _ = _run(f"{tool} -e {_q(pat)} {_q(where)}", cwd)
-            return out, True   # no matches is a valid result, not a failure
+            ctx = min(max(int(action.get("context", 2) or 0), 0), 5)
+            # -H/--with-filename: force the `file:` prefix even for a single explicit
+            # file, else rg drops it and _group_grep can't recover the filename or count.
+            tool = "rg -nH --no-heading" if _which("rg") else "grep -rnH"
+            out, rc = _run_rc(f"{tool} -C {ctx} -e {_q(pat)} {_q(where)}", cwd, stop=stop)
+            if rc == 2:   # regex parse error — retry as a LITERAL string (-F) so a pasted snippet still lands
+                # never echo the raw `rg: regex parse error:` line — a small model reads it as 'no results'
+                lit, lrc = _run_rc(f"{tool} -F -C {ctx} -e {_q(pat)} {_q(where)}", cwd, stop=stop)
+                if lrc == 0 and lit:
+                    grouped, n = _group_grep(lit)
+                    body, note = _maybe_offload(grouped, "grep", cwd)
+                    return (f"your regex was invalid — searched literally instead: {n} matches\n{body}" + note, True)
+                return (f"your regex was invalid — searched literally instead: no matches for {pat}", True)
+            if rc == 1:   # rg/grep both exit 1 on no match — a valid result, not a failure
+                return f"no matches for {pat} (searched under {action.get('path', '.')})", True
+            if rc == 0:
+                grouped, _ = _group_grep(out)
+                body, note = _maybe_offload(grouped, "grep", cwd)
+                return body + note, True
+            return out, False   # timeout / real error — surface it, don't fake success
         if a == "glob":
             pat = action.get("pattern", "")
             if not pat:
                 return "glob needs a `pattern` (e.g. **/*.py)", False
             if _which("rg"):
-                out, _ = _run(f"rg --files -g {_q(pat)}", cwd)
+                out, rc = _run_rc(f"rg --files -g {_q(pat)}", cwd, stop=stop)
             else:
-                out, _ = _run(f"git ls-files {_q(pat)} 2>/dev/null || find . -path {_q('*/'+pat)}", cwd)
-            return out or "(no files match)", True
+                out, rc = _run_rc(f"git ls-files {_q(pat)} 2>/dev/null || find . -path {_q('*/'+pat)}", cwd, stop=stop)
+            if rc == 1 or not out:   # rg --files exits 1 when nothing matches the glob
+                return "(no files match)", True
+            if rc == 0:
+                body, note = _maybe_offload(out, "glob", cwd)
+                return body + note, True
+            return out, False   # e.g. a malformed glob — a real error, not "no files"
         if a == "read_file":
             path = _resolve(cwd, action.get("path", ""))
             if not path:

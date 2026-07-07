@@ -142,7 +142,7 @@ Small, independent fixes that stop the harness silently lying to the model or to
 
 ### P1.5 · grep v2: context lines, per-file grouping, and a literal-string fallback instead of fake success
 
-**Status: open · Impact 3/5 · Effort S · Depends on: none**
+**Status: done · Impact 3/5 · Effort S · Depends on: none · note: added _run_rc (returns rc, no offload); grep now inspects rc — rc2 retries literally (rg/grep -F -e) with an 'invalid regex … searched literally' message, rc1 gives a deterministic 'no matches for <pat>', rc0 groups per file with counts and ~3-block/file, ~40-block overall caps applied BEFORE offload; new `context` field (default 2, max 5); glob mirrors rc so a malformed glob is ok=False not fake success. Portable invalid-regex test uses `[` (errors in both rg and BSD/GNU grep); rg-only glob-error test is skipUnless(rg).**
 
 **What.** Make grep return match context (rg -C 2 via an optional `context` field), group results by file with counts ('src/app.py — 12 matches, showing 3'), cap total match blocks at ~40, and actually inspect rg's exit code: 1 → 'no matches for <pattern> (searched under <path>)'; 2 → auto-retry with -F fixed-string and report 'your regex was invalid (<error line>) — searched literally instead: N matches'. Mirror the exit-code handling for glob, which has the identical always-ok bug.
 
