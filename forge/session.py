@@ -30,6 +30,18 @@ except OSError:
     pass
 
 
+def _nonblock(fd):
+    """Set O_NONBLOCK on a fd, so reads raise EAGAIN instead of blocking and
+    writes never stall the caller. No-op where fcntl is unavailable (non-Unix)."""
+    if fcntl is None:
+        return
+    try:
+        flags = fcntl.fcntl(fd, fcntl.F_GETFL)
+        fcntl.fcntl(fd, fcntl.F_SETFL, flags | os.O_NONBLOCK)
+    except OSError:
+        pass
+
+
 @contextlib.contextmanager
 def _registry_lock():
     """Serialize the registry read-modify-write across processes, so concurrent
@@ -82,6 +94,19 @@ class Session:
         self.token = secrets.token_hex(16)   # gates the inbox against other local processes
         self._inbox = []
         self._lock = threading.Lock()
+        # Wake pipe: push() writes a byte so an idle REPL blocked in select() wakes
+        # the instant a fleet message lands, instead of rotting until the human types.
+        try:
+            self._wake_r, self._wake_w = os.pipe()
+            _nonblock(self._wake_r); _nonblock(self._wake_w)
+        except OSError:
+            self._wake_r = self._wake_w = None
+
+    @property
+    def wake_fd(self):
+        """The read end of the wake pipe — select() on it to learn an inbox
+        message arrived. None where os.pipe() was unavailable."""
+        return self._wake_r
 
     # ---- transcript ----
     def log(self, kind, **fields):
@@ -91,13 +116,32 @@ class Session:
 
     # ---- inbox ----
     def push(self, sender, text):
+        # May be called from the inbox HTTP thread — append under the lock, then
+        # wake outside it. A full/broken pipe is harmless: the reader wakes anyway.
         with self._lock:
             self._inbox.append({"from": sender, "text": text})
+        if self._wake_w is not None:
+            try:
+                os.write(self._wake_w, b"x")
+            except (BlockingIOError, BrokenPipeError, OSError):
+                pass
 
     def drain(self):
         with self._lock:
             msgs, self._inbox = self._inbox, []
+        self._drain_wake()
         return msgs
+
+    def _drain_wake(self):
+        """Empty the wake pipe (read until EAGAIN) so a stale byte can't keep a
+        drained, empty inbox spuriously readable."""
+        if self._wake_r is None:
+            return
+        try:
+            while os.read(self._wake_r, 4096):
+                pass
+        except (BlockingIOError, OSError):
+            pass
 
     def start_inbox(self):
         session = self

@@ -19,6 +19,8 @@ ESC, CTRL_C, CTRL_D, CR, LF, BS1, BS2 = b"\x1b", b"\x03", b"\x04", b"\r", b"\n",
 CTRL_A, CTRL_E, CTRL_K, CTRL_U, CTRL_W = b"\x01", b"\x05", b"\x0b", b"\x15", b"\x17"
 _ANSI = re.compile(r"\033\[[0-9;]*m")
 
+WAKE = object()   # prompt() returns this when the wake fd fires (idle inbox arrival)
+
 
 def _supported():
     return sys.stdin.isatty() and sys.stdout.isatty()
@@ -69,6 +71,24 @@ def _read_key(fd):
     if n > 1:
         ch += os.read(fd, n - 1)                          # UTF-8 continuation bytes
     return ch.decode("utf-8", "ignore")
+
+
+def _read_key_or_wake(fd, wake_fd):
+    """Like _read_key, but also watches a wake pipe: blocks in select([fd, wake_fd])
+    and returns the WAKE sentinel when only the wake fd is readable. Stdin is
+    serviced first, so a keypress racing a wake is never dropped. With wake_fd None
+    this is a plain blocking _read_key (zero behaviour change)."""
+    if wake_fd is None:
+        return _read_key(fd)
+    while True:
+        try:
+            r, _, _ = select.select([fd, wake_fd], [], [])
+        except (InterruptedError, OSError):
+            return _read_key(fd)
+        if fd in r:
+            return _read_key(fd)
+        if wake_fd in r:
+            return WAKE
 
 
 class LineEditor:
@@ -455,13 +475,15 @@ class Screen:
             sys.stdout.write("\0337" + f"\033[{base};1H\033[K" + _clip(f"{MG}{text}{RST}" if text else "", self.w) + "\0338")
             sys.stdout.flush()
 
-    def prompt(self, prompt, history, status="", on_mode=None, initial=""):
+    def prompt(self, prompt, history, status="", on_mode=None, initial="", wake_fd=None):
         """Read one line in the pinned footer (raw-mode editor). Esc clears; ↑/↓
         history; ←/→/Home/End move; Delete deletes forward; Ctrl-A/E home/end;
         Ctrl-U/K/W kill line-start/line-end/word; Shift-Tab cycles the mode
         (via `on_mode`); Enter submits; Ctrl-C clears then exits; Ctrl-D exits.
         `status` may be a string or a zero-arg callable (repainted live);
-        `initial` pre-fills the line (e.g. an @file picked in the explorer)."""
+        `initial` pre-fills the line (e.g. an @file picked in the explorer).
+        When `wake_fd` is given, a byte on it returns the WAKE sentinel so an idle
+        REPL can render/act on a fleet message the instant it arrives."""
         if not self.enabled:
             try:
                 return input(_ANSI.sub("", prompt))
@@ -480,7 +502,9 @@ class Screen:
             tty.setraw(fd)
             draw()
             while True:
-                key = _read_key(fd)
+                key = _read_key_or_wake(fd, wake_fd)
+                if key is WAKE:                              # inbox arrived while idle
+                    return WAKE
                 if not key or key == CTRL_D:                 # EOF / Ctrl-D
                     return None
                 if key in (CR, LF):

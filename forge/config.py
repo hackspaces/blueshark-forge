@@ -16,6 +16,7 @@ DEFAULTS = {
     "num_predict": 2048,
     "stuck_threshold": 7,
     "verbose": False,
+    "wake": "off",          # idle wake-on-inbox: off | render | act (auto-act fleet msgs)
     "approvals": [],        # manual-mode 'always' approvals (e.g. "bash:git", "edit_file")
     "machine": {},                                  # detected hardware summary
 }

@@ -256,6 +256,48 @@ MODE_HINT = {
     "manual": "asks before every mutating action (y / a=always / n)",
 }
 
+# ---- wake-on-inbox (P2.3) ----------------------------------------------------
+import re as _re
+
+AUTO_ACT_SENDERS = {"verifier", "guard", "learn"}   # the daemon's system senders
+_WAKE_ACT_RE = _re.compile(r"^\[(verify|task |ask )")
+WAKE_BUDGET = 2   # max autonomous turns per human-free message chain (anti-livelock)
+
+
+def wake_should_act(mode, wake_cfg, sender, text, budget_left):
+    """PURE policy: should an idle-wake fleet message auto-start an agent turn?
+
+    Only in auto mode, only when config wake=='act', only for the daemon's system
+    senders or messages tagged [verify]/[task ]/[ask ], and only while the
+    per-chain autonomous-turn budget is not spent. manual/plan modes never
+    auto-act (they only render), so a red verify loop cannot spin a session."""
+    if mode != "auto" or wake_cfg != "act" or budget_left <= 0:
+        return False
+    return sender in AUTO_ACT_SENDERS or bool(_WAKE_ACT_RE.match(text or ""))
+
+
+def _on_wake(ui, agent, session, budget_left):
+    """A wake byte fired while idle: drain the inbox and render every message.
+    Returns a synthetic user_text to auto-start ONE turn (the actionable messages,
+    tagged as fleet messages), or None to render-only — in which case the messages
+    are folded into the agent's context so the next turn still sees them."""
+    from . import config as _cfg
+    wake_cfg = _cfg.get("wake", "off")
+    act = []
+    for m in session.drain():
+        sender, text = m["from"], m["text"]
+        ui("inbox", sender=sender, text=text)               # render the moment it lands
+        if wake_should_act(agent.mode, wake_cfg, sender, text, budget_left):
+            act.append(m)
+        else:                                               # keep it in context (as _absorb_inbox would)
+            tag = "[user (mid-run — steer accordingly)]" if sender == "user" \
+                else f"[fleet message from {sender}]"
+            agent.messages.append({"role": "user", "content": f"{tag}: {text}"})
+            session.log("inbox", sender=sender, text=text)
+    if not act:
+        return None
+    return "\n".join(f"[fleet message from {m['from']}]: {m['text']}" for m in act)
+
 
 def run(backend, session, verbose=False, workspace=None):
     from .tui import Screen, FooterSpinner, ApprovalGate
@@ -305,12 +347,16 @@ def _set_mode(agent, screen, mode):
 
 
 def _run_loop(screen, ui, agent, session, status_line, gate, models, ctx, ptype):
-    from .tui import FooterSpinner
+    from .tui import FooterSpinner, WAKE
     screen.emit(_banner(models, ctx, session.cwd, ptype))
     screen.emit(f"{DIM}  Esc clears/stops · shift+tab: auto/plan/manual · /files explorer · type while it works to queue · /help{RST}\n\n")
     history = []
     pending = []                                        # messages queued for the NEXT turn
     prefill = ""                                        # e.g. "@file " picked in the explorer
+    # Wake-on-inbox (P2.3): off by default, so behaviour is unchanged unless opted in.
+    wake_cfg = cfgmod.get("wake", "off")
+    wake_fd = getattr(session, "wake_fd", None) if wake_cfg in ("render", "act") else None
+    wake_budget = WAKE_BUDGET                           # autonomous turns left in this human-free chain
 
     def cycle_mode():
         _set_mode(agent, screen, MODES[(MODES.index(agent.mode) + 1) % len(MODES)])
@@ -318,49 +364,59 @@ def _run_loop(screen, ui, agent, session, status_line, gate, models, ctx, ptype)
     while True:
         if pending:
             user = pending.pop(0)
+            wake_budget = WAKE_BUDGET                    # a human message resets the autonomous chain
             screen.emit(f"\n{GR}❯{RST} {user} {DIM}(queued){RST}\n")
         else:
-            user = screen.prompt(f"{GR}❯{RST} ", history, status_line, on_mode=cycle_mode, initial=prefill)
+            got = screen.prompt(f"{GR}❯{RST} ", history, status_line, on_mode=cycle_mode,
+                                initial=prefill, wake_fd=wake_fd)
             prefill = ""
-            if user is None:
+            if got is None:
                 break
-            user = user.strip()
-            if not user:
-                continue
-            history.append(user)
-            if user in ("/exit", "/quit"):
-                break
-            screen.emit(f"\n{GR}❯{RST} {user}\n")       # echo into the transcript
-            if user == "/help":
-                screen.emit(f"{DIM}  Esc: clear/stop · ↑↓ history · Ctrl-A/E home/end · Ctrl-U/K/W kill · shift+tab: mode{RST}\n")
-                screen.emit(f"{DIM}  modes — auto: {MODE_HINT['auto']} · plan: {MODE_HINT['plan']} · manual: {MODE_HINT['manual']}{RST}\n")
-                screen.emit(f"{DIM}  while working: type + Enter queues a message the agent absorbs between steps{RST}\n")
-                screen.emit(f"{DIM}  /files: 3-pane folder explorer (Enter on a file attaches it as @file){RST}\n")
-                screen.emit(f"{DIM}  /mode [auto|plan|manual] · /files · /model · /config · /verbose · /plan · /cwd · /exit{RST}\n"); continue
-            if user.startswith("/mode"):
-                arg = user.split(None, 1)[1].strip().lower() if " " in user else ""
-                if arg in MODES:
-                    _set_mode(agent, screen, arg)
-                else:
-                    screen.emit(f"{DIM}  {agent.mode} mode — /mode auto|plan|manual (or shift+tab){RST}\n")
-                continue
-            if user in ("/files", "/f", "/explore"):
-                from .tui import Explorer
-                pick = Explorer(screen, session.cwd).run()
-                if pick:
-                    prefill = f"@{pick} "
-                    screen.emit(f"{DIM}  ⌘ attached @{pick} — finish your message and send{RST}\n")
-                continue
-            if user in ("/model", "/models"):
-                _menu_model(agent, screen, history); continue
-            if user == "/config":
-                _menu_config(agent, screen); continue
-            if user == "/verbose":
-                ui.verbose = not ui.verbose; screen.emit(f"{DIM}  verbose {'on' if ui.verbose else 'off'}{RST}\n"); continue
-            if user == "/plan":
-                (ui._render_plan(agent.plan) if agent.plan else screen.emit(f"{DIM}  (no plan yet){RST}\n")); continue
-            if user == "/cwd":
-                screen.emit(f"{DIM}  {session.cwd}{RST}\n"); continue
+            if got is WAKE:                             # a fleet message arrived while idle
+                act_text = _on_wake(ui, agent, session, wake_budget)
+                if act_text is None:
+                    continue                            # render-only — back to the prompt
+                wake_budget -= 1                        # spend one autonomous turn from the chain
+                user = act_text                         # fall through to a turn, same path as a user turn
+            else:
+                user = got.strip()
+                if not user:
+                    continue
+                wake_budget = WAKE_BUDGET               # a human turn resets the autonomous chain
+                history.append(user)
+                if user in ("/exit", "/quit"):
+                    break
+                screen.emit(f"\n{GR}❯{RST} {user}\n")   # echo into the transcript
+                if user == "/help":
+                    screen.emit(f"{DIM}  Esc: clear/stop · ↑↓ history · Ctrl-A/E home/end · Ctrl-U/K/W kill · shift+tab: mode{RST}\n")
+                    screen.emit(f"{DIM}  modes — auto: {MODE_HINT['auto']} · plan: {MODE_HINT['plan']} · manual: {MODE_HINT['manual']}{RST}\n")
+                    screen.emit(f"{DIM}  while working: type + Enter queues a message the agent absorbs between steps{RST}\n")
+                    screen.emit(f"{DIM}  /files: 3-pane folder explorer (Enter on a file attaches it as @file){RST}\n")
+                    screen.emit(f"{DIM}  /mode [auto|plan|manual] · /files · /model · /config · /verbose · /plan · /cwd · /exit{RST}\n"); continue
+                if user.startswith("/mode"):
+                    arg = user.split(None, 1)[1].strip().lower() if " " in user else ""
+                    if arg in MODES:
+                        _set_mode(agent, screen, arg)
+                    else:
+                        screen.emit(f"{DIM}  {agent.mode} mode — /mode auto|plan|manual (or shift+tab){RST}\n")
+                    continue
+                if user in ("/files", "/f", "/explore"):
+                    from .tui import Explorer
+                    pick = Explorer(screen, session.cwd).run()
+                    if pick:
+                        prefill = f"@{pick} "
+                        screen.emit(f"{DIM}  ⌘ attached @{pick} — finish your message and send{RST}\n")
+                    continue
+                if user in ("/model", "/models"):
+                    _menu_model(agent, screen, history); continue
+                if user == "/config":
+                    _menu_config(agent, screen); continue
+                if user == "/verbose":
+                    ui.verbose = not ui.verbose; screen.emit(f"{DIM}  verbose {'on' if ui.verbose else 'off'}{RST}\n"); continue
+                if user == "/plan":
+                    (ui._render_plan(agent.plan) if agent.plan else screen.emit(f"{DIM}  (no plan yet){RST}\n")); continue
+                if user == "/cwd":
+                    screen.emit(f"{DIM}  {session.cwd}{RST}\n"); continue
 
         ui.new_turn()
         agent.stop.clear()

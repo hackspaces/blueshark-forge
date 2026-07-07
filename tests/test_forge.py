@@ -1671,5 +1671,181 @@ class TestVerifierV2(unittest.TestCase):
             fleet.RECEIPTS = saved["receipts"]
 
 
+class _FakeUI:
+    """Records (kind, kwargs) events instead of painting a terminal."""
+    def __init__(self): self.events = []
+    def __call__(self, kind, **k): self.events.append((kind, k))
+
+
+class _FakeAgent:
+    def __init__(self, mode="auto"):
+        self.mode = mode
+        self.messages = []
+
+
+class _WakeSession:
+    """Minimal session for _on_wake: a scripted inbox drain, recording log()."""
+    def __init__(self, msgs): self._msgs = list(msgs); self.logs = []
+    def drain(self):
+        m, self._msgs = self._msgs, []
+        return m
+    def log(self, kind, **k): self.logs.append((kind, k))
+
+
+class TestWakeOnInbox(unittest.TestCase):
+    """P2.3 — the wake pipe (idle sessions render/act on fleet traffic instantly),
+    the select-or-wake key read, and the PURE auto-act policy predicate."""
+
+    # ---- Session wake pipe: push writes a byte, drain empties it -------------
+    def test_push_writes_wake_byte_and_drain_empties(self):
+        import select
+        s = sm.Session("wk1", tempfile.mkdtemp(), "m")
+        try:
+            self.assertIsNotNone(s.wake_fd)
+            self.assertEqual(select.select([s.wake_fd], [], [], 0)[0], [])   # idle → not readable
+            s.push("verifier", "[verify] fix it")
+            self.assertEqual(select.select([s.wake_fd], [], [], 0)[0], [s.wake_fd])  # a byte woke it
+            self.assertEqual(s.drain(), [{"from": "verifier", "text": "[verify] fix it"}])
+            self.assertEqual(select.select([s.wake_fd], [], [], 0)[0], [])   # drain emptied the pipe too
+        finally:
+            os.close(s._wake_r); os.close(s._wake_w)
+
+    def test_many_pushes_then_one_drain_clears_the_pipe(self):
+        import select
+        s = sm.Session("wk2", tempfile.mkdtemp(), "m")
+        try:
+            for i in range(5):
+                s.push("peer", f"m{i}")
+            self.assertEqual(select.select([s.wake_fd], [], [], 0)[0], [s.wake_fd])
+            self.assertEqual(len(s.drain()), 5)
+            self.assertEqual(select.select([s.wake_fd], [], [], 0)[0], [])   # no residue keeps it hot
+        finally:
+            os.close(s._wake_r); os.close(s._wake_w)
+
+    # ---- _read_key_or_wake: fake key loop returns WAKE on the wake fd --------
+    def test_read_key_or_wake_reads_the_key(self):
+        from forge.tui import _read_key_or_wake
+        kr, kw = os.pipe(); wr, ww = os.pipe()
+        try:
+            os.write(kw, b"a")
+            self.assertEqual(_read_key_or_wake(kr, wr), "a")
+        finally:
+            for fd in (kr, kw, wr, ww): os.close(fd)
+
+    def test_read_key_or_wake_returns_wake_sentinel(self):
+        from forge.tui import _read_key_or_wake, WAKE
+        kr, kw = os.pipe(); wr, ww = os.pipe()
+        try:
+            os.write(ww, b"x")
+            self.assertIs(_read_key_or_wake(kr, wr), WAKE)
+        finally:
+            for fd in (kr, kw, wr, ww): os.close(fd)
+
+    def test_read_key_or_wake_prefers_stdin_no_dropped_key(self):
+        from forge.tui import _read_key_or_wake
+        kr, kw = os.pipe(); wr, ww = os.pipe()
+        try:
+            os.write(kw, b"z"); os.write(ww, b"x")           # both ready
+            self.assertEqual(_read_key_or_wake(kr, wr), "z")  # stdin serviced first
+        finally:
+            for fd in (kr, kw, wr, ww): os.close(fd)
+
+    def test_read_key_or_wake_none_is_plain_blocking_read(self):
+        from forge.tui import _read_key_or_wake
+        kr, kw = os.pipe()
+        try:
+            os.write(kw, b"b")
+            self.assertEqual(_read_key_or_wake(kr, None), "b")   # wake_fd None → unchanged
+        finally:
+            os.close(kr); os.close(kw)
+
+    # ---- wake_should_act: the pure act-vs-render policy ----------------------
+    def test_wake_policy_predicate(self):
+        from forge.repl import wake_should_act as w, AUTO_ACT_SENDERS
+        self.assertEqual(AUTO_ACT_SENDERS, {"verifier", "guard", "learn"})
+        # act: auto mode + config 'act' + a system sender, budget available
+        self.assertTrue(w("auto", "act", "verifier", "anything", 2))
+        self.assertTrue(w("auto", "act", "guard", "x", 1))
+        self.assertTrue(w("auto", "act", "learn", "x", 2))
+        # act via the message tag, even from an unknown sender
+        self.assertTrue(w("auto", "act", "randobox", "[verify] failed", 2))
+        self.assertTrue(w("auto", "act", "randobox", "[task done] report", 2))
+        self.assertTrue(w("auto", "act", "randobox", "[ask q1] status?", 2))
+        # render-only: unknown sender, no matching tag
+        self.assertFalse(w("auto", "act", "randobox", "just chatting", 2))
+        self.assertFalse(w("auto", "act", "randobox", "[taskdone] no space", 2))
+        # config gates: only 'act' auto-acts
+        self.assertFalse(w("auto", "render", "verifier", "[verify]", 2))
+        self.assertFalse(w("auto", "off", "verifier", "[verify]", 2))
+        # mode gates: manual / plan only notify, never act
+        self.assertFalse(w("manual", "act", "verifier", "[verify]", 2))
+        self.assertFalse(w("plan", "act", "verifier", "[verify]", 2))
+        # budget exhaustion stops the autonomous chain
+        self.assertFalse(w("auto", "act", "verifier", "[verify]", 0))
+
+    def test_wake_default_config_is_off(self):
+        from forge import config
+        self.assertEqual(config.DEFAULTS["wake"], "off")     # conservative: opt-in only
+
+    # ---- _on_wake: render vs auto-act, context folding, budget --------------
+    def _wake(self, agent, session, budget, wake_cfg):
+        from forge import repl, config
+        saved = config.get
+        config.get = lambda k, d=None: wake_cfg if k == "wake" else saved(k, d)
+        try:
+            return repl._on_wake(self._ui, agent, session, budget)
+        finally:
+            config.get = saved
+
+    def test_on_wake_acts_on_actionable_message(self):
+        self._ui = _FakeUI()
+        agent = _FakeAgent("auto")
+        sess = _WakeSession([{"from": "verifier", "text": "[verify] fails"}])
+        out = self._wake(agent, sess, 2, "act")
+        self.assertEqual(out, "[fleet message from verifier]: [verify] fails")
+        self.assertIn(("inbox", {"sender": "verifier", "text": "[verify] fails"}), self._ui.events)
+        self.assertEqual(agent.messages, [])                 # actionable msg is the turn's user_text, not pre-appended
+
+    def test_on_wake_render_only_folds_into_context(self):
+        self._ui = _FakeUI()
+        agent = _FakeAgent("auto")
+        sess = _WakeSession([{"from": "otherbox", "text": "hey there"}])
+        out = self._wake(agent, sess, 2, "render")
+        self.assertIsNone(out)                               # nothing auto-acted under 'render'
+        self.assertEqual(len(self._ui.events), 1)            # still rendered instantly
+        self.assertEqual(len(agent.messages), 1)             # and kept for the next turn's context
+        self.assertIn("[fleet message from otherbox]: hey there", agent.messages[0]["content"])
+        self.assertEqual(sess.logs, [("inbox", {"sender": "otherbox", "text": "hey there"})])
+
+    def test_on_wake_budget_zero_renders_only(self):
+        self._ui = _FakeUI()
+        agent = _FakeAgent("auto")
+        sess = _WakeSession([{"from": "verifier", "text": "[verify] fails"}])
+        out = self._wake(agent, sess, 0, "act")              # chain budget spent
+        self.assertIsNone(out)
+        self.assertEqual(len(agent.messages), 1)             # folded into context, not acted
+
+    def test_on_wake_manual_mode_only_notifies(self):
+        self._ui = _FakeUI()
+        agent = _FakeAgent("manual")
+        sess = _WakeSession([{"from": "verifier", "text": "[verify] fails"}])
+        out = self._wake(agent, sess, 2, "act")
+        self.assertIsNone(out)                               # manual/plan never auto-act
+        self.assertEqual(len(self._ui.events), 1)            # but the message is rendered
+
+    def test_on_wake_mixed_batch_acts_and_renders(self):
+        self._ui = _FakeUI()
+        agent = _FakeAgent("auto")
+        sess = _WakeSession([
+            {"from": "chatbox", "text": "fyi"},              # render-only
+            {"from": "verifier", "text": "[verify] fails"},  # actionable
+        ])
+        out = self._wake(agent, sess, 2, "act")
+        self.assertEqual(out, "[fleet message from verifier]: [verify] fails")
+        self.assertEqual(len(self._ui.events), 2)            # both rendered
+        self.assertEqual(len(agent.messages), 1)             # only the non-actionable one folded into context
+        self.assertIn("chatbox", agent.messages[0]["content"])
+
+
 if __name__ == "__main__":
     unittest.main()

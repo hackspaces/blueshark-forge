@@ -192,7 +192,7 @@ Convert VERIFY-BEFORE-DONE from prose into mechanism, end-to-end: a done-claim i
 
 ### P2.3 · Wake-on-inbox: fleet messages trigger autonomous turns in idle sessions
 
-**Status: open · Impact 5/5 · Effort M · Depends on: P2.2**
+**Status: done · Impact 5/5 · Effort M · Depends on: P2.2** · note: Session gained an O_NONBLOCK wake pipe (push writes a byte, drain empties it); tui.prompt selects on [stdin, wake_fd] and returns a WAKE sentinel when idle; repl renders inbox on wake and — config wake=='act', auto mode, system-sender/[verify|task|ask] tag, ≤2 autonomous turns per human-free chain (pure wake_should_act helper) — auto-starts a turn. Default wake='off' → behaviour unchanged unless opted in.
 
 **What.** Give the session inbox a wake pipe so an idle REPL renders fleet messages the moment they arrive, and — policy-gated per message class (off | render | act) — messages from the daemon's system senders ([verify] refutations, [task done] reports, [ask] requests) auto-start an agent turn instead of rotting until the human types. A refuted done-claim then actually gets fixed by the session that made it, autonomously.
 
