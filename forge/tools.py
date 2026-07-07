@@ -4,6 +4,7 @@ The schema is the contract every model output is forced to match — a small mod
 cannot emit a malformed or hallucinated call. It also carries the agent's living
 PLAN, which keeps long-horizon work coherent (the single biggest quality lever for
 weaker models: hold the plan in the harness, not in the model's head)."""
+import difflib
 import json
 import os
 import shlex
@@ -66,6 +67,13 @@ Actions:
   say         {message}           talk to the user (ends your turn)"""
 
 
+def _fuzzy_hits(tlines, olines):
+    """0-based line indices where the stripped block `olines` matches `tlines`
+    ignoring each line's leading/trailing whitespace."""
+    return [i for i in range(len(tlines) - len(olines) + 1)
+            if [tlines[i + j].strip() for j in range(len(olines))] == olines]
+
+
 def _fuzzy_replace(text, old, new):
     """Match `old` ignoring per-line leading/trailing whitespace, so a model that
     gets indentation slightly wrong can still edit. Only acts on a UNIQUE match."""
@@ -73,15 +81,100 @@ def _fuzzy_replace(text, old, new):
     olines = [ln.strip() for ln in old.strip("\n").split("\n")]
     if not olines or not any(olines):
         return text, False, "empty"
-    hits = []
-    for i in range(len(tlines) - len(olines) + 1):
-        if [tlines[i + j].strip() for j in range(len(olines))] == olines:
-            hits.append(i)
+    hits = _fuzzy_hits(tlines, olines)
     if len(hits) != 1:
         return text, False, f"{len(hits)} fuzzy matches"
     i = hits[0]
     result = tlines[:i] + new.split("\n") + tlines[i + len(olines):]
     return "\n".join(result), True, "fuzzy"
+
+
+def _exact_starts(text, old):
+    """0-based line index of the start of each exact substring occurrence of `old`."""
+    starts, idx = [], text.find(old)
+    while idx != -1:
+        starts.append(text.count("\n", 0, idx))
+        idx = text.find(old, idx + 1)
+    return starts
+
+
+def _match_report(tlines, starts):
+    """One line per match: '  line N: <that line, stripped>' — gives the model the
+    exact locations to disambiguate with instead of just a count."""
+    return "\n".join(f"  line {i + 1}: {tlines[i].strip()}" for i in starts)
+
+
+def _closest_region(text, old, max_lines=4000):
+    """Find the file region most similar to `old` via difflib, for the 0-match edit
+    case. Slides a window of len(old)±2 lines over the file, scores each with
+    SequenceMatcher.ratio() — pre-filtered by the cheap real_quick_ratio/quick_ratio
+    upper bounds so it stays fast — and returns (start_lineno, end_lineno, verbatim
+    region) for the best window clearing a 0.5 ratio floor, else None. Files past
+    max_lines are skipped (fall back to the generic message) to bound the scan."""
+    tlines = text.split("\n")
+    if not tlines or len(tlines) > max_lines:
+        return None
+    oldblock = old.strip("\n")
+    if not oldblock:
+        return None
+    onum = len(oldblock.split("\n"))
+    sm = difflib.SequenceMatcher(autojunk=False)
+    sm.set_seq2(oldblock)
+    floor, best_ratio, best = 0.5, 0.0, None
+    for size in range(max(1, onum - 2), onum + 3):
+        if size > len(tlines):
+            break
+        for i in range(len(tlines) - size + 1):
+            sm.set_seq1("\n".join(tlines[i:i + size]))
+            if sm.real_quick_ratio() < floor or sm.quick_ratio() < floor:
+                continue
+            r = sm.ratio()
+            if r >= floor and r > best_ratio:
+                best_ratio, best = r, (i, size)
+    if best is None:
+        return None
+    i, size = best
+    return i + 1, i + size, "\n".join(tlines[i:i + size])
+
+
+# ---- failed-bash error classifier --------------------------------------------
+# When a bash action FAILS, the first pattern that matches its output appends a
+# one-line, deterministic recovery hint — turning a generic failure into an
+# actionable next step without spending a model turn to diagnose it.
+_BASH_HINTS = [
+    (r"(?:ModuleNotFoundError|ImportError:.*No module named)",
+     "hint: a Python module is missing — check for a venv (ls .venv/bin) and use its python, or `pip install` the missing module."),
+    (r"command not found|not found: ",
+     "hint: that executable isn't on PATH — check the name/spelling, install it, or use its full path (which <cmd>)."),
+    (r"address already in use|EADDRINUSE",
+     "hint: that port is already taken — pick another port, or find and kill the holder (lsof -i :<port>)."),
+    (r"No such file or directory",
+     "hint: a path doesn't exist — verify it (ls the parent dir), mkdir -p a missing dir, or fix a wrong relative path."),
+    (r"Permission denied|EACCES",
+     "hint: permission denied — check the file mode (ls -l), chmod +x a script, or you're writing outside a writable dir."),
+    (r"npm ERR!.*(?:ENOENT|missing script)|Missing script",
+     "hint: npm can't find that — run from the dir with package.json and check the script name in its \"scripts\"."),
+    (r"error: pathspec .* did not match|not a git repository",
+     "hint: git can't resolve that — check the ref/path exists, or run inside a git repo (git status)."),
+    (r"SyntaxError|IndentationError",
+     "hint: the code has a syntax error — read the cited line/column and fix it before re-running."),
+    (r"unbound variable|: unbound",
+     "hint: a shell variable is unset — quote it or provide a default (${VAR:-default})."),
+    (r"connection refused|Could not connect|ECONNREFUSED",
+     "hint: nothing is listening there — start the server first (try it as a background bash), or fix the host/port."),
+    (r"No space left on device|ENOSPC",
+     "hint: the disk is full — free space or write somewhere else."),
+]
+_BASH_HINTS = [(__import__("re").compile(p, __import__("re").I), h) for p, h in _BASH_HINTS]
+
+
+def error_hint(text):
+    """Return the first matching recovery hint for a failed bash observation, or ''.
+    Pure and deterministic — the caller appends it to the failure observation."""
+    for rx, hint in _BASH_HINTS:
+        if rx.search(text or ""):
+            return hint
+    return ""
 
 
 MAX_OUTPUT = 12000  # chars kept inline; larger output is saved to a file with a preview
@@ -424,13 +517,32 @@ def execute(action, cwd, stop=None):
                 return f"edit failed: provide the `old` snippet to replace.", False
             n = text.count(old)
             if n > 1:
-                return f"edit failed: `old` appears {n} times — add surrounding context to make it unique.", False
+                # enumerate the locations so the model can add context, not just a count
+                locs = _match_report(text.split("\n"), _exact_starts(text, old))
+                return (f"edit failed: `old` appears {n} times in {action['path']} — add surrounding "
+                        f"context to make it unique. Matches at:\n{locs}", False)
             if n == 1:
                 newtext, how = text.replace(old, new, 1), "exact"
             else:
                 # exact miss → whitespace-tolerant match (small models rarely reproduce indentation exactly)
                 newtext, matched, how = _fuzzy_replace(text, old, new)
                 if not matched:
+                    tlines = text.split("\n")
+                    olines = [ln.strip() for ln in old.strip("\n").split("\n")]
+                    hits = _fuzzy_hits(tlines, olines) if any(olines) else []
+                    if len(hits) > 1:
+                        # >1 whitespace-tolerant matches → same enumerate treatment as the exact case
+                        locs = _match_report(tlines, hits)
+                        return (f"edit failed: `old` matches {len(hits)} places in {action['path']} "
+                                f"(ignoring indentation) — add surrounding context to make it unique. "
+                                f"Matches at:\n{locs}", False)
+                    # zero matches → point at the closest region verbatim so the retry is a copy, not a re-read
+                    region = _closest_region(text, old)
+                    if region:
+                        i, j, block = region
+                        return (f"edit failed: `old` not found in {action['path']}. CLOSEST region "
+                                f"(lines {i}-{j}):\n{block}\n"
+                                f"Re-send edit_file with old copied EXACTLY from the region above.", False)
                     return f"edit failed: `old` not found in {action['path']} ({how}). Read the file and copy the EXACT text, or use write_file to rewrite it.", False
             # check the CANDIDATE text before writing — a failing edit never touches the file, but
             # a file that's ALREADY broken can be repaired one hunk at a time (block only valid→invalid)

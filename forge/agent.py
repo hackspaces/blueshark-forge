@@ -17,7 +17,7 @@ import re
 import threading
 
 from . import backends
-from .tools import ACTION_SCHEMA, TOOL_HELP, execute, shape
+from .tools import ACTION_SCHEMA, TOOL_HELP, execute, shape, error_hint
 
 STUCK_AT = int(os.environ.get("FORGE_STUCK_THRESHOLD", "7"))  # failures before escalating a rung
 
@@ -418,6 +418,11 @@ class Agent:
                         self.session.log("assistant", text=stuck)
                         self.on_event("say", message=stuck)
                         return stuck
+                    # deterministic recovery hint for the common bash failure signatures
+                    if kind == "bash":
+                        h = error_hint(obs)
+                        if h:
+                            tag += f"  ↳ {h}\n"
                 self.messages.append({"role": "user", "content": f"{tag}Observation:\n{shape(obs, budget)}"})
 
             return "(hit the step limit — ask me to continue)"

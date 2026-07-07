@@ -14,7 +14,8 @@ from forge import session as sm            # noqa: E402
 from forge.agent import Agent              # noqa: E402
 from forge.backends import make_backend, OllamaBackend, OpenAICompatBackend  # noqa: E402
 from forge.tools import (execute, _fuzzy_replace, _syntax_error, _which,  # noqa: E402
-                         shape, overflow_dir, _maybe_offload, MAX_OUTPUT)
+                         shape, overflow_dir, _maybe_offload, MAX_OUTPUT,
+                         error_hint, _closest_region)
 
 
 def _write(p, s):
@@ -408,6 +409,90 @@ class TestEdgeCases(unittest.TestCase):
         r = a.send("message nobody")
         # the failed send is reported but the agent continues to completion
         self.assertEqual(r, "done")
+
+
+class TestFailureAutopsy(unittest.TestCase):
+    """P1.3 — a failed edit_file/bash diagnoses itself deterministically: multi-match
+    edits list every location, a near-miss edit shows the CLOSEST region verbatim with
+    real line numbers, and a failed bash appends an error-class recovery hint — so the
+    model fixes in one step instead of burning a re-read/diagnose loop."""
+
+    def setUp(self):
+        self.d = tempfile.mkdtemp()
+
+    # --- edit_file: exact multi-match lists locations, not just a count ---
+    def test_exact_multi_match_lists_locations(self):
+        _write(os.path.join(self.d, "m.py"), "a = 1\nb = 1\nc = 1\n")
+        out, ok = execute({"action": "edit_file", "path": "m.py", "old": "= 1", "new": "= 9"}, self.d)
+        self.assertFalse(ok)                       # still a failure → feeds the escalation signal
+        self.assertIn("appears 3 times", out)
+        for ln in ("line 1", "line 2", "line 3"):  # every location enumerated
+            self.assertIn(ln, out)
+
+    # --- edit_file: >1 whitespace-tolerant matches get the same treatment ---
+    def test_fuzzy_multi_match_lists_locations(self):
+        _write(os.path.join(self.d, "f.py"),
+               "def a():\n    x = 1\n    return x\n\ndef b():\n        x = 1\n        return x\n")
+        # no exact substring match (indentation differs), but two fuzzy matches
+        out, ok = execute({"action": "edit_file", "path": "f.py",
+                           "old": "x = 1\nreturn x", "new": "x = 2\nreturn x"}, self.d)
+        self.assertFalse(ok)
+        self.assertIn("2 places", out)
+        self.assertIn("ignoring indentation", out)
+        self.assertIn("line 2", out)               # def a()'s body
+        self.assertIn("line 6", out)               # def b()'s body
+
+    # --- edit_file: near-miss shows the CLOSEST region verbatim with real line numbers ---
+    def test_close_but_not_exact_shows_closest_region(self):
+        _write(os.path.join(self.d, "g.py"),
+               "import os\n\n\ndef greet(name):\n    message = \"hello \" + name\n    return message\n")
+        out, ok = execute({"action": "edit_file", "path": "g.py",
+                           "old": "def greet(name):\n    message = \"hi \" + name\n    return message",
+                           "new": "x"}, self.d)
+        self.assertFalse(ok)
+        self.assertIn("CLOSEST region", out)
+        self.assertIn("lines 4-6", out)            # the real nearby line numbers
+        self.assertIn("hello", out)                # the region is verbatim
+        self.assertIn("copied EXACTLY", out)
+
+    def test_no_close_region_falls_back_to_generic(self):
+        _write(os.path.join(self.d, "h.py"), "alpha = 1\nbeta = 2\n")
+        out, ok = execute({"action": "edit_file", "path": "h.py",
+                           "old": "wildly unrelated tokens zzz qqq wibble", "new": "x"}, self.d)
+        self.assertFalse(ok)
+        self.assertNotIn("CLOSEST region", out)
+        self.assertIn("copy the EXACT text", out)
+
+    def test_closest_region_direct(self):
+        text = "one\ntwo\nthree hundred\nfour\n"
+        region = _closest_region(text, "three hundred and five")
+        self.assertIsNotNone(region)
+        i, j, block = region
+        self.assertEqual((i, j), (3, 3))
+        self.assertIn("three hundred", block)
+        # nothing remotely similar → None (generic-message fallback)
+        self.assertIsNone(_closest_region(text, "qqqqqq zzzzzz wibble wobble"))
+
+    # --- failed bash: error-class recovery hints ---
+    def test_error_hint_classifier(self):
+        self.assertIn("venv", error_hint("ModuleNotFoundError: No module named 'foo'"))
+        self.assertIn("PATH", error_hint("bash: frobnicate: command not found"))
+        self.assertIn("port", error_hint("OSError: [Errno 48] Address already in use"))
+        self.assertIn("path", error_hint("cat: nope.txt: No such file or directory"))
+        self.assertIn("permission", error_hint("open: Permission denied").lower())
+        self.assertEqual(error_hint("everything is fine, exit 0"), "")   # no false hint
+
+    def test_failed_bash_appends_module_hint_via_agent(self):
+        actions = [
+            '{"thought":"probe","action":"bash","command":"python3 -c \'import nosuchmod_xyz123\'"}',
+            '{"thought":"done","action":"say","message":"done"}',
+        ]
+        a = Agent(ScriptBackend(actions), sm.EphemeralSession(self.d, "s"), max_steps=4)
+        a.send("probe")
+        # the hint rides the observation the model actually consumes
+        blob = "\n".join(m["content"] for m in a.messages if m["role"] == "user")
+        self.assertIn("ModuleNotFoundError", blob)
+        self.assertIn(".venv/bin", blob)
 
 
 class TestObservationShaping(unittest.TestCase):

@@ -114,7 +114,7 @@ Small, independent fixes that stop the harness silently lying to the model or to
 
 ### P1.3 · Failure autopsy: closest-match context on failed edits and error-class hints on failed bash
 
-**Status: open · Impact 4/5 · Effort S · Depends on: none**
+**Status: done · Impact 4/5 · Effort S · Depends on: none · note: edit_file now enumerates all match locations (exact AND >1-fuzzy branches), difflib sliding-window (0.5 floor, quick_ratio pre-filter, 4000-line cap) shows the CLOSEST region verbatim on 0-match, and failed bash appends the first of 11 (regex→hint) recovery lines; all paths still return ok=False to keep the escalation signal.**
 
 **What.** When edit_file finds zero matches, the harness locates the most similar region of the file (difflib over sliding line windows) and includes it verbatim, with line numbers, in the failure observation; when `old` matches multiple times it lists each match location with one line of context. For failed bash, a small deterministic classifier maps common error signatures (ModuleNotFoundError, command not found, EADDRINUSE, No such file or directory) to one-line recovery hints appended to the observation.
 
