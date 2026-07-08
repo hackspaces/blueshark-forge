@@ -159,6 +159,26 @@ class TestReplayBackend(unittest.TestCase):
             [{"user": "do it", "model": recs}])
         self.assertEqual(result["terminals"], ["all set"])
 
+    def test_p5_2_resample_does_not_fire_during_replay(self):
+        # P5.2×P3.3: read_file dry_runs to 0 in the throwaway replay tempdir (the
+        # file lived in the recorded workspace, absent here). Default levers leave
+        # the schema lever ON, but resample must NOT fire during zero-inference
+        # replay — otherwise it pops the NEXT step's raw off the shared cursor as a
+        # bogus candidate and the terminal `say` is lost to "steps exhausted". The
+        # recorded greedy raws must drive the read_file → say path 1:1.
+        recs = [
+            {"raw": '{"thought":"peek","action":"read_file","path":"only_in_recording.txt"}',
+             "tier": 0, "prompt_tokens": 0},
+            {"raw": '{"thought":"done","action":"say","message":"TERMINAL-SAY"}',
+             "tier": 0, "prompt_tokens": 0},
+        ]
+        result = replaymod.replay_records(
+            {"model": "fake", "mode": "auto"},
+            [{"user": "read then report", "model": recs}])
+        self.assertEqual(result["terminals"], ["TERMINAL-SAY"])
+        # no resample telemetry was emitted during replay
+        self.assertFalse([r for r in result["session"].records if r.get("type") == "resample"])
+
 
 class TestRawLogged(unittest.TestCase):
     """The raw model output of EVERY step is logged — including the malformed

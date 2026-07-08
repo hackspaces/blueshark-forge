@@ -1663,7 +1663,12 @@ class Agent:
                     # this is a strict superset of the pre-P5.2 loop. Gated with the
                     # `schema` lever (the constrained-decoding bundle): schema off →
                     # bare baseline, byte-for-byte unchanged, no extra model calls.
-                    if self._lv("schema"):
+                    # Skipped under zero-inference replay (backend.replay): there is
+                    # no model to re-ask, and dry_run is workspace-dependent —
+                    # resampling would pop later steps' raws off the P3.3 cursor as
+                    # bogus candidates and break replay's 1:1-with-the-recording
+                    # contract.
+                    if self._lv("schema") and not getattr(self.backend, "replay", False):
                         score, _reason = dry_run(act, self.session.cwd)
                         if score == 0.0:
                             act, kind = self._resample(act, kind, pin, step, score, trace)

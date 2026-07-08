@@ -75,6 +75,13 @@ class ReplayBackend:
     Replays the recorded prompt_tokens as last_prompt_tokens so compaction fires
     at the same fill points as the live run."""
 
+    # There is no live model to re-ask, so the P5.2 dry-run resample must NOT run
+    # here: its trigger (dry_run == 0) is workspace-dependent (an absent read_file /
+    # a missing edit `old` in the throwaway replay tree), so it would fire off-record
+    # and pop later steps' raws off the shared cursor as bogus candidates. Agent.send
+    # feature-detects this flag and skips resample during replay (raws drive 1:1).
+    replay = True
+
     def __init__(self, cursor, name="replay", strict=False, window=DEFAULT_WINDOW):
         self._cursor = cursor
         self.name = name
