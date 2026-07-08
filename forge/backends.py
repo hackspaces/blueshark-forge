@@ -107,6 +107,10 @@ class OllamaBackend:
         self.name = f"ollama:{model}"
         self._window = None            # the model's real context length (from /api/show)
         self.last_prompt_tokens = 0     # exact tokens of the last prompt (from the response)
+        # P5.8 model passports: per-INSTANCE max output tokens (was the module constant
+        # NUM_PREDICT). The Agent raises it per model — a write_file truncator gets a
+        # bigger budget — resolving the passport against THIS rung, not once globally.
+        self.num_predict = NUM_PREDICT
 
     def context_window(self):
         """The model's TRUE context length, queried once from Ollama."""
@@ -136,7 +140,7 @@ class OllamaBackend:
             "messages": messages,
             "stream": stream,
             "keep_alive": KEEP_ALIVE,
-            "options": {"temperature": temperature, "num_ctx": self.effective_ctx(), "num_predict": NUM_PREDICT},
+            "options": {"temperature": temperature, "num_ctx": self.effective_ctx(), "num_predict": self.num_predict},
         }
         if schema:
             body["format"] = schema

@@ -114,8 +114,22 @@ forge forget [pattern]      prune learned facts (substring match, or all)
 forge trace [sid|last]      replay a session's step trace as a table
 forge bench [--report]      harness-lift eval: same model bare vs full harness
 forge replay [sid|last]     re-drive a recorded session through the harness, no model
+forge passport [--probe]    per-model capability profile + the knobs it auto-tunes
 forge --version
 ```
+
+### Model passports
+
+Every knob (loop threshold, output budget, retry temperature) is one-size-fits-all
+by default — but failure modes are model-specific. forge keeps a **passport** per
+model: it measures each one two ways — an active ~90s probe at `forge setup` (can it
+hold the action format? reproduce exact text? stay valid at temp 0?) and passive
+telemetry from live runs (malformed rate, loop-trip rate, fuzzy-edit rate, escalation
+frequency) — then tunes itself to the model at hand: a tighter loop threshold for
+loop-prone models, a bigger `num_predict` for write-file truncators, a hotter retry
+schedule for models whose greedy retries come back identical. `forge passport` shows
+each model's learned profile and the knobs it resolves to; `forge passport --probe`
+re-runs the active probe now. An un-profiled model runs on the stock defaults.
 
 ### Resume a session
 
@@ -263,6 +277,7 @@ forge forget [pattern]         prune learned facts (substring match, or all)
 forge trace [sid|last]         replay a session's per-step trace as a table
 forge bench [--report]         harness-lift eval: same model bare vs full harness
 forge replay [sid|last]        re-drive a recorded session through the harness, no model
+forge passport [--probe]       per-model capability profile + the knobs it auto-tunes
 ```
 
 ## Architecture

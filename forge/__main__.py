@@ -350,6 +350,40 @@ def cmd_bench(args):
         print(bench.report(rows))
 
 
+def cmd_passport(args):
+    """P5.8 — show each model's learned capability passport (passive per-session rates +
+    the active-probe scores) and the per-model knobs it resolves to. With --probe, run
+    the ~90s active probe against each model first and (re)write its passport."""
+    from . import profile
+    from . import backends
+    from .backends import make_backend
+    from .agent import DEFAULT_LOOP_THRESHOLD, DEFAULT_HEAT_BUMP
+    defaults = {"loop_threshold": DEFAULT_LOOP_THRESHOLD, "heat_bump": DEFAULT_HEAT_BUMP,
+                "num_predict": backends.NUM_PREDICT}
+    cfg = cfgmod.load()
+    models = [args.model] if args.model else list(cfg.get("ladder") or [])
+    if not models:
+        print("no models configured — run `forge setup` first."); return
+    eng = cfg.get("engine", "ollama")
+    url = cfg.get("base_url") or None
+    key = cfg.get("api_key") or None
+    # canonical backend name (e.g. "ollama:gemma2:9b") is the passport store key.
+    backs = [make_backend(m, engine=eng, base_url=url, api_key=key) for m in models]
+    if args.probe:
+        from . import setup as setupmod
+        print("probing (real model calls — this can take ~90s per model):")
+        for b in backs:
+            try:
+                setupmod.passport(b)
+            except Exception as e:
+                print(f"    · {b.name}: probe failed ({e})")
+        print()
+    for b in backs:
+        for line in profile.describe(b.name, defaults):
+            print(line)
+        print()
+
+
 def main():
     ap = argparse.ArgumentParser(prog="forge")
     # default LOCAL LADDER comes from ~/.forge/config.json (written by `forge setup`)
@@ -403,6 +437,10 @@ def main():
     p_bench.add_argument("--single-rung", dest="single_rung", action="store_true", help="ablate: full harness minus escalation")
     p_bench.add_argument("--report", action="store_true", help="print the lift + ablation tables after running")
 
+    p_pp = sub.add_parser("passport", help="show each model's learned capability passport + the knobs it tunes")
+    p_pp.add_argument("model", nargs="?", help="a single model name (default: every model in the configured ladder)")
+    p_pp.add_argument("--probe", action="store_true", help="run the active probe now and (re)write the passport(s)")
+
     p_setup = sub.add_parser("setup", help="detect hardware, choose an engine, pull/point at models, write config")
     p_setup.add_argument("--auto", action="store_true", help="no prompts (Ollama, RAM-sized ladder)")
     p_setup.add_argument("--engine", help="ollama | vllm | llamacpp | mlx | lmstudio | tgi | sglang | openai")
@@ -418,7 +456,8 @@ def main():
                               api_key=args.api_key, models=models))
     dispatch = {"run": cmd_run, "status": cmd_status, "send": cmd_send, "up": cmd_up,
                 "down": cmd_down, "receipts": cmd_receipts, "learnings": cmd_learnings,
-                "forget": cmd_forget, "trace": cmd_trace, "bench": cmd_bench, "replay": cmd_replay}
+                "forget": cmd_forget, "trace": cmd_trace, "bench": cmd_bench, "replay": cmd_replay,
+                "passport": cmd_passport}
     (dispatch.get(args.cmd) or cmd_chat)(args)
 
 

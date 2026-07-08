@@ -20,8 +20,13 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from forge import agent as agent_mod          # noqa: E402
+from forge import profile as _profile         # noqa: E402
 from forge import session as sm               # noqa: E402
 from forge.agent import Agent                 # noqa: E402
+
+# P5.8 hermetic redirect: keep passport telemetry (and the per-model knobs it tunes,
+# e.g. loop_threshold, which the 3x-loop test below asserts on) off the real ~/.forge.
+_profile.PROFILE_DIR = tempfile.mkdtemp(prefix="forge-profile-loop-suite-")
 
 
 def _write(p, s):

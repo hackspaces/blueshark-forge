@@ -160,9 +160,53 @@ def _setup_ollama(hw, auto, keep_models):
                 "ladder": ladder, "num_ctx": num_ctx_for(hw["ram_gb"]), "machine": hw})
     config.save(cfg)
     print(f"\n  ✓ config written to {config.PATH}  ·  window {cfg['num_ctx']} tokens")
+    if not auto:
+        _probe_ladder(ladder, engine="ollama")
     _bridge_report()
     print(f"  ✓ run `forge` to start (ladder: {' → '.join(ladder)})")
     return 0
+
+
+def passport(backend, verbose=True):
+    """P5.8 active probe: drive ~10 canned micro-prompts through a REAL backend and
+    write the initial passport, so a fresh install is tuned to this model BEFORE its
+    first task. Scores format-holding / field completeness / exact-text reproduction
+    (the scoring is offline in profile.score_probe). Best-effort — a probe against an
+    unreachable or slow engine degrades to no passport, never an error. Returns the
+    scores dict (or None on total failure)."""
+    from . import profile
+    from .tools import ACTION_SCHEMA
+    specs = profile.probe_specs()
+    sysmsg = ("You are a coding agent. Reply to each instruction with ONE JSON action "
+              "object and nothing else.")
+    raws = []
+    for spec in specs:
+        try:
+            raw = backend.chat(
+                [{"role": "system", "content": sysmsg},
+                 {"role": "user", "content": spec["prompt"]}],
+                schema=ACTION_SCHEMA, temperature=0.0)
+        except Exception:
+            raw = ""
+        raws.append(raw or "")
+    scores = profile.score_probe(raws, specs)
+    profile.write_passport(backend.name, scores)
+    if verbose:
+        print(f"    · {backend.name}: format {scores['format_hold']:.0%} · "
+              f"fields {scores['field_complete']:.0%} · exact {scores['exact_repro']:.0%}")
+    return scores
+
+
+def _probe_ladder(ladder, engine="ollama", base_url="", api_key=""):
+    """Probe every rung of a freshly-configured ladder and write its passport.
+    Best-effort and self-contained; a single unreachable rung just prints a note."""
+    from .backends import make_backend
+    print("\n  measuring models (passport probe — tunes the harness per model):")
+    for m in ladder:
+        try:
+            passport(make_backend(m, engine=engine, base_url=base_url, api_key=api_key))
+        except Exception:
+            print(f"    · {m}: probe skipped (backend not reachable)")
 
 
 def _bridge_report():
@@ -186,6 +230,7 @@ def _setup_server(hw, engine, url, models, api_key):
     print(f"\n  ✓ engine: {engine}  ·  {url}")
     print(f"  ✓ ladder: {' → '.join(models)}")
     print(f"  ✓ config written to {config.PATH}")
+    _probe_ladder(models, engine=engine, base_url=url, api_key=api_key or "")
     _bridge_report()
     print(f"  ✓ run `forge` to start (make sure your server is up)")
     return 0

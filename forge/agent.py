@@ -21,6 +21,7 @@ import time
 from . import __version__
 from . import backends
 from . import exemplars
+from . import profile
 from . import profiles
 from .ledger import Ledger
 from .tools import (ACTION_SCHEMA, ACTION_VARIANTS, ALL_ACTIONS, TOOL_HELP,
@@ -28,6 +29,12 @@ from .tools import (ACTION_SCHEMA, ACTION_VARIANTS, ALL_ACTIONS, TOOL_HELP,
 
 STUCK_AT = int(os.environ.get("FORGE_STUCK_THRESHOLD", "7"))  # failures before escalating a rung
 TRACE_V = 1  # P3.1 schema version stamped on every meta/step/compact/loop/malformed record
+
+# P5.8 model passports: the per-model-tunable knobs and their DEFAULTS. `profile.knobs`
+# fuses a model's learned passport with these; an empty passport returns them unchanged,
+# so an un-profiled model (and the whole offline suite) runs byte-for-byte as before.
+DEFAULT_LOOP_THRESHOLD = 3   # consecutive/window repeats before the loop nudge fires
+DEFAULT_HEAT_BUMP = 0.4      # P5.5 retry-heat increment per malformed/loop/fail/declined nudge
 
 # P5.7 step-scoped borrowing + unified stuck ledger. ONE weighted per-turn score
 # (replacing the old disjoint bad / fail_counts / total_fails) accrues on each stuck
@@ -401,6 +408,19 @@ class Agent:
                       "malformed": 0, "sig_fails": {}, "borrows": 0}
         self.clean_streak = 0
         self._prewarmed = False
+        # P5.8 model passports: passive telemetry is written only for a REAL logging
+        # session — internal agents (verifier self-consistency, bench) use an
+        # EphemeralSession and must never pollute a model's passport (they'd skew its
+        # rates with throwaway work), exactly as they're excluded from the trace file.
+        self._passport_on = type(self.session).__name__ != "EphemeralSession"
+        # Per-model knobs, resolved against the ACTIVE backend's passport (re-resolved at
+        # every ladder swap below, since the escalated rung is a different model with a
+        # different passport). Defaults = byte-for-byte the pre-P5.8 constants.
+        self.loop_threshold = DEFAULT_LOOP_THRESHOLD
+        self.heat_bump = DEFAULT_HEAT_BUMP
+        self._resolve_knobs()
+        if self._passport_on:
+            profile.record(self.backend.name, "session")
         # P4.5 just-in-time retrieval: the project's test command, detected ONCE
         # (fleet.detect_test_cmd is otherwise computed only inside verify() and
         # never surfaced to the working agent). The file-list + symbol tables are
@@ -447,6 +467,30 @@ class Agent:
         self.tier = 0
         self.backend = ladder[0]
         self._aliases = profiles.resolve(self.backend.name).get("aliases", ())  # P5.4: re-resolve the family alias table
+        self._resolve_knobs()   # P5.8: re-resolve per-model knobs for the new base rung
+
+    def _resolve_knobs(self):
+        """P5.8: resolve the per-model knobs (loop_threshold, num_predict, heat_bump)
+        from the ACTIVE backend's passport and apply them. Called at construction and at
+        every ladder swap (escalate / de-escalate / set_ladder) because the escalated
+        rung is a DIFFERENT model with its own passport — resolving once in __init__ would
+        leave the strong rung mis-tuned mid-turn. num_predict is pushed onto the backend
+        itself (reaching the real OllamaBackend even inside a RecordingBackend wrapper);
+        an engine without that knob (OpenAI-compat) simply doesn't carry the attribute.
+        An empty passport returns the defaults, so this is a no-op for un-profiled models."""
+        base = {"loop_threshold": DEFAULT_LOOP_THRESHOLD, "heat_bump": DEFAULT_HEAT_BUMP,
+                "num_predict": backends.NUM_PREDICT}
+        target = getattr(self.backend, "_inner", self.backend)  # unwrap a RecordingBackend
+        if hasattr(target, "num_predict"):
+            base["num_predict"] = target.num_predict
+        try:
+            k = profile.knobs(self.backend.name, base)
+        except Exception:
+            k = base
+        self.loop_threshold = k.get("loop_threshold", DEFAULT_LOOP_THRESHOLD)
+        self.heat_bump = k.get("heat_bump", DEFAULT_HEAT_BUMP)
+        if hasattr(target, "num_predict"):
+            target.num_predict = k.get("num_predict", target.num_predict)
 
     # ---- context management ----
     def _fill(self):
@@ -995,6 +1039,8 @@ class Agent:
             for alias in self._aliases:
                 if isinstance(act.get(alias), str) and act[alias]:
                     act["path"] = act[alias]
+                    if self._passport_on:   # P5.8 passport telemetry: this model mis-names the path field
+                        profile.record(self.backend.name, "alias_repair")
                     break
 
     def _resend_variant(self, act, kind, pin, step, missing, trace):
@@ -1119,6 +1165,7 @@ class Agent:
         self.tier -= 1
         self.backend = self.ladder[self.tier]
         self._aliases = profiles.resolve(self.backend.name).get("aliases", ())
+        self._resolve_knobs()   # P5.8: re-tune for the rung we dropped back to
         self.clean_streak = 0
         self._prewarmed = False
         self.on_event("deescalate", model=self.backend.name)
@@ -1445,12 +1492,20 @@ class Agent:
                         if act is None:
                             self.stuck["malformed"] += 1
                             self._bump_stuck("malformed", STUCK_MALFORMED_W)   # P5.7
-                            self._heat = min(0.7, self._heat + 0.4)   # P5.5
+                            self._heat = min(0.7, self._heat + self.heat_bump)   # P5.5 / P5.8
                             trace["malformed"] = True
                             self.on_event("malformed")
                             self.session.log("malformed", v=TRACE_V, step=step, raw=raw[:200])
                             # P5.6: tally the strike (keys the cold-start head-pin).
                             exemplars.record_malformed(self.backend.name)
+                            # P5.8 passport telemetry: a malformed strike, and — when the
+                            # output was a truncated write_file (the num_predict-budget
+                            # failure) — a `trunc_write` too, so the passport can raise
+                            # this model's output budget.
+                            if self._passport_on:
+                                profile.record(self.backend.name, "malformed")
+                                if exemplars.guess_kind(raw) == "write_file":
+                                    profile.record(self.backend.name, "trunc_write")
                             # P5.7: route the THIRD malformed strike through _borrow —
                             # the failure mode MOST correlated with model size, which the
                             # old loop aborted at 5 without ever consulting a stronger
@@ -1533,7 +1588,7 @@ class Agent:
                         # only fire when self.mode == "plan") — perturb so the model
                         # proposes a genuinely different action, not the same one again.
                         if self.mode == "manual":
-                            self._heat = min(0.7, self._heat + 0.4)
+                            self._heat = min(0.7, self._heat + self.heat_bump)
                         trace["gated"] = True
                         self.on_event("action", action=kind,
                                       detail=act.get("command") or act.get("path") or act.get("target") or "")
@@ -1601,13 +1656,16 @@ class Agent:
                     sig = f"{kind}:{act.get('command') or act.get('path') or act.get('pattern') or ''}:{act.get('offset', '')}"
                     trace["sig"] = sig
                     recent.append(sig)
-                    if self._lv("loop_detect") and recent[-3:].count(sig) >= 3:
+                    # P5.8: loop_threshold is per-model (2 for loop-prone models, 3 default).
+                    if self._lv("loop_detect") and recent[-self.loop_threshold:].count(sig) >= self.loop_threshold:
                         self._bump_stuck("loop", STUCK_LOOP_W)   # P5.7
-                        self._heat = min(0.7, self._heat + 0.4)   # P5.5
+                        self._heat = min(0.7, self._heat + self.heat_bump)   # P5.5 / P5.8
                         trace["loop_trip"] = True
                         self.on_event("loop")
                         self.session.log("loop", v=TRACE_V, step=step, sig=sig, cause="repeat")
-                        self.messages.append({"role": "user", "content": "You repeated the same action 3x with no progress. Do something different, or `say` if the task is already done."})
+                        if self._passport_on:
+                            profile.record(self.backend.name, "loop")   # P5.8 passport telemetry
+                        self.messages.append({"role": "user", "content": f"You repeated the same action {self.loop_threshold}x with no progress. Do something different, or `say` if the task is already done."})
                         recent.clear()
                         continue
 
@@ -1732,6 +1790,12 @@ class Agent:
                             self._mutated.add("<bash>")   # a file-touching bash still gates `say`
                             self._verified = False
                     if ok and kind == "edit_file":
+                        # P5.8 passport telemetry: classify the edit from execute()'s
+                        # "(fuzzy)/(exact)" observation suffix — a model that leans on the
+                        # whitespace-tolerant fuzzy path is bad at reproducing exact text.
+                        if self._passport_on:
+                            profile.record(self.backend.name,
+                                           "fuzzy_edit" if "(fuzzy)" in (obs or "") else "exact_edit")
                         self.on_event("diff", path=act.get("path", ""), old=act.get("old", ""), new=act.get("new", ""))
                     elif ok and kind == "write_file":
                         self.on_event("diff", path=act.get("path", ""), old=before, new=act.get("content", ""))
@@ -1746,7 +1810,7 @@ class Agent:
                         self._bump_stuck("fail", STUCK_FAIL_W)   # P5.7 tool failure +1
                         self.stuck["last_err_by_sig"][sig] = next(
                             (ln.strip() for ln in (obs or "").splitlines() if ln.strip()), "")[:200]
-                        self._heat = min(0.7, self._heat + 0.4)   # P5.5
+                        self._heat = min(0.7, self._heat + self.heat_bump)   # P5.5 / P5.8
                         tag = "  ⚠ this action FAILED — diagnose the cause before retrying.\n"
                         # per-command repeat (survives interleaved successes, unlike a consecutive counter)
                         if self._lv("loop_detect") and sig_fails[sig] >= SIG_FAIL_BORROW_AT:
@@ -1754,6 +1818,8 @@ class Agent:
                             trace["loop_trip"] = True
                             self.on_event("loop")
                             self.session.log("loop", v=TRACE_V, step=step, sig=sig, cause="fail", count=sig_fails[sig])
+                            if self._passport_on:
+                                profile.record(self.backend.name, "loop")   # P5.8 passport telemetry
                             tag = (f"  ⚠ `{sig}` has now failed {sig_fails[sig]} times. STOP retrying this exact thing. "
                                    "Change approach entirely: re-read the real file/error, rewrite with write_file instead of edit_file, "
                                    "or `say` to tell the user you're stuck and exactly what failed.\n")
@@ -1767,9 +1833,12 @@ class Agent:
                         # or giving up. All still local. Takes precedence over the borrow.
                         if self.stuck["score"] >= self.stuck_at:
                             if self._lv("escalation") and self.tier < len(self.ladder) - 1:
+                                if self._passport_on:   # P5.8: the escalation belongs to the rung being LEFT
+                                    profile.record(self.backend.name, "escalate")
                                 self.tier += 1
                                 self.backend = self.ladder[self.tier]
                                 self._aliases = profiles.resolve(self.backend.name).get("aliases", ())
+                                self._resolve_knobs()   # P5.8: re-tune for the stronger rung
                                 self._prewarmed = False
                                 trace["escalated"] = True
                                 self.on_event("escalate", model=self.backend.name)

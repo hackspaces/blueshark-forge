@@ -15,7 +15,13 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from forge import session as sm            # noqa: E402
 from forge import ledger as ledger_mod     # noqa: E402
+from forge import profile as _profile      # noqa: E402
 from forge.agent import Agent              # noqa: E402
+
+# P5.8 hermetic redirect: Agents built here record passport telemetry; keep it out of
+# the real ~/.forge/profile (and out of the heat/loop assertions below) by pointing the
+# store at a throwaway tempdir for this module's whole lifetime.
+_profile.PROFILE_DIR = tempfile.mkdtemp(prefix="forge-profile-forge-suite-")
 from forge.ledger import Ledger            # noqa: E402
 from forge.backends import make_backend, OllamaBackend, OpenAICompatBackend  # noqa: E402
 from forge.tools import (execute, dry_run, _fuzzy_replace, _syntax_error, _which,  # noqa: E402
@@ -1805,6 +1811,16 @@ class TestRetryHeat(unittest.TestCase):
     0.7); a clean execution resets it to 0.0. The first sample of each generation
     carries this heat, so a stuck 3B is perturbed instead of re-emitting the same
     greedy action."""
+
+    def setUp(self):
+        # P5.8: isolate passport telemetry PER TEST so accumulated malformed strikes
+        # across this class's runs can't tip the "heat" model into malformed-prone and
+        # change heat_bump (0.4 → 0.5) out from under these exact-schedule assertions.
+        self._prev_pp = _profile.PROFILE_DIR
+        _profile.PROFILE_DIR = tempfile.mkdtemp(prefix="forge-profile-heat-")
+
+    def tearDown(self):
+        _profile.PROFILE_DIR = self._prev_pp
 
     def test_schedule_malformed_fail_success_reset(self):
         # 0.0 (greedy) -> malformed bumps to 0.4 -> a failed action bumps to 0.7 ->
