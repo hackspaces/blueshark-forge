@@ -1341,6 +1341,109 @@ class TestPathlessFileActions(unittest.TestCase):
         self.assertTrue(os.path.exists(os.path.join(d, "pkg/x.go")))
 
 
+class TestSalvageAndProfiles(unittest.TestCase):
+    """P5.4: a deterministic salvage pass recovers fenced / prose-wrapped /
+    trailing-comma action JSON for free BEFORE it counts a malformed strike, and the
+    path-field alias table now lives in forge/profiles.py resolved from backend.name.
+    Mirrors the malformed-bailout tests (a genuinely-broken output still strikes)."""
+
+    _SAY = '{"thought":"t","action":"say","message":"done"}'
+
+    def _run(self, raws, max_steps=8):
+        """Drive a send() over a scripted sequence of RAW model outputs; return
+        (result, RecSession) so tests can inspect the salvage/malformed logs."""
+        d = tempfile.mkdtemp()
+        sess = _RecSession(d)
+        a = Agent(ScriptBackend(raws), sess, max_steps=max_steps)
+        return a.send("go"), sess, d
+
+    def _kinds(self, sess, k):
+        return [f for kind, f in sess.logs if kind == k]
+
+    def test_fenced_json_salvages_without_strike(self):
+        raw = "```json\n" + self._SAY + "\n```"
+        result, sess, _ = self._run([raw])
+        self.assertEqual(result, "done")                         # action executed
+        salv = self._kinds(sess, "salvage")
+        self.assertEqual([s["stage"] for s in salv], ["fence"])
+        self.assertEqual(self._kinds(sess, "malformed"), [])     # NOT a strike
+
+    def test_prose_prefixed_json_salvages_via_brace_scan(self):
+        raw = "Sure, here is the action:\n" + self._SAY + "\nLet me know!"
+        result, sess, _ = self._run([raw])
+        self.assertEqual(result, "done")
+        self.assertEqual([s["stage"] for s in self._kinds(sess, "salvage")], ["brace"])
+        self.assertEqual(self._kinds(sess, "malformed"), [])
+
+    def test_trailing_comma_json_salvages(self):
+        raw = '{"thought":"t","action":"say","message":"done",}'
+        result, sess, _ = self._run([raw])
+        self.assertEqual(result, "done")
+        self.assertEqual([s["stage"] for s in self._kinds(sess, "salvage")], ["trailing_comma"])
+        self.assertEqual(self._kinds(sess, "malformed"), [])
+
+    def test_salvaged_action_executes_and_writes_file(self):
+        """A salvaged non-say action runs like a normal parsed action."""
+        obj = '{"thought":"t","action":"write_file","path":"out.txt","content":"hi\\n"}'
+        result, sess, d = self._run(["```\n" + obj + "\n```", self._SAY])
+        self.assertEqual(result, "done")
+        with open(os.path.join(d, "out.txt")) as f:
+            self.assertEqual(f.read(), "hi\n")
+        self.assertEqual([s["stage"] for s in self._kinds(sess, "salvage")], ["fence"])
+
+    def test_salvage_does_not_advance_the_strike_counter(self):
+        """Four genuinely-broken outputs (bad=4) then a fenced action: salvage recovers
+        it instead of tripping the abort-at-5, proving salvage never counts a strike."""
+        raws = ["not json"] * 4 + ["```json\n" + self._SAY + "\n```"]
+        result, sess, _ = self._run(raws)
+        self.assertEqual(result, "done")
+        self.assertEqual(len(self._kinds(sess, "malformed")), 4)  # only the real ones
+        self.assertEqual(len(self._kinds(sess, "salvage")), 1)
+
+    def test_genuinely_broken_still_strikes_and_logs_malformed(self):
+        from forge.agent import TRACE_V
+        result, sess, _ = self._run(["this is not json at all"] * 6, max_steps=10)
+        self.assertIn("could not hold", result)                  # bails, unchanged
+        malformed = self._kinds(sess, "malformed")
+        self.assertTrue(malformed and all(m["v"] == TRACE_V for m in malformed))
+        self.assertEqual(self._kinds(sess, "salvage"), [])       # nothing salvaged
+
+    def test_truncated_object_is_not_salvageable(self):
+        """A NUM_PREDICT-truncated tail has no complete object to slice — it must fall
+        through to the malformed strike, not be falsely recovered."""
+        raw = '{"thought":"t","action":"write_file","path":"a.py","content":"def f():'
+        result, sess, _ = self._run([raw] * 6, max_steps=10)
+        self.assertIn("could not hold", result)
+        self.assertEqual(self._kinds(sess, "salvage"), [])
+        self.assertTrue(self._kinds(sess, "malformed"))
+
+    def test_alias_table_lives_in_profiles_and_resolves(self):
+        from forge import profiles
+        default = profiles.resolve("script")["aliases"]
+        self.assertEqual(default, ("filename", "file", "filepath", "file_path", "name"))
+        # a qwen-named backend still resolves filename/file/etc (case-insensitive)
+        for alias in ("filename", "file", "filepath", "file_path", "name"):
+            self.assertIn(alias, profiles.resolve("ollama:qwen2.5-coder:3b")["aliases"])
+            self.assertIn(alias, profiles.resolve("openai:Qwen-72B")["aliases"])
+        self.assertEqual(profiles.resolve(None)["aliases"], default)
+
+    def test_agent_resolves_alias_table_from_backend_name(self):
+        """The Agent pulls its alias table from profiles.resolve(backend.name), and a
+        qwen backend still honors a `filename` alias end-to-end (P3.2 behavior intact
+        after the table moved to data)."""
+        d = tempfile.mkdtemp()
+        b = ScriptBackend([
+            '{"thought":"t","action":"write_file","filename":"q.go","content":"package main\\n"}',
+            self._SAY,
+        ])
+        b.name = "ollama:qwen2.5-coder:3b"
+        a = Agent(b, sm.EphemeralSession(d, "s"), max_steps=6)
+        self.assertIn("filename", a._aliases)
+        a.send("make it")
+        with open(os.path.join(d, "q.go")) as f:
+            self.assertEqual(f.read(), "package main\n")
+
+
 class TestActionGrammar(unittest.TestCase):
     """P5.1 state-dependent action grammar: per-action variants with the right
     required fields, and a per-step legal-action narrowing (mutating actions gone

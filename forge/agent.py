@@ -20,6 +20,7 @@ import time
 
 from . import __version__
 from . import backends
+from . import profiles
 from .ledger import Ledger
 from .tools import (ACTION_SCHEMA, ACTION_VARIANTS, ALL_ACTIONS, TOOL_HELP,
                     build_schema, required_fields, execute, dry_run, shape, error_hint)
@@ -67,6 +68,47 @@ _TEST_CMD_RE = re.compile(
     r"(python[0-9.]*|py) -m (unittest|pytest))\b")
 _SHELL_SEP_RE = re.compile(r"[;&|\n]+")
 _NOOP_FLAGS = frozenset(("--version", "-V", "--help", "-h", "--collect-only"))
+
+# P5.4 deterministic JSON salvage. On advisory (strict:False) OpenAI-compat engines
+# a small model routinely wraps its action JSON in ``` fences, prepends prose, or
+# leaves a trailing comma — each of which today counts a malformed strike toward the
+# turn abort at 5. These stdlib passes recover the object for free. (Truncated output
+# — NUM_PREDICT ran out mid-object — is genuinely unrecoverable and still strikes.)
+# _FENCE_RE strips a LEADING ```lang fence and a TRAILING ``` (anchored, so a fence
+# inside a string value is left alone). _TRAILING_COMMA_RE drops a comma before } or ].
+_FENCE_RE = re.compile(r"\A\s*```[a-zA-Z0-9_+.-]*[ \t]*\n?|\n?[ \t]*```\s*\Z")
+_TRAILING_COMMA_RE = re.compile(r",(\s*[}\]])")
+
+
+def _first_json_object(text):
+    """Slice the first balanced top-level {...} object out of `text`, tracking string
+    and escape state so braces inside string literals don't move the brace depth.
+    Returns the substring (including its braces) or None if there is no '{' or the
+    first object never closes (e.g. a truncated tail)."""
+    start = text.find("{")
+    if start < 0:
+        return None
+    depth = 0
+    in_str = False
+    esc = False
+    for i in range(start, len(text)):
+        c = text[i]
+        if in_str:
+            if esc:
+                esc = False
+            elif c == "\\":
+                esc = True
+            elif c == '"':
+                in_str = False
+        elif c == '"':
+            in_str = True
+        elif c == "{":
+            depth += 1
+        elif c == "}":
+            depth -= 1
+            if depth == 0:
+                return text[start:i + 1]
+    return None
 
 
 def _is_test_cmd(command, cwd):
@@ -258,6 +300,11 @@ class Agent:
         # gates each mechanism site so the default path is unchanged.
         self.levers = frozenset(levers) if levers is not None else ALL_LEVERS
         self._lv = lambda n: n in self.levers
+        # P5.4 per-model-family dialect profiles: resolve the path-field alias table
+        # from the backend name (data in forge/profiles.py). A non-matching backend
+        # resolves to the universal default list, so alias_repair is byte-for-byte
+        # unchanged; a qwen-family backend gets the family's recorded extras merged in.
+        self._aliases = profiles.resolve(self.backend.name).get("aliases", ())
         base = (system if system is not None else SYSTEM) + (AUTONOMOUS if autonomous else "")
         self.messages = [{"role": "system", "content": base}]
         if workspace and self._lv("workspace"):
@@ -344,6 +391,7 @@ class Agent:
         self.ladder = ladder
         self.tier = 0
         self.backend = ladder[0]
+        self._aliases = profiles.resolve(self.backend.name).get("aliases", ())  # P5.4: re-resolve the family alias table
 
     # ---- context management ----
     def _fill(self):
@@ -840,11 +888,55 @@ class Agent:
                 raise
         return raw
 
+    def _salvage(self, raw):
+        """P5.4 deterministic JSON salvage. Called from the malformed branch BEFORE a
+        strike is counted: recover an action object that a small model wrapped in ```
+        fences, prefixed with prose, or capped with a trailing comma. Three stdlib
+        stages, each retried with json.loads, applied cumulatively; returns
+        (parsed_dict, stage_name) on the first that yields a dict, or (None, None) for
+        the genuinely-unsalvageable case (e.g. NUM_PREDICT truncation — no complete
+        top-level object exists). Only a dict counts: a bare list/number is not an
+        action. Pure telemetry-and-recovery; never raises."""
+        if not isinstance(raw, str):
+            return None, None
+
+        def _obj(s):
+            try:
+                v = json.loads(s)
+            except (ValueError, TypeError):
+                return None
+            return v if isinstance(v, dict) else None
+
+        # stage 1 — strip surrounding whitespace + a leading/trailing markdown fence.
+        s = _FENCE_RE.sub("", raw.strip()).strip()
+        o = _obj(s)
+        if o is not None:
+            return o, "fence"
+
+        # stage 2 — escape-aware brace scan: slice the first complete top-level object
+        # (drops a prose prefix/suffix). No object → nothing more to try.
+        sliced = _first_json_object(s)
+        if sliced is None:
+            return None, None
+        s = sliced
+        o = _obj(s)
+        if o is not None:
+            return o, "brace"
+
+        # stage 3 — drop trailing commas before } or ] and retry once more.
+        s = _TRAILING_COMMA_RE.sub(r"\1", s)
+        o = _obj(s)
+        if o is not None:
+            return o, "trailing_comma"
+
+        return None, None
+
     def _alias_path(self, act):
         """P3.2 alias_repair: fill a missing `path` from a small model's aliases
-        (filename/file/…). No-op unless the alias_repair lever is on."""
+        (filename/file/…). The alias table is resolved once in __init__ from the
+        backend name (P5.4 profiles.py). No-op unless the alias_repair lever is on."""
         if self._lv("alias_repair") and act.get("action") in ("read_file", "write_file", "edit_file") and not act.get("path"):
-            for alias in ("filename", "file", "filepath", "file_path", "name"):
+            for alias in self._aliases:
                 if isinstance(act.get(alias), str) and act[alias]:
                     act["path"] = act[alias]
                     break
@@ -1188,14 +1280,23 @@ class Agent:
                     try:
                         act = json.loads(raw)
                     except json.JSONDecodeError:
-                        bad += 1
-                        trace["malformed"] = True
-                        self.on_event("malformed")
-                        self.session.log("malformed", v=TRACE_V, step=step, raw=raw[:200])
-                        self.messages.append({"role": "user", "content": "That was not valid action JSON. Reply with one JSON action object only."})
-                        if bad >= 5:
-                            return "(the model could not hold the action format)"
-                        continue
+                        # P5.4: before counting a strike, try the deterministic salvage
+                        # pass (strip fences / prose prefix / trailing comma). A recovered
+                        # object proceeds as a normal parsed action and does NOT strike;
+                        # only the genuinely-unsalvageable case (e.g. truncation) falls
+                        # through to the malformed strike + text nudge + abort-at-5.
+                        act, stage = self._salvage(raw)
+                        if act is None:
+                            bad += 1
+                            trace["malformed"] = True
+                            self.on_event("malformed")
+                            self.session.log("malformed", v=TRACE_V, step=step, raw=raw[:200])
+                            self.messages.append({"role": "user", "content": "That was not valid action JSON. Reply with one JSON action object only."})
+                            if bad >= 5:
+                                return "(the model could not hold the action format)"
+                            continue
+                        self.on_event("salvage", stage=stage)
+                        self.session.log("salvage", v=TRACE_V, step=step, stage=stage)
                     bad = 0
                     self.messages.append({"role": "assistant", "content": raw})
                     # P4.2 meta: tag the assistant echo. A write_file echo carries the
