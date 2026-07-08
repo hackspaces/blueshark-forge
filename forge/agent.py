@@ -29,6 +29,21 @@ from .tools import (ACTION_SCHEMA, ACTION_VARIANTS, ALL_ACTIONS, TOOL_HELP,
 STUCK_AT = int(os.environ.get("FORGE_STUCK_THRESHOLD", "7"))  # failures before escalating a rung
 TRACE_V = 1  # P3.1 schema version stamped on every meta/step/compact/loop/malformed record
 
+# P5.7 step-scoped borrowing + unified stuck ledger. ONE weighted per-turn score
+# (replacing the old disjoint bad / fail_counts / total_fails) accrues on each stuck
+# signal and drives escalation at self.stuck_at; a clean step decrements it and, after
+# CLEAN_DECAY consecutive clean steps, relaxes one escalation rung. _borrow buys ONE
+# generation from the next rung — WITHOUT swapping self.backend — at the exact points
+# the cheap model is provably stuck (the 3rd malformed strike, a repeated per-sig fail).
+STUCK_MALFORMED_W = 1.75    # malformed-strike weight
+STUCK_LOOP_W = 2.0          # loop-trip weight (3x-repeat, or a repeated per-sig failure)
+STUCK_FAIL_W = 1.0          # tool-failure weight
+STUCK_PROGRESS_W = 1.0      # a clean step decrements the score by this
+CLEAN_DECAY = 6             # consecutive clean steps that relax one escalation rung
+MALFORMED_BORROW_AT = 3     # borrow one strong generation on the Nth malformed strike…
+MALFORMED_ABORT_AT = 5      # …before the turn aborts at this many
+SIG_FAIL_BORROW_AT = 3      # borrow when one action signature has failed this many times
+
 # P4.2 structural compaction: the zero-model-call deterministic pass runs when the
 # window is this full, BEFORE the LLM summarizer (~0.70). Failed-action observation
 # bodies older than this many steps are shrunk to their first error line.
@@ -364,6 +379,28 @@ class Agent:
         self._prefix_hash = None         # FORGE_DEBUG prefix-mutation audit (off by default)
         from . import config as _cfg
         self.approvals = set(_cfg.get("approvals") or [])   # 'always'-approved action keys
+        # P5.7 stuck-ledger + tier-decay knobs. stuck_at REVIVES the long-dead
+        # `stuck_threshold` config key (the FORGE_STUCK_THRESHOLD env var still wins via
+        # the module default); sticky_escalation pins the tier so it does NOT decay back
+        # toward the cheap rung at turn boundaries. Both best-effort — a broken config
+        # must never fail Agent construction.
+        self.stuck_at = STUCK_AT
+        self.sticky_escalation = False
+        try:
+            if "FORGE_STUCK_THRESHOLD" not in os.environ:
+                _st = _cfg.get("stuck_threshold")
+                if isinstance(_st, int) and _st > 0:
+                    self.stuck_at = _st
+            self.sticky_escalation = bool(_cfg.get("sticky_escalation"))
+        except Exception:
+            pass
+        # P5.7 unified per-turn stuck ledger (re-seeded at every send() entry): one
+        # weighted score + per-signature fail counts + last error lines the borrow
+        # triggers key on. clean_streak drives the in-turn tier decay.
+        self.stuck = {"score": 0.0, "events": [], "last_err_by_sig": {},
+                      "malformed": 0, "sig_fails": {}, "borrows": 0}
+        self.clean_streak = 0
+        self._prewarmed = False
         # P4.5 just-in-time retrieval: the project's test command, detected ONCE
         # (fleet.detect_test_cmd is otherwise computed only inside verify() and
         # never surfaced to the working agent). The file-list + symbol tables are
@@ -1040,6 +1077,91 @@ class Agent:
             self._tag_last({"kind": "assistant", "action": best_act.get("action"), "step": step})
         return best_act, best_act.get("action")
 
+    # ---- P5.7 unified stuck ledger + step-scoped borrowing + tier decay ----
+    def _bump_stuck(self, kind, delta):
+        """Move the unified per-turn stuck score and record the event. A positive delta
+        (a stuck signal: malformed / loop / tool failure) also breaks the clean streak
+        and, once within two of the escalation threshold, pre-warms the next rung so a
+        borrow or escalation pays no cold-load latency. A negative delta (verified
+        progress) only relaxes the score."""
+        self.stuck["score"] = max(0.0, self.stuck["score"] + delta)
+        self.stuck["events"].append((kind, delta))
+        if delta > 0:
+            self.clean_streak = 0
+            if self.stuck["score"] >= self.stuck_at - 2:
+                self._prewarm_next()
+
+    def _prewarm_next(self):
+        """Pre-warm the next-stronger rung in a background thread so escalation /
+        borrowing is instant. Fires at most once per rung per turn, only when a stronger
+        rung exists and the escalation lever is on."""
+        if self._prewarmed or not self._lv("escalation"):
+            return
+        nxt = self.tier + 1
+        if nxt >= len(self.ladder):
+            return
+        b = self.ladder[nxt]
+        if not hasattr(b, "warm"):
+            return
+        self._prewarmed = True
+        try:
+            threading.Thread(target=b.warm, daemon=True).start()
+        except Exception:
+            pass
+
+    def _deescalate(self):
+        """Tier decay: relax one rung back toward the cheap model (propose-small again),
+        swapping self.backend and re-resolving the family alias table. No-op at the base
+        rung. Called at the turn boundary (unless sticky_escalation) and after
+        CLEAN_DECAY consecutive clean steps."""
+        if self.tier <= 0:
+            return
+        self.tier -= 1
+        self.backend = self.ladder[self.tier]
+        self._aliases = profiles.resolve(self.backend.name).get("aliases", ())
+        self.clean_streak = 0
+        self._prewarmed = False
+        self.on_event("deescalate", model=self.backend.name)
+        self.session.log("deescalate", v=TRACE_V, model=self.backend.name)
+
+    def _borrow(self, prompt, step, trace):
+        """Buy ONE generation from the next-stronger rung WITHOUT swapping self.backend
+        (unlike escalation, which sticks). Used at the exact points the cheap model is
+        provably stuck — the third malformed strike, and a per-signature failure that
+        keeps repeating — so the strong rung proposes one action and the cheap model
+        resumes with it as an in-context demonstration. Warms the rung, generates under
+        the CURRENT step's grammar, appends the borrowed action tagged with provenance,
+        and returns (raw, act) — or (None, None) when the escalation lever is off, there
+        is no stronger rung, we're replaying, or the borrow yielded no usable action."""
+        if not self._lv("escalation") or getattr(self.backend, "replay", False):
+            return None, None
+        nxt = self.tier + 1
+        if nxt >= len(self.ladder):
+            return None, None
+        b = self.ladder[nxt]
+        try:
+            if hasattr(b, "warm"):
+                b.warm()
+            schema = build_schema(self._legal_actions(), self.mode) if self._lv("schema") else None
+            raw = b.chat(prompt, schema=schema)
+        except Exception:
+            return None, None
+        try:
+            act = json.loads(raw)
+        except (json.JSONDecodeError, TypeError):
+            act, _ = self._salvage(raw)
+        if not isinstance(act, dict):
+            return None, None
+        self._alias_path(act)
+        self.stuck["borrows"] += 1
+        trace["borrowed"] = b.name
+        self.on_event("borrow", model=b.name, action=act.get("action"))
+        self.session.log("borrow", v=TRACE_V, step=step, model=b.name, action=act.get("action"))
+        self.messages.append({"role": "user", "content":
+            f"[borrowed from {b.name}] The cheap model was stuck, so a stronger local "
+            f"rung proposed this next action given your exact context:\n{raw}"})
+        return raw, act
+
     def _absorb_inbox(self):
         for m in self.session.drain():
             tag = "[user (mid-run — steer accordingly)]" if m["from"] == "user" \
@@ -1256,10 +1378,19 @@ class Agent:
         self._heat = 0.0   # P5.5: greedy for the first try of every turn
         self.session.log("user", text=user_text)
         self.session.set_status("working")
-        bad = 0
         recent = []
-        fail_counts = {}
-        total_fails = 0
+        # P5.7 unified per-turn stuck ledger — one weighted score (replacing the old
+        # disjoint bad / fail_counts / total_fails) drives escalation at self.stuck_at;
+        # `malformed` and `sig_fails` still count the two borrow triggers.
+        self.stuck = {"score": 0.0, "events": [], "last_err_by_sig": {},
+                      "malformed": 0, "sig_fails": {}, "borrows": 0}
+        self.clean_streak = 0
+        self._prewarmed = False
+        # P5.7 tier decay: relax one escalation rung at the turn boundary (so the next
+        # turn proposes-small again) unless the machine pins escalation sticky. No-op at
+        # the base rung.
+        if not self.sticky_escalation:
+            self._deescalate()
         try:
             for step in range(1, self.max_steps + 1):
                 if self.stop.is_set():
@@ -1312,32 +1443,47 @@ class Agent:
                         # through to the malformed strike + text nudge + abort-at-5.
                         act, stage = self._salvage(raw)
                         if act is None:
-                            bad += 1
+                            self.stuck["malformed"] += 1
+                            self._bump_stuck("malformed", STUCK_MALFORMED_W)   # P5.7
                             self._heat = min(0.7, self._heat + 0.4)   # P5.5
                             trace["malformed"] = True
                             self.on_event("malformed")
                             self.session.log("malformed", v=TRACE_V, step=step, raw=raw[:200])
-                            # P5.6: tally the strike (keys the cold-start head-pin) and,
-                            # if we can guess what kind this output was ATTEMPTING, quote
-                            # one of the model's OWN past valid actions of that kind — a
-                            # far stronger anchor than the bare text nudge. Plain nudge
-                            # when no exemplar exists yet.
+                            # P5.6: tally the strike (keys the cold-start head-pin).
                             exemplars.record_malformed(self.backend.name)
-                            guessed = exemplars.guess_kind(raw)
-                            ex = exemplars.fetch(self.backend.name, guessed) if guessed else None
-                            if ex:
-                                nudge = (f"That was not valid action JSON. Here is a valid `{guessed}` action "
-                                         "you emitted earlier — reply with ONE JSON action object in exactly "
-                                         f"this shape:\n{ex}")
+                            # P5.7: route the THIRD malformed strike through _borrow —
+                            # the failure mode MOST correlated with model size, which the
+                            # old loop aborted at 5 without ever consulting a stronger
+                            # rung. A borrowed action replaces the stuck cheap output and
+                            # executes below (no strike, no abort). No stronger rung / the
+                            # escalation lever off → fall through to the nudge + abort-at-5.
+                            braw = bact = None
+                            if self.stuck["malformed"] >= MALFORMED_BORROW_AT:
+                                braw, bact = self._borrow(prompt, step, trace)
+                            if bact is not None:
+                                raw, act = braw, bact
+                                # fall through: execute the borrowed action this step.
                             else:
-                                nudge = "That was not valid action JSON. Reply with one JSON action object only."
-                            self.messages.append({"role": "user", "content": nudge})
-                            if bad >= 5:
-                                return "(the model could not hold the action format)"
-                            continue
-                        self.on_event("salvage", stage=stage)
-                        self.session.log("salvage", v=TRACE_V, step=step, stage=stage)
-                    bad = 0
+                                # P5.6: if we can guess what kind this output was
+                                # ATTEMPTING, quote one of the model's OWN past valid
+                                # actions of that kind — a far stronger anchor than the
+                                # bare text nudge. Plain nudge when no exemplar exists yet.
+                                guessed = exemplars.guess_kind(raw)
+                                ex = exemplars.fetch(self.backend.name, guessed) if guessed else None
+                                if ex:
+                                    nudge = (f"That was not valid action JSON. Here is a valid `{guessed}` action "
+                                             "you emitted earlier — reply with ONE JSON action object in exactly "
+                                             f"this shape:\n{ex}")
+                                else:
+                                    nudge = "That was not valid action JSON. Reply with one JSON action object only."
+                                self.messages.append({"role": "user", "content": nudge})
+                                if self.stuck["malformed"] >= MALFORMED_ABORT_AT:
+                                    return "(the model could not hold the action format)"
+                                continue
+                        else:
+                            self.on_event("salvage", stage=stage)
+                            self.session.log("salvage", v=TRACE_V, step=step, stage=stage)
+                    self.stuck["malformed"] = 0
                     self.messages.append({"role": "assistant", "content": raw})
                     # P4.2 meta: tag the assistant echo. A write_file echo carries the
                     # ENTIRE file content verbatim → mark it for structural collapse.
@@ -1456,6 +1602,7 @@ class Agent:
                     trace["sig"] = sig
                     recent.append(sig)
                     if self._lv("loop_detect") and recent[-3:].count(sig) >= 3:
+                        self._bump_stuck("loop", STUCK_LOOP_W)   # P5.7
                         self._heat = min(0.7, self._heat + 0.4)   # P5.5
                         trace["loop_trip"] = True
                         self.on_event("loop")
@@ -1540,6 +1687,12 @@ class Agent:
                     if ok:
                         self._heat = 0.0   # P5.5: a clean execution unsticks — back to greedy
                         exemplars.record(self.backend.name, kind, raw)   # P5.6: harvest this valid action
+                        # P5.7 verified progress: relax the stuck score and advance the
+                        # clean streak; CLEAN_DECAY clean steps in a row decay one rung.
+                        self._bump_stuck("progress", -STUCK_PROGRESS_W)
+                        self.clean_streak += 1
+                        if self.clean_streak >= CLEAN_DECAY and self.tier > 0:
+                            self._deescalate()
                     budget = self._obs_budget()
                     # P4.1 ledger population — a ranged read records only its span; a
                     # write/edit ingests the new content as the cached (diffable) version.
@@ -1581,25 +1734,38 @@ class Agent:
                     self.on_event("observation", text=obs, ok=ok)
 
                     tag = ""
+                    borrow_now = False
                     if not ok:
-                        fail_counts[sig] = fail_counts.get(sig, 0) + 1
-                        total_fails += 1
+                        sig_fails = self.stuck["sig_fails"]
+                        sig_fails[sig] = sig_fails.get(sig, 0) + 1
+                        self._bump_stuck("fail", STUCK_FAIL_W)   # P5.7 tool failure +1
+                        self.stuck["last_err_by_sig"][sig] = next(
+                            (ln.strip() for ln in (obs or "").splitlines() if ln.strip()), "")[:200]
                         self._heat = min(0.7, self._heat + 0.4)   # P5.5
                         tag = "  ⚠ this action FAILED — diagnose the cause before retrying.\n"
                         # per-command repeat (survives interleaved successes, unlike a consecutive counter)
-                        if self._lv("loop_detect") and fail_counts[sig] >= 3:
+                        if self._lv("loop_detect") and sig_fails[sig] >= SIG_FAIL_BORROW_AT:
+                            self._bump_stuck("fail_loop", STUCK_LOOP_W)   # P5.7 sustained per-sig loop +2
                             trace["loop_trip"] = True
                             self.on_event("loop")
-                            self.session.log("loop", v=TRACE_V, step=step, sig=sig, cause="fail", count=fail_counts[sig])
-                            tag = (f"  ⚠ `{sig}` has now failed {fail_counts[sig]} times. STOP retrying this exact thing. "
+                            self.session.log("loop", v=TRACE_V, step=step, sig=sig, cause="fail", count=sig_fails[sig])
+                            tag = (f"  ⚠ `{sig}` has now failed {sig_fails[sig]} times. STOP retrying this exact thing. "
                                    "Change approach entirely: re-read the real file/error, rewrite with write_file instead of edit_file, "
                                    "or `say` to tell the user you're stuck and exactly what failed.\n")
-                        # stuck: escalate to a stronger LOCAL model (same task, same
-                        # context) rather than grinding or giving up. All still local.
-                        if total_fails >= STUCK_AT:
+                            # P5.7: a per-signature failure that keeps repeating is the
+                            # SECOND borrow trigger — consult the stronger rung for one
+                            # action, appended (after the observation below) as an
+                            # in-context suggestion the cheap model can adopt next step.
+                            borrow_now = True
+                        # stuck: escalate to a stronger LOCAL model (unified stuck score
+                        # over threshold) — same task, same context — rather than grinding
+                        # or giving up. All still local. Takes precedence over the borrow.
+                        if self.stuck["score"] >= self.stuck_at:
                             if self._lv("escalation") and self.tier < len(self.ladder) - 1:
                                 self.tier += 1
                                 self.backend = self.ladder[self.tier]
+                                self._aliases = profiles.resolve(self.backend.name).get("aliases", ())
+                                self._prewarmed = False
                                 trace["escalated"] = True
                                 self.on_event("escalate", model=self.backend.name)
                                 self.session.log("escalate", model=self.backend.name)
@@ -1607,8 +1773,12 @@ class Agent:
                                     self.backend.warm()
                                 self.messages.append({"role": "user", "content":
                                     f"[The previous model kept failing. You are now a stronger model taking over the SAME task with full context above. Step back, re-diagnose from the real errors, and solve it. Last error: {obs[:200].strip()}]"})
-                                fail_counts.clear()
-                                total_fails = 0
+                                # reset the per-turn stuck ledger for a fresh start on the new rung
+                                self.stuck["score"] = 0.0
+                                self.stuck["sig_fails"].clear()
+                                self.stuck["last_err_by_sig"].clear()
+                                self.stuck["malformed"] = 0
+                                self.clean_streak = 0
                                 continue
                             stuck = (f"I'm stuck even after escalating through the local models. Last error: {obs[:200].strip()}. "
                                      "This needs a different approach — want me to try one, or take it yourself?")
@@ -1625,6 +1795,11 @@ class Agent:
                     # P4.2 meta: tag this observation (kind/action/path/step/ok) so the
                     # structural pass can stub superseded reads and shrink stale failures.
                     self._tag_last({"kind": "obs", "action": kind, "path": recorded_fp, "step": step, "ok": ok})
+                    # P5.7: the sig-fail borrow fires HERE (after the failed observation is
+                    # in context) so the stronger rung sees the actual failure it's asked
+                    # to route around; the borrowed action rides the next cheap step.
+                    if borrow_now:
+                        self._borrow(self.messages + ([pin] if pin else []), step, trace)
                     # P4.1: bind this file's observation to its message so a later
                     # compaction can detect (by identity) when it leaves context.
                     if recorded_fp:

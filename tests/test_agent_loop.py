@@ -163,8 +163,8 @@ class TestEscalationLadder(unittest.TestCase):
         events = []
         a = Agent([rung0, rung1], sm.EphemeralSession(d, "esc"), max_steps=20,
                   on_event=lambda k, **kw: events.append((k, kw)))
-        with mock.patch.object(agent_mod, "STUCK_AT", 3):
-            result = a.send("do it")
+        a.stuck_at = 3          # P5.7: the loop reads self.stuck_at (revived config key)
+        result = a.send("do it")
         self.assertEqual(a.tier, 1)                               # promoted a rung
         self.assertEqual(result, "done")                         # counters reset -> rung1 got 2 fresh fails
         escs = [kw for k, kw in events if k == "escalate"]
@@ -181,8 +181,8 @@ class TestEscalationLadder(unittest.TestCase):
         events = []
         a = Agent(b, sm.EphemeralSession(d, "stuck"), max_steps=20,
                   on_event=lambda k, **kw: events.append((k, kw)))
-        with mock.patch.object(agent_mod, "STUCK_AT", 3):
-            result = a.send("do it")
+        a.stuck_at = 3          # P5.7: the loop reads self.stuck_at (revived config key)
+        result = a.send("do it")
         self.assertEqual(a.tier, 0)                              # never escalated
         self.assertFalse(any(k == "escalate" for k, kw in events))
         self.assertIn("stuck", result.lower())                  # bailed with the stuck say
@@ -414,6 +414,158 @@ class TestInboxAbsorption(unittest.TestCase):
             any(m.get("content") == "[user (mid-run — steer accordingly)]: actually stop"
                 for m in a.messages),
             "a mid-run message from the user must get the steer tag, not the fleet tag")
+
+
+class _BorrowRung:
+    """A stronger ladder rung: its chat() — the _borrow entry point — records every
+    call (so a test can prove a borrow happened, and how many times) and returns a
+    scripted action. stream() serves the same action when this rung is driven directly;
+    warm() is a counted no-op."""
+    def __init__(self, action, name="strong"):
+        self.name = name
+        self._action = action
+        self.chat_calls = []
+        self.warmed = 0
+
+    def stream(self, messages, schema=None, temperature=0.0):
+        yield self._action
+
+    def chat(self, messages, schema=None, temperature=0.0):
+        self.chat_calls.append(list(messages))
+        return self._action
+
+    def warm(self):
+        self.warmed += 1
+
+
+_BASH_OK = '{"thought":"b","action":"bash","command":"true"}'
+
+
+class TestBorrowingAndDecay(unittest.TestCase):
+    """P5.7 — step-scoped borrowing (buy ONE strong-rung generation at the exact stuck
+    points, WITHOUT swapping self.backend) + unified stuck ledger + tier decay. Written
+    to FAIL if a mechanism is disabled: the 3rd malformed strike must borrow before the
+    abort-at-5, a repeated per-sig failure must borrow, the escalation lever OFF must
+    disable borrowing entirely, and an escalated tier must decay back."""
+
+    def test_third_malformed_strike_borrows_before_abort(self):
+        # three unsalvageable outputs → the 3rd routes through _borrow (rung1.chat) and
+        # the borrowed action executes, so the turn reaches "done" instead of aborting.
+        d = tempfile.mkdtemp()
+        cheap = _ScriptBackend(["not json", "not json", "not json", _SAY], name="weak")
+        strong = _BorrowRung(_BASH_OK, name="strong")
+        events = []
+        a = Agent([cheap, strong], sm.EphemeralSession(d, "mb"), max_steps=12,
+                  on_event=lambda k, **kw: events.append((k, kw)))
+        result = a.send("go")
+        self.assertEqual(len(strong.chat_calls), 1)          # borrowed exactly once, at strike 3
+        self.assertNotIn("could not hold", result)           # the borrow averted the abort
+        self.assertEqual(result, "done")
+        self.assertEqual(a.tier, 0)                          # borrow does NOT stick the tier
+        self.assertTrue(any(k == "borrow" and kw.get("model") == "strong" for k, kw in events))
+
+    def test_escalation_lever_off_disables_borrow(self):
+        # same stuck sequence but the escalation lever is OFF: no borrow ever, and the
+        # turn falls through to the unchanged malformed abort at 5 strikes.
+        d = tempfile.mkdtemp()
+        cheap = _ScriptBackend(["not json"] * 5, name="weak")
+        strong = _BorrowRung(_BASH_OK, name="strong")
+        levers = frozenset(agent_mod.ALL_LEVERS - {"escalation"})
+        a = Agent([cheap, strong], sm.EphemeralSession(d, "off"), max_steps=12, levers=levers)
+        result = a.send("go")
+        self.assertEqual(len(strong.chat_calls), 0)          # lever off → never borrows
+        self.assertIn("could not hold", result)              # abort-at-5 preserved
+
+    def test_repeated_sig_failure_borrows(self):
+        # the SAME failing action, repeated until its signature has failed 3x, is the
+        # second borrow trigger. stuck_at is pinned high so this is isolated from the
+        # score-driven escalation (which would otherwise fire on the same step).
+        d = tempfile.mkdtemp()
+        bx = _bash("false #x")
+        cheap = _ScriptBackend([bx, bx, bx, bx, _SAY], name="weak")
+        strong = _BorrowRung(_BASH_OK, name="strong")
+        events = []
+        a = Agent([cheap, strong], sm.EphemeralSession(d, "sf"), max_steps=12,
+                  on_event=lambda k, **kw: events.append((k, kw)))
+        a.stuck_at = 100
+        result = a.send("go")
+        self.assertEqual(len(strong.chat_calls), 1)          # borrowed when sig_fails hit 3
+        self.assertEqual(a.tier, 0)                          # borrow does NOT escalate
+        self.assertEqual(result, "done")
+        self.assertTrue(any(k == "borrow" for k, kw in events))
+
+    def test_tier_decays_after_clean_steps(self):
+        # forced to tier 1 (sticky, so the turn-boundary decay is suppressed); CLEAN_DECAY
+        # clean steps in a row must relax exactly one rung back to tier 0.
+        d = tempfile.mkdtemp()
+        cheap = _ScriptBackend([_SAY], name="weak")
+        clean = [_bash("true #%d" % i) for i in range(agent_mod.CLEAN_DECAY)]
+        strong = _ScriptBackend(clean + [_SAY], name="strong")
+        events = []
+        a = Agent([cheap, strong], sm.EphemeralSession(d, "decay"), max_steps=20,
+                  on_event=lambda k, **kw: events.append((k, kw)))
+        a.sticky_escalation = True
+        a.tier, a.backend = 1, a.ladder[1]
+        result = a.send("go")
+        self.assertEqual(a.tier, 0)                          # decayed one rung after clean steps
+        self.assertTrue(any(k == "deescalate" for k, kw in events))
+        self.assertEqual(result, "done")
+
+    def test_turn_boundary_decays_tier_unless_sticky(self):
+        # a fresh turn relaxes an escalated tier by one rung at send() entry…
+        d = tempfile.mkdtemp()
+        cheap = _ScriptBackend([_SAY], name="weak")
+        strong = _ScriptBackend([_SAY], name="strong")
+        events = []
+        a = Agent([cheap, strong], sm.EphemeralSession(d, "tb"), max_steps=4,
+                  on_event=lambda k, **kw: events.append((k, kw)))
+        a.sticky_escalation = False
+        a.tier, a.backend = 1, a.ladder[1]
+        a.send("go")
+        self.assertEqual(a.tier, 0)
+        self.assertTrue(any(k == "deescalate" for k, kw in events))
+
+    def test_sticky_escalation_pins_the_tier(self):
+        # …but sticky_escalation keeps it across the turn boundary.
+        d = tempfile.mkdtemp()
+        cheap = _ScriptBackend([_SAY], name="weak")
+        strong = _ScriptBackend([_SAY], name="strong")
+        events = []
+        a = Agent([cheap, strong], sm.EphemeralSession(d, "sticky"), max_steps=4,
+                  on_event=lambda k, **kw: events.append((k, kw)))
+        a.sticky_escalation = True
+        a.tier, a.backend = 1, a.ladder[1]
+        a.send("go")
+        self.assertEqual(a.tier, 1)                          # sticky → no decay
+        self.assertFalse(any(k == "deescalate" for k, kw in events))
+
+    def test_step_trace_flags_survive_borrowing(self):
+        # the P3.1 flight recorder must keep firing across a borrow: the malformed strike,
+        # the per-step trace, and the new `borrowed` provenance flag all land in the log.
+        d = tempfile.mkdtemp()
+        sess = _InboxSession(d)
+        cheap = _ScriptBackend(["not json", "not json", "not json", _SAY], name="weak")
+        strong = _BorrowRung(_BASH_OK, name="strong")
+        result = Agent([cheap, strong], sess, max_steps=12).send("go")
+        kinds = [k for k, f in sess.logs]
+        self.assertIn("malformed", kinds)
+        self.assertIn("borrow", kinds)
+        steps = [f for k, f in sess.logs if k == "step"]
+        self.assertTrue(steps)
+        self.assertTrue(all("v" in s and "step" in s and "tier" in s for s in steps))
+        self.assertTrue(any(s.get("malformed") for s in steps))          # P3.1 malformed flag
+        self.assertTrue(any(s.get("borrowed") == "strong" for s in steps))  # P5.7 borrow flag
+        self.assertEqual(result, "done")
+
+    def test_stuck_threshold_config_key_is_revived(self):
+        # the previously-dead config key now sets self.stuck_at at construction.
+        d = tempfile.mkdtemp()
+        from forge import config as cfg
+        with mock.patch.dict(os.environ, {}), \
+                mock.patch.object(cfg, "get", lambda k, *a: 4 if k == "stuck_threshold" else None):
+            os.environ.pop("FORGE_STUCK_THRESHOLD", None)   # env would otherwise win
+            a = Agent(_ScriptBackend([_SAY]), sm.EphemeralSession(d, "cfg"), max_steps=2)
+        self.assertEqual(a.stuck_at, 4)
 
 
 if __name__ == "__main__":

@@ -137,6 +137,10 @@ class UI:
             self._render_diff(k.get("path", ""), k.get("old", ""), k.get("new", ""))
         elif kind == "escalate":
             self._line(f"  {MG}↑ stuck — escalating to a stronger local model: {k['model']}{RST}")
+        elif kind == "borrow":
+            self._line(f"  {MG}⇡ borrowing one action from {k['model']}{RST}")
+        elif kind == "deescalate":
+            self._line(f"  {DIM}↓ recovered — back to {k['model']}{RST}")
         elif kind == "inbox":
             self._line(f"  {YE}✉ {k['sender']}: {k['text'][:76]}{RST}")
         elif kind == "compact":

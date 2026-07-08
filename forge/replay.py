@@ -341,6 +341,6 @@ def replay(sid, strict=False):
 def _flagstr(rec):
     if not rec:
         return "-"
-    flags = [f for f in ("malformed", "gated", "loop_trip", "compacted", "escalated")
+    flags = [f for f in ("malformed", "gated", "loop_trip", "compacted", "escalated", "borrowed")
              if rec.get(f)]
     return ",".join(flags) or "-"

@@ -15,7 +15,8 @@ DEFAULTS = {
     "num_ctx": 8192,
     "keep_alive": "30m",
     "num_predict": 2048,
-    "stuck_threshold": 7,
+    "stuck_threshold": 7,          # P5.7 unified stuck-score escalation threshold
+    "sticky_escalation": False,    # P5.7 keep an escalated tier across turns (no decay)
     "verbose": False,
     "wake": "off",          # idle wake-on-inbox: off | render | act (auto-act fleet msgs)
     "approvals": [],        # manual-mode 'always' approvals (e.g. "bash:git", "edit_file")

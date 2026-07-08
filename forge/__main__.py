@@ -121,6 +121,10 @@ def cmd_run(args):
                 print(f"\n{k.get('message','')}")
         elif kind == "escalate":
             print(f"  ↑ stuck — escalating to {k['model']}")
+        elif kind == "borrow":
+            print(f"  ⇡ borrowing one action from {k['model']}")
+        elif kind == "deescalate":
+            print(f"  ↓ recovered — back to {k['model']}")
         elif kind == "inbox":
             print(f"  ✉ {k['sender']}: {k['text'][:70]}")
     agent = Agent(_make_ladder(args.model), s, on_event=on_event, max_steps=args.max_steps, autonomous=True,
@@ -273,7 +277,7 @@ def cmd_trace(args):
     steps = [r for r in recs if r.get("type") == "step"]
     if not steps:
         print("(no step records)"); return
-    FLAGS = ("malformed", "loop_trip", "gated", "escalated", "compacted")
+    FLAGS = ("malformed", "loop_trip", "gated", "escalated", "borrowed", "compacted")
     print(f"{'step':>4}  {'tier':>4}  {'action':<11}  {'fill':>5}  {'ok':>4}  {'flags':<30}  {'ms':>6}")
     print("-" * 74)
     for r in steps:
