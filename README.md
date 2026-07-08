@@ -293,7 +293,9 @@ same fleet system first prototyped on Claude Code, now native and vendor-free.
 forge/
   backends.py   model-agnostic backends (Ollama + OpenAI-compatible) + routing
   tools.py      tools (bash/read/write/edit/grep/glob/fleet_send) + action schema
-                (read_file {outline:true} maps a big file's defs/classes → line numbers)
+                (read_file numbers every line; edit_file takes {start_line,end_line,anchor,new}
+                 to splice a range — no exact-text reproduction — or {old,new} as fallback;
+                 read_file {outline:true} maps a big file's defs/classes → line numbers)
   agent.py      the agent loop (harness brain) + levers + context management
   workspace.py  workspace + machine awareness (recency-ranked repo map w/ per-dir
                 rollups, symbol briefing, project type, git, tools)

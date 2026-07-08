@@ -3099,6 +3099,171 @@ class TestFileStateLedger(unittest.TestCase):
         self.assertEqual(_read(fp), "value = 2\n")
 
 
+class TestLineAnchoredEdit(unittest.TestCase):
+    """P5.3 — line-numbered reads + the line-anchored edit dialect: number the
+    reads, splice by range with a fail-closed anchor, and re-arm staleness after a
+    splice (shifted numbers) so an out-of-window edit needs a fresh numbered read."""
+
+    def setUp(self):
+        self.d = tempfile.mkdtemp()
+
+    # ---- numbered reads --------------------------------------------------------
+    def test_read_prefixes_absolute_line_numbers(self):
+        _write(os.path.join(self.d, "a.txt"), "alpha\nbeta\ngamma\n")
+        body, ok = execute({"action": "read_file", "path": "a.txt"}, self.d)
+        self.assertTrue(ok)
+        self.assertIn("1\talpha", body)
+        self.assertIn("2\tbeta", body)
+        self.assertIn("3\tgamma", body)
+
+    def test_read_numbers_honor_offset_limit(self):
+        _write(os.path.join(self.d, "n.txt"), "".join(f"line{i}\n" for i in range(1, 21)))
+        body, ok = execute({"action": "read_file", "path": "n.txt", "offset": 5, "limit": 3}, self.d)
+        self.assertTrue(ok)
+        self.assertIn("5\tline5", body)          # absolute number, not 1-based-within-window
+        self.assertIn("7\tline7", body)
+        self.assertNotIn("4\tline4", body)
+        self.assertNotIn("8\tline8", body)
+
+    # ---- anchored edit at the execute() layer (fail-closed) --------------------
+    def test_anchored_edit_splices_and_echoes_numbered_window(self):
+        _write(os.path.join(self.d, "f.txt"), "one\ntwo\nthree\nfour\nfive\n")
+        out, ok = execute({"action": "edit_file", "path": "f.txt", "start_line": 3,
+                           "end_line": 3, "anchor": "three", "new": "THREE"}, self.d)
+        self.assertTrue(ok)
+        self.assertEqual(_read(os.path.join(self.d, "f.txt")), "one\ntwo\nTHREE\nfour\nfive\n")
+        self.assertIn("replaced lines 3-3", out)
+        self.assertIn("3\tTHREE", out)           # echoed post-edit window, numbered
+        self.assertIn("2\ttwo", out)             # ±3 lines of context
+        self.assertIn("4\tfour", out)
+
+    def test_anchored_edit_multi_line_range(self):
+        _write(os.path.join(self.d, "f.txt"), "a\nb\nc\nd\ne\n")
+        out, ok = execute({"action": "edit_file", "path": "f.txt", "start_line": 2,
+                           "end_line": 4, "anchor": "b", "new": "X\nY"}, self.d)
+        self.assertTrue(ok)
+        self.assertEqual(_read(os.path.join(self.d, "f.txt")), "a\nX\nY\ne\n")
+        self.assertIn("replaced lines 2-4", out)
+
+    def test_anchor_mismatch_rejected_fail_closed(self):
+        _write(os.path.join(self.d, "f.txt"), "one\ntwo\nthree\n")
+        out, ok = execute({"action": "edit_file", "path": "f.txt", "start_line": 2,
+                           "end_line": 2, "anchor": "WRONG", "new": "X"}, self.d)
+        self.assertFalse(ok)
+        self.assertIn("anchor mismatch", out)
+        self.assertEqual(_read(os.path.join(self.d, "f.txt")), "one\ntwo\nthree\n")   # untouched
+
+    def test_anchor_tolerates_indentation_slip(self):
+        _write(os.path.join(self.d, "f.py"), "def f():\n    return 1\n")
+        # anchor copied without the leading indentation still lands (whitespace-tolerant)
+        out, ok = execute({"action": "edit_file", "path": "f.py", "start_line": 2,
+                           "end_line": 2, "anchor": "return 1", "new": "    return 2"}, self.d)
+        self.assertTrue(ok)
+        self.assertEqual(_read(os.path.join(self.d, "f.py")), "def f():\n    return 2\n")
+
+    def test_missing_anchor_rejected(self):
+        _write(os.path.join(self.d, "f.txt"), "one\ntwo\n")
+        out, ok = execute({"action": "edit_file", "path": "f.txt", "start_line": 1,
+                           "end_line": 1, "new": "X"}, self.d)
+        self.assertFalse(ok)
+        self.assertIn("anchor", out)
+        self.assertEqual(_read(os.path.join(self.d, "f.txt")), "one\ntwo\n")
+
+    def test_out_of_range_line_rejected(self):
+        _write(os.path.join(self.d, "f.txt"), "one\ntwo\n")
+        out, ok = execute({"action": "edit_file", "path": "f.txt", "start_line": 99,
+                           "end_line": 99, "anchor": "x", "new": "X"}, self.d)
+        self.assertFalse(ok)
+        self.assertIn("out of range", out)
+
+    def test_anchored_edit_never_turns_valid_file_invalid(self):
+        _write(os.path.join(self.d, "g.py"), "x = 1\ny = 2\n")
+        out, ok = execute({"action": "edit_file", "path": "g.py", "start_line": 1,
+                           "end_line": 1, "anchor": "x = 1", "new": "def bad("}, self.d)
+        self.assertFalse(ok)
+        self.assertIn("invalid", out)
+        self.assertEqual(_read(os.path.join(self.d, "g.py")), "x = 1\ny = 2\n")     # not written
+
+    def test_old_new_dialect_still_works(self):
+        _write(os.path.join(self.d, "f.txt"), "keep\ntarget\nkeep\n")
+        out, ok = execute({"action": "edit_file", "path": "f.txt", "old": "target", "new": "hit"}, self.d)
+        self.assertTrue(ok)
+        self.assertEqual(_read(os.path.join(self.d, "f.txt")), "keep\nhit\nkeep\n")
+
+    # ---- dry_run scores the anchored dialect -----------------------------------
+    def test_dry_run_anchored_match_scores_1(self):
+        _write(os.path.join(self.d, "f.txt"), "one\ntwo\nthree\n")
+        s, _ = dry_run({"action": "edit_file", "path": "f.txt", "start_line": 2,
+                        "end_line": 2, "anchor": "two", "new": "X"}, self.d)
+        self.assertEqual(s, 1.0)
+
+    def test_dry_run_anchored_mismatch_scores_0(self):
+        _write(os.path.join(self.d, "f.txt"), "one\ntwo\nthree\n")
+        s, why = dry_run({"action": "edit_file", "path": "f.txt", "start_line": 2,
+                          "end_line": 2, "anchor": "NOPE", "new": "X"}, self.d)
+        self.assertEqual(s, 0.0)
+        self.assertIn("mismatch", why)
+
+    # ---- agent-loop staleness (via the P4.1 ledger) ----------------------------
+    def _drive(self, d, actions, max_steps=10):
+        events = []
+        a = Agent(ScriptBackend(actions), sm.EphemeralSession(d, "s"),
+                  max_steps=max_steps, on_event=lambda k, **kw: events.append((k, kw)))
+        a.send("go")
+        obs = [(kw.get("text", ""), kw.get("ok")) for k, kw in events if k == "observation"]
+        return a, events, obs
+
+    def test_anchored_edit_blocked_on_stale_file(self):
+        fp = os.path.join(self.d, "r.py")
+        _write(fp, "x = 1\ny = 2\n")
+        actions = [
+            '{"thought":"read","action":"read_file","path":"r.py"}',
+            '{"thought":"mutate","action":"bash","command":"echo \\"x = 9\\" > r.py"}',
+            '{"thought":"blind","action":"edit_file","path":"r.py","start_line":1,"end_line":1,"anchor":"x = 9","new":"x = 3"}',
+            '{"thought":"done","action":"say","message":"done"}',
+        ]
+        a, events, obs = self._drive(self.d, actions)
+        self.assertFalse(obs[2][1])                          # anchored edit blocked — file changed on disk
+        self.assertIn("CHANGED on disk", obs[2][0])
+        self.assertIn("Re-read lines 1-1", obs[2][0])        # anchored range echoed in the block
+
+    def test_first_read_numbered_and_read_before_edit_still_gates(self):
+        fp = os.path.join(self.d, "r.py")
+        _write(fp, "alpha = 1\nbeta = 2\n")
+        actions = [
+            # a blind anchored edit with NO prior read is gated by read-before-edit
+            '{"thought":"blind","action":"edit_file","path":"r.py","start_line":1,"end_line":1,"anchor":"alpha = 1","new":"alpha = 9"}',
+            '{"thought":"read","action":"read_file","path":"r.py"}',
+            '{"thought":"edit","action":"edit_file","path":"r.py","start_line":1,"end_line":1,"anchor":"alpha = 1","new":"alpha = 9"}',
+            '{"thought":"done","action":"say","message":"done"}',
+        ]
+        a, events, obs = self._drive(self.d, actions)
+        self.assertFalse(obs[0][1])                          # blind edit blocked
+        self.assertTrue(obs[1][1])                           # the read shows numbered content
+        self.assertIn("1\talpha = 1", obs[1][0])
+        self.assertTrue(obs[2][1])                           # after the read, the anchored edit lands
+        self.assertEqual(_read(fp), "alpha = 9\nbeta = 2\n")
+
+    def test_splice_marks_file_stale_for_out_of_window_edit(self):
+        fp = os.path.join(self.d, "r.py")
+        _write(fp, "a = 1\nb = 2\nc = 3\nd = 4\ne = 5\nf = 6\n")
+        actions = [
+            '{"thought":"read","action":"read_file","path":"r.py"}',
+            '{"thought":"splice","action":"edit_file","path":"r.py","start_line":1,"end_line":1,"anchor":"a = 1","new":"a = 10"}',
+            # a second edit WITHOUT a re-read is blocked: the splice shifted numbers, file is stale
+            '{"thought":"again","action":"edit_file","path":"r.py","start_line":6,"end_line":6,"anchor":"f = 6","new":"f = 60"}',
+            '{"thought":"reread","action":"read_file","path":"r.py"}',
+            '{"thought":"edit2","action":"edit_file","path":"r.py","start_line":6,"end_line":6,"anchor":"f = 6","new":"f = 60"}',
+            '{"thought":"done","action":"say","message":"done"}',
+        ]
+        a, events, obs = self._drive(self.d, actions)
+        self.assertTrue(obs[1][1])                           # first splice succeeds
+        self.assertFalse(obs[2][1])                          # second edit blocked — file marked stale
+        self.assertTrue(obs[3][1])                           # re-read re-injects fresh numbers
+        self.assertTrue(obs[4][1])                           # now the edit lands
+        self.assertEqual(_read(fp), "a = 10\nb = 2\nc = 3\nd = 4\ne = 5\nf = 60\n")
+
+
 class TestRepoMap(unittest.TestCase):
     """P4.4 — ranked symbol-aware repo map, token-budgeted briefing, outline reads."""
 

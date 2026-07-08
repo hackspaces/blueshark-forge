@@ -39,8 +39,11 @@ ACTION_SCHEMA = {
         "background": {"type": "boolean", "description": "bash: run as a background process (servers, watchers) — returns pid + log file immediately and keeps running while you continue"},
         "path": {"type": "string", "description": "file path (read/write/edit/list)"},
         "content": {"type": "string", "description": "full file content (write_file)"},
-        "old": {"type": "string", "description": "exact text to replace (edit_file)"},
+        "old": {"type": "string", "description": "exact text to replace (edit_file, {old,new} dialect)"},
         "new": {"type": "string", "description": "replacement text (edit_file)"},
+        "start_line": {"type": "integer", "description": "edit_file (line-anchored dialect): 1-based first line to replace — read the file first, numbers are shown in the read"},
+        "end_line": {"type": "integer", "description": "edit_file (line-anchored dialect): 1-based last line to replace, inclusive (same as start_line for a single line)"},
+        "anchor": {"type": "string", "description": "edit_file (line-anchored dialect): the current text of start_line copied verbatim from the numbered read — a guard so a miscounted range is rejected, not mis-spliced"},
         "pattern": {"type": "string", "description": "search pattern (grep = regex in file contents; glob = filename pattern like **/*.py)"},
         "context": {"type": "integer", "description": "grep: lines of context to show around each match (default 2, max 5)"},
         "offset": {"type": "integer", "description": "start line for read_file (1-based)"},
@@ -88,7 +91,7 @@ _ACTION_FIELDS = {
     "bash":       ("command", "background"),
     "read_file":  ("path", "offset", "limit", "outline"),
     "write_file": ("path", "content"),
-    "edit_file":  ("path", "old", "new"),
+    "edit_file":  ("path", "old", "new", "start_line", "end_line", "anchor"),
     "list_files": ("path",),
     "grep":       ("pattern", "path", "context"),
     "glob":       ("pattern",),
@@ -151,11 +154,16 @@ Actions:
   bash        {command, background:true}   start a SERVER or long-lived process: returns pid + log file
                                   immediately and keeps running — then test it (curl, client, ...),
                                   check output with `tail <log>`, stop with `kill <pid>`
-  read_file   {path}              read a file
+  read_file   {path}              read a file — every line is prefixed with its 1-based number
   read_file   {path, outline:true}  map a big file: its defs/classes with line numbers (.py/.js/.ts/.go/.rs),
                                   then read a symbol's body with offset/limit
   write_file  {path, content}     create/overwrite a file with full content
-  edit_file   {path, old, new}    surgically replace an exact snippet (preferred for changes)
+  edit_file   {path, start_line, end_line, anchor, new}
+                                  PREFERRED: replace lines start_line..end_line (inclusive) with `new`.
+                                  Copy `anchor` = the text of start_line verbatim from the numbered read
+                                  (a guard: a miscounted range is rejected, not mis-spliced). No need to
+                                  reproduce the old text. Re-read for fresh line numbers after each edit.
+  edit_file   {path, old, new}    fallback dialect: replace an exact snippet by its text
   list_files  {path?}             list a directory
   grep        {pattern, path?, context?}   search file CONTENTS by regex (ripgrep; ±context lines, grouped by file)
   glob        {pattern}           find files by name (e.g. **/*.py); use this over `find`
@@ -604,6 +612,74 @@ def _syntax_tail(err):
     return f", still has errors — {err}" if err else ""
 
 
+# ---- P5.3: line-numbered reads + line-anchored edit dialect -------------------
+def _number_lines(contents, start):
+    """Prefix each newline-free line in `contents` with its 1-based ABSOLUTE line
+    number (`start` is the number of contents[0]), number and a TAB leading each.
+    DISPLAY only — the harness ledger keeps file content raw for diffing."""
+    return "\n".join(f"{start + i}\t{c}" for i, c in enumerate(contents))
+
+
+def _anchor_ok(anchor, current):
+    """True if the anchor (the expected current text of the edited start line)
+    matches the actual line. Exact match, or — like _fuzzy_replace — ignoring
+    leading/trailing whitespace, so a model that slips one line's indentation
+    still lands while a genuine MISCOUNT (different content) is rejected."""
+    if anchor == current:
+        return True
+    return anchor.strip() == current.strip()
+
+
+def _anchored_edit(action, path, text):
+    """P5.3 line-anchored edit: replace the inclusive 1-based line range
+    [start_line, end_line] with `new`, verified by `anchor` (the current text of
+    start_line copied from the numbered read). Fails CLOSED — a non-integer range,
+    an out-of-range line, a missing anchor, or an anchor mismatch rejects WITHOUT
+    touching the file, so a miscounted range can never silently splice the wrong
+    lines. On success writes and echoes the numbered post-edit window ±3 lines."""
+    rel = action.get("path")
+    lines = text.split("\n")
+    total = len(lines)
+    try:
+        start = int(action.get("start_line"))
+        end = int(action.get("end_line", start))
+    except (TypeError, ValueError):
+        return "edit failed: start_line/end_line must be integers.", False
+    anchor = action.get("anchor")
+    if anchor is None:
+        return (f"edit failed: an anchored edit needs `anchor` — the exact current text of line "
+                f"{start} copied from the numbered read — to guard against a miscount.", False)
+    if start < 1 or start > total:
+        return (f"edit failed: start_line {start} is out of range — {rel} has {total} lines. "
+                "Re-read with line numbers and use a valid range.", False)
+    if end < start or end > total:
+        return (f"edit failed: end_line {end} is out of range (start_line {start}, {rel} has "
+                f"{total} lines). Re-read with line numbers and use a valid range.", False)
+    current = lines[start - 1]
+    if not _anchor_ok(anchor, current):
+        return (f"edit failed: anchor mismatch at line {start} of {rel}. You expected:\n"
+                f"  {anchor.strip()}\nbut line {start} is actually:\n  {current.strip()}\n"
+                "Re-read the file with line numbers and copy the anchor exactly.", False)
+    newlines = action.get("new", "").split("\n")
+    spliced = lines[:start - 1] + newlines + lines[end:]
+    newtext = "\n".join(spliced)
+    err, block = _gate(path, newtext, text)          # never turn a valid file invalid
+    if block:
+        return (f"that edit would make {rel} invalid — {err}. The file was NOT changed. "
+                "Fix the replacement and retry.", False)
+    with open(path, "w") as f:
+        f.write(newtext)
+    # echo the post-edit region ±3 lines, numbered — line numbers BELOW the splice
+    # have shifted, so the model must re-read for fresh numbers before editing elsewhere.
+    new_last = start - 1 + len(newlines)             # 1-based last line of the inserted block
+    lo = max(1, start - 3)
+    hi = min(len(spliced), new_last + 3)
+    window = _number_lines(spliced[lo - 1:hi], lo)
+    return (f"replaced lines {start}-{end} of {rel} ({end - start + 1} → {len(newlines)} lines)"
+            + _syntax_tail(err) + f". Post-edit lines {lo}-{hi} (numbers below the splice have "
+            f"shifted — re-read before editing elsewhere):\n{window}", True)
+
+
 def execute(action, cwd, stop=None):
     """Run one action. Returns (observation, ok). `stop` interrupts a running
     bash command when the user hits Esc."""
@@ -696,7 +772,10 @@ def execute(action, cwd, stop=None):
                 return f"offset {offset} is past the end — {action.get('path')} has only {total} lines", False
             limit = max(1, int(action.get("limit", 800)))
             chunk = lines[offset - 1: offset - 1 + limit]
-            body = "".join(chunk)
+            # prefix each line with its 1-based ABSOLUTE number (honoring offset) so
+            # the model can edit by line range instead of reproducing exact text. Each
+            # readlines() element keeps its own "\n"; the last line of the file may not.
+            body = "".join(f"{offset + i}\t{ln}" for i, ln in enumerate(chunk))
             range_note = ""
             if offset > 1 or offset - 1 + limit < total:
                 shown_to = min(offset - 1 + limit, total)
@@ -727,9 +806,13 @@ def execute(action, cwd, stop=None):
                 return "path escapes the workspace — use a path inside the project", False
             if not os.path.exists(p):
                 return f"no such file: {action.get('path')} — use write_file to create it", False
-            old, new = action.get("old", ""), action.get("new", "")
             with open(p, errors="replace") as f:
                 text = f.read()
+            # P5.3 line-anchored dialect: {start_line, end_line, anchor, new} splices
+            # a line range verified by the anchor. The {old,new} dialect stays as fallback.
+            if action.get("start_line") is not None:
+                return _anchored_edit(action, p, text)
+            old, new = action.get("old", ""), action.get("new", "")
             if not old:
                 return f"edit failed: provide the `old` snippet to replace.", False
             n = text.count(old)
@@ -826,11 +909,26 @@ def dry_run(act, cwd):
             p = _resolve(cwd, act.get("path", ""))
             if not p or not os.path.isfile(p):
                 return 0.0, "no such file"
+            with open(p, errors="replace") as f:
+                text = f.read()
+            if act.get("start_line") is not None:      # P5.3 anchored dialect
+                lines = text.split("\n")
+                total = len(lines)
+                try:
+                    start = int(act.get("start_line"))
+                    end = int(act.get("end_line", start))
+                except (TypeError, ValueError):
+                    return 0.0, "non-integer line range"
+                anchor = act.get("anchor")
+                if anchor is None:
+                    return 0.0, "missing anchor"
+                if start < 1 or start > total or end < start or end > total:
+                    return 0.0, "line range out of bounds"
+                return ((1.0, "anchor matches") if _anchor_ok(anchor, lines[start - 1])
+                        else (0.0, "anchor mismatch"))
             old = act.get("old", "")
             if not old:
                 return 0.0, "empty `old`"
-            with open(p, errors="replace") as f:
-                text = f.read()
             n = text.count(old)
             if n == 1:
                 return 1.0, "exact unique match"

@@ -738,14 +738,20 @@ class Agent:
         e = self.ledger.get(fp)
         path = act.get("path")
         st = self.ledger.status(fp)
+        # P5.3: an anchored edit carries a line range — point the re-read at it, since
+        # the numbers it relies on may have shifted (its own earlier splice) or gone stale.
+        tail = ""
+        if act.get("start_line") is not None:
+            s, en = act.get("start_line"), act.get("end_line", act.get("start_line"))
+            tail = f" Re-read lines {s}-{en} with line numbers first."
         if st == "changed" and e is not None:
             return (f"Blocked: {path} CHANGED on disk since you read it at step {e.read_step} — your copy "
-                    "is stale. read_file it again and work from the current content before editing.")
+                    "is stale. read_file it again and work from the current content before editing." + tail)
         if st == "evicted" and e is not None:
             return (f"Blocked: you read {path} at step {e.read_step}, but it's no longer in your context — "
-                    "read_file it again before editing or overwriting it.")
+                    "read_file it again before editing or overwriting it." + tail)
         return (f"Blocked: read {path} before editing or overwriting it — "
-                "work from its actual current content, not memory. Use read_file first.")
+                "work from its actual current content, not memory. Use read_file first." + tail)
 
     def _edit_region_seen(self, act, fp):
         """True unless the edit targets lines OUTSIDE the (partial) range the model
@@ -786,8 +792,14 @@ class Agent:
         exempt, so only a genuinely-unexecutable action is flagged."""
         if kind in ("fleet_send", "say"):
             return []
+        reqs = required_fields(kind)
+        # P5.3: edit_file's line-anchored dialect ({start_line,end_line,anchor,new})
+        # substitutes for the exact {old,new} dialect — enforce ITS fields instead so
+        # an anchored edit isn't rejected for a missing `old`.
+        if kind == "edit_file" and act.get("start_line") is not None:
+            reqs = ["path", "start_line", "end_line", "anchor", "new"]
         out = []
-        for f in required_fields(kind):
+        for f in reqs:
             v = act.get(f)
             # empty string counts as missing (matches the old pathless check), except
             # `new`: an empty replacement is a legal deletion.
@@ -1391,8 +1403,15 @@ class Agent:
                             self.ledger.record_write(_rp, step, content=act.get("content"))
                             recorded_fp = _rp
                         elif kind == "edit_file":
-                            self.ledger.record_write(_rp, step)  # re-read the edited file from disk
-                            recorded_fp = _rp
+                            if act.get("start_line") is not None:
+                                # P5.3: an anchored splice shifts every line number below it,
+                                # so the model's numbered read is now stale. Evict (not record)
+                                # to FORCE a fresh numbered re-read before any further edit —
+                                # the echoed ±3 window only re-grounds the splice site itself.
+                                self.ledger.evict(_rp)
+                            else:
+                                self.ledger.record_write(_rp, step)  # re-read the edited file from disk
+                                recorded_fp = _rp
                     if ok and kind in ("write_file", "edit_file") and act.get("path"):
                         self._mutated.add(os.path.realpath(os.path.join(self.session.cwd, act["path"])))
                         self._verified = False
