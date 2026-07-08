@@ -20,6 +20,7 @@ import time
 
 from . import __version__
 from . import backends
+from . import exemplars
 from . import profiles
 from .ledger import Ledger
 from .tools import (ACTION_SCHEMA, ACTION_VARIANTS, ALL_ACTIONS, TOOL_HELP,
@@ -310,7 +311,21 @@ class Agent:
         if workspace and self._lv("workspace"):
             self.messages.append({"role": "user", "content": workspace})
             self.messages.append({"role": "assistant", "content": '{"thought":"Oriented in the workspace. Ready.","action":"say","message":"Ready."}'})
-        self.head_len = len(self.messages)  # system (+ workspace) — never compacted away
+        # P5.6 cold-start few-shot: a model with recorded malformed history that ALSO
+        # has a harvested exemplar gets ONE user/assistant demonstration pinned into
+        # the head, so its very first generation already sees its OWN valid format.
+        # Inert until the store carries both signals — a fresh install and the
+        # offline test suite (empty store) never trip it. Bulletproof: a broken or
+        # unreadable store must never fail Agent construction.
+        try:
+            if exemplars.malformed_count(self.backend.name) > 0:
+                _ex = exemplars.fetch_any(self.backend.name)
+                if _ex:
+                    self.messages.append({"role": "user", "content": "example task"})
+                    self.messages.append({"role": "assistant", "content": _ex})
+        except Exception:
+            pass
+        self.head_len = len(self.messages)  # system (+ workspace + exemplar) — never compacted away
         self.plan = []
         self.notes = []   # P4.8 pinned scratch facts (durable, survive compaction — see _pin_state); seed #0 set below
         # P4.1 file-state ledger — the harness-owned model of what's been read and
@@ -1302,7 +1317,21 @@ class Agent:
                             trace["malformed"] = True
                             self.on_event("malformed")
                             self.session.log("malformed", v=TRACE_V, step=step, raw=raw[:200])
-                            self.messages.append({"role": "user", "content": "That was not valid action JSON. Reply with one JSON action object only."})
+                            # P5.6: tally the strike (keys the cold-start head-pin) and,
+                            # if we can guess what kind this output was ATTEMPTING, quote
+                            # one of the model's OWN past valid actions of that kind — a
+                            # far stronger anchor than the bare text nudge. Plain nudge
+                            # when no exemplar exists yet.
+                            exemplars.record_malformed(self.backend.name)
+                            guessed = exemplars.guess_kind(raw)
+                            ex = exemplars.fetch(self.backend.name, guessed) if guessed else None
+                            if ex:
+                                nudge = (f"That was not valid action JSON. Here is a valid `{guessed}` action "
+                                         "you emitted earlier — reply with ONE JSON action object in exactly "
+                                         f"this shape:\n{ex}")
+                            else:
+                                nudge = "That was not valid action JSON. Reply with one JSON action object only."
+                            self.messages.append({"role": "user", "content": nudge})
                             if bad >= 5:
                                 return "(the model could not hold the action format)"
                             continue
@@ -1510,6 +1539,7 @@ class Agent:
                     trace["ok"] = ok
                     if ok:
                         self._heat = 0.0   # P5.5: a clean execution unsticks — back to greedy
+                        exemplars.record(self.backend.name, kind, raw)   # P5.6: harvest this valid action
                     budget = self._obs_budget()
                     # P4.1 ledger population — a ranged read records only its span; a
                     # write/edit ingests the new content as the cached (diffable) version.
