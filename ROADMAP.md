@@ -456,7 +456,7 @@ The heart of the thesis, deepened: the grammar gets stricter, bad actions are ca
 
 ### P5.5 · Retry-heat temperature policy: greedy for first tries, hot for retries
 
-**Status: open · Impact 3/5 · Effort S · Depends on: none**
+**Status: done · Impact 3/5 · Effort S · Depends on: none** · note: added self._heat (init 0.0, reset to 0.0 at every send() turn-start and after any successful execute); bumped min(0.7, heat+0.4) at the four retry sites — malformed strike, repeat-loop trip, action-FAILED fail-tag, and the manual-mode DECLINE (mode=="manual" uniquely identifies a decline since plan-mode blocks only fire in plan mode; plan-mode blocks deliberately do NOT bump). The main greedy _generate now passes temperature=self._heat; P5.2 best-of-N coordinates via max(self._heat, temp) so a resample floors at its 0.5/0.8 rung but never samples below accumulated heat. Deferred: _resend_variant (P5.1 grammar-forced completion) stays greedy — grammar guarantees completeness, so heat there is noise. 6 new tests (schedule 0→0.4→0.7→0, clean-turn stays 0.0, loop bump, decline bump, plan-block no-bump, cap-at-0.7). Full suite green (358, skipped=1).
 
 **What.** Track a per-turn heat level: 0.0 for normal steps, bumped to 0.4 after the first malformed/loop/declined-retry nudge and 0.7 after the second, reset to 0.0 on any successful execution. _generate passes temperature=heat. About 15 lines.
 

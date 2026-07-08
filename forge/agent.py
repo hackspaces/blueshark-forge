@@ -331,6 +331,9 @@ class Agent:
         # structural or LLM compaction of self.messages.
         self.meta = [{"kind": "head"} for _ in self.messages]
         self._reclaimed = False        # a structural/floor pass reclaimed window THIS step
+        self._heat = 0.0               # P5.5 retry-heat: base sampling temperature — 0.0
+                                       # greedy at turn start, bumped +0.4 (cap 0.7) per
+                                       # malformed/loop/fail/declined retry, reset on success
         # P4.3 harness TOKEN LEDGER. msg_tokens[] parallels self.messages; each
         # estimate is len(content)//4 * tok_ratio. tok_ratio is calibrated against
         # the backend's observed prompt_eval_count on the UNCACHED calls (first call
@@ -860,7 +863,8 @@ class Agent:
         message text live (token by token) via on_event('token'). `schema` overrides
         the per-step grammar (P5.1 uses it to force a single action's variant on a
         missing-required resend); otherwise the legal-action grammar is built here.
-        `temperature` drives the P5.2 best-of-N resample (greedy stays t=0.0);
+        `temperature` is the sampling heat: 0.0 for a turn's first greedy try, the
+        P5.5 retry-heat on a nudge resend, or the P5.2 best-of-N rung on a resample;
         `stream_say=False` suppresses live token emission for a throwaway resample
         candidate that may or may not be chosen."""
         if self._lv("schema"):
@@ -986,7 +990,9 @@ class Agent:
         base_prompt = self.messages[:-1] + ([pin] if pin else [])
         samples = 0
         for temp in (0.5, 0.8):
-            raw = self._generate(base_prompt, temperature=temp, stream_say=False)
+            # P5.5: resample floors at the best-of-N rung but never samples BELOW the
+            # accumulated retry-heat — a hot turn stays at least as perturbed.
+            raw = self._generate(base_prompt, temperature=max(self._heat, temp), stream_say=False)
             samples += 1
             try:
                 cand = json.loads(raw)
@@ -1232,6 +1238,7 @@ class Agent:
         self._mutated = set()
         self._verified = False
         self._bounced = False
+        self._heat = 0.0   # P5.5: greedy for the first try of every turn
         self.session.log("user", text=user_text)
         self.session.set_status("working")
         bad = 0
@@ -1262,7 +1269,10 @@ class Agent:
                     pin = self._pin_state() if self._lv("plan_pin") else None
                     prompt = self.messages + ([pin] if pin else [])
                     self.on_event("thinking")
-                    raw = self._generate(prompt)
+                    # P5.5 retry-heat: first try of a turn is greedy (heat 0.0); each
+                    # malformed/loop/fail/declined nudge bumps heat so the resend is
+                    # perturbed rather than a byte-identical greedy re-emission.
+                    raw = self._generate(prompt, temperature=self._heat)
                     # P4.2: the real prompt-token count now reflects any compaction —
                     # stop overriding _fill with the char estimate.
                     self._reclaimed = False
@@ -1288,6 +1298,7 @@ class Agent:
                         act, stage = self._salvage(raw)
                         if act is None:
                             bad += 1
+                            self._heat = min(0.7, self._heat + 0.4)   # P5.5
                             trace["malformed"] = True
                             self.on_event("malformed")
                             self.session.log("malformed", v=TRACE_V, step=step, raw=raw[:200])
@@ -1343,6 +1354,11 @@ class Agent:
 
                     blocked = self._gate(kind, act)
                     if blocked:
+                        # P5.5: a manual-mode block is a user DECLINE (plan-mode blocks
+                        # only fire when self.mode == "plan") — perturb so the model
+                        # proposes a genuinely different action, not the same one again.
+                        if self.mode == "manual":
+                            self._heat = min(0.7, self._heat + 0.4)
                         trace["gated"] = True
                         self.on_event("action", action=kind,
                                       detail=act.get("command") or act.get("path") or act.get("target") or "")
@@ -1411,6 +1427,7 @@ class Agent:
                     trace["sig"] = sig
                     recent.append(sig)
                     if self._lv("loop_detect") and recent[-3:].count(sig) >= 3:
+                        self._heat = min(0.7, self._heat + 0.4)   # P5.5
                         trace["loop_trip"] = True
                         self.on_event("loop")
                         self.session.log("loop", v=TRACE_V, step=step, sig=sig, cause="repeat")
@@ -1491,6 +1508,8 @@ class Agent:
                                   detail=act.get("command") or act.get("path") or act.get("pattern") or "")
                     obs, ok = execute(act, self.session.cwd, stop=self.stop)
                     trace["ok"] = ok
+                    if ok:
+                        self._heat = 0.0   # P5.5: a clean execution unsticks — back to greedy
                     budget = self._obs_budget()
                     # P4.1 ledger population — a ranged read records only its span; a
                     # write/edit ingests the new content as the cached (diffable) version.
@@ -1535,6 +1554,7 @@ class Agent:
                     if not ok:
                         fail_counts[sig] = fail_counts.get(sig, 0) + 1
                         total_fails += 1
+                        self._heat = min(0.7, self._heat + 0.4)   # P5.5
                         tag = "  ⚠ this action FAILED — diagnose the cause before retrying.\n"
                         # per-command repeat (survives interleaved successes, unlike a consecutive counter)
                         if self._lv("loop_detect") and fail_counts[sig] >= 3:

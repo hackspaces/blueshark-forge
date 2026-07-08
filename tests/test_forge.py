@@ -1776,6 +1776,114 @@ class TestResample(unittest.TestCase):
         self.assertEqual(len(self._assistants(resample_turn)), 3)
 
 
+class _HeatBackend:
+    """P5.5 fake backend: records the temperature of every generation and yields a
+    scripted sequence of action JSONs (mirrors ScriptBackend, plus .temps)."""
+    name = "heat"
+
+    def __init__(self, actions):
+        self.actions = list(actions)
+        self.i = 0
+        self.temps = []
+
+    def _next(self, temperature):
+        self.temps.append(temperature)
+        act = self.actions[min(self.i, len(self.actions) - 1)]
+        self.i += 1
+        return act
+
+    def stream(self, messages, schema=None, temperature=0.0):
+        yield self._next(temperature)
+
+    def chat(self, messages, schema=None, temperature=0.0):
+        return self._next(temperature)
+
+
+class TestRetryHeat(unittest.TestCase):
+    """P5.5 retry-heat: every turn starts greedy (temperature 0.0); a malformed /
+    loop / failed / declined retry bumps the sampling temperature +0.4 (capped at
+    0.7); a clean execution resets it to 0.0. The first sample of each generation
+    carries this heat, so a stuck 3B is perturbed instead of re-emitting the same
+    greedy action."""
+
+    def test_schedule_malformed_fail_success_reset(self):
+        # 0.0 (greedy) -> malformed bumps to 0.4 -> a failed action bumps to 0.7 ->
+        # a clean read resets to 0.0 -> the final say is greedy again.
+        d = tempfile.mkdtemp()
+        _write(os.path.join(d, "s.py"), "x = 1\n")
+        actions = [
+            "not json",                                                  # gen@0.0 malformed -> 0.4
+            '{"thought":"t","action":"bash","command":"false"}',         # gen@0.4 fails -> 0.7
+            '{"thought":"t","action":"read_file","path":"s.py"}',        # gen@0.7 ok -> reset 0.0
+            '{"thought":"done","action":"say","message":"done"}',        # gen@0.0 clean
+        ]
+        b = _HeatBackend(actions)
+        a = Agent(b, _RecSession(d), max_steps=8)
+        a.send("go")
+        self.assertEqual(b.temps, [0.0, 0.4, 0.7, 0.0])
+        self.assertEqual(a._heat, 0.0)   # reset by the successful read
+
+    def test_clean_turn_stays_greedy(self):
+        # a turn with no retries never leaves temperature 0.0.
+        d = tempfile.mkdtemp()
+        _write(os.path.join(d, "s.py"), "x = 1\n")
+        actions = [
+            '{"thought":"t","action":"read_file","path":"s.py"}',
+            '{"thought":"done","action":"say","message":"done"}',
+        ]
+        b = _HeatBackend(actions)
+        Agent(b, _RecSession(d), max_steps=6).send("look")
+        self.assertEqual(b.temps, [0.0, 0.0])
+
+    def test_loop_break_bumps_heat(self):
+        # the same edit is blocked (read-before-edit) three times; the 3rd trips the
+        # loop detector, whose bump raises the NEXT generation off greedy.
+        d = tempfile.mkdtemp()
+        _write(os.path.join(d, "u.py"), "a\n")   # exists but never read -> gate blocks the edit
+        edit = '{"thought":"t","action":"edit_file","path":"u.py","old":"a","new":"b"}'
+        actions = [edit, edit, edit, '{"thought":"done","action":"say","message":"done"}']
+        b = _HeatBackend(actions)
+        a = Agent(b, _RecSession(d), max_steps=8)
+        a.send("go")
+        # first three gens are greedy (blocks are not heat sites); the loop trip on the
+        # 3rd bumps heat so the say samples at 0.4.
+        self.assertEqual(b.temps, [0.0, 0.0, 0.0, 0.4])
+
+    def test_declined_action_bumps_heat(self):
+        # a manual-mode DECLINE perturbs the next generation; a plan-mode block does not.
+        d = tempfile.mkdtemp()
+        actions = [
+            '{"thought":"t","action":"bash","command":"echo hi"}',   # gen@0.0 declined -> 0.4
+            '{"thought":"done","action":"say","message":"ok"}',      # gen@0.4
+        ]
+        b = _HeatBackend(actions)
+        a = Agent(b, _RecSession(d), max_steps=6)
+        a.mode = "manual"
+        a.approve = lambda desc: "no"
+        a.send("go")
+        self.assertEqual(b.temps, [0.0, 0.4])
+
+    def test_plan_block_does_not_bump_heat(self):
+        d = tempfile.mkdtemp()
+        actions = [
+            '{"thought":"t","action":"bash","command":"echo hi"}',   # plan-blocked, NOT a decline
+            '{"thought":"done","action":"say","message":"here is my plan"}',
+        ]
+        b = _HeatBackend(actions)
+        a = Agent(b, _RecSession(d), max_steps=6)
+        a.mode = "plan"
+        a.send("go")
+        self.assertEqual(b.temps, [0.0, 0.0])
+
+    def test_heat_caps_at_point_seven(self):
+        # four consecutive malformed strikes never push heat past 0.7.
+        d = tempfile.mkdtemp()
+        b = _HeatBackend(["not json"])   # every gen is malformed
+        a = Agent(b, _RecSession(d), max_steps=5)
+        a.send("go")   # aborts after 5 malformed strikes
+        self.assertEqual(b.temps[:5], [0.0, 0.4, 0.7, 0.7, 0.7])
+
+
 class TestBackgroundBash(unittest.TestCase):
     """Servers must keep running while the agent continues, and die with forge."""
 
