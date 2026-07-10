@@ -1895,7 +1895,13 @@ class Agent:
                                 self.stuck["malformed"] = 0
                                 self.clean_streak = 0
                                 continue
-                            stuck = (f"I'm stuck even after escalating through the local models. Last error: {obs[:200].strip()}. "
+                            # Be accurate about WHY we stopped: only claim "even after
+                            # escalating" if we actually climbed a rung; a single-model
+                            # ladder never escalated, so say there's nowhere to escalate.
+                            lead = ("I'm stuck even after escalating through the local models"
+                                    if self.tier > 0 else
+                                    "I'm stuck, and there's no stronger local model to escalate to")
+                            stuck = (f"{lead}. Last error: {obs[:200].strip()}. "
                                      "This needs a different approach — want me to try one, or take it yourself?")
                             self.session.log("assistant", text=stuck)
                             self.on_event("say", message=stuck)
