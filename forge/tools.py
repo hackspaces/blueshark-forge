@@ -351,13 +351,13 @@ def _run_background(cmd, cwd):
     lf = open(log, "w")
     p = subprocess.Popen(cmd, cwd=cwd, shell=True, stdout=lf, stderr=subprocess.STDOUT,
                          start_new_session=True)
+    lf.close()                           # the child holds its own inherited fd; don't leak the parent's
     _BG_PROCS.append(p)
     if len(_BG_PROCS) == 1:
         import atexit
         atexit.register(_kill_background)
     time.sleep(1.2)                      # long enough to catch an instant crash
     if p.poll() is not None:
-        lf.flush()
         try:
             with open(log, errors="replace") as f:
                 tail = f.read()[-800:]
