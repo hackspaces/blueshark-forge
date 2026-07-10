@@ -169,7 +169,8 @@ def refresh(root, files=None, index_dir=None):
     """Bring the on-disk index up to date and return a flat list of symbol dicts
     (each with a `path` relative to `root`). STATS every candidate file but only
     re-extracts the ones whose (mtime, size) changed since the last run."""
-    if files is None:
+    full = files is None            # a full scan may prune; a subset scan must not
+    if full:
         from . import workspace
         files = workspace._source_files(root, 5000)
     path = index_path(root, index_dir)
@@ -194,9 +195,13 @@ def refresh(root, files=None, index_dir=None):
             d = dict(s)
             d["path"] = rel
             out.append(d)
-    if fresh != cache:
+    # A full scan replaces the cache (dropping entries for deleted files); a SUBSET
+    # scan merges its fresh entries over the cache so it never clobbers the files it
+    # never looked at.
+    merged = fresh if full else {**cache, **fresh}
+    if merged != cache:
         try:
-            _save(path, fresh)
+            _save(path, merged)
         except OSError:
             pass
     return out
