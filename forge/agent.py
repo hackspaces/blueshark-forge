@@ -1043,6 +1043,17 @@ class Agent:
 
         return None, None
 
+    _STR_FIELDS = ("path", "command", "target", "message", "pattern", "old", "new", "anchor")
+
+    def _coerce_str_fields(self, act):
+        """Advisory (non-constrained) engines can emit a non-string where the grammar
+        would force one (e.g. {"target": 0}, a numeric path); a downstream .strip() or
+        os.path.join then raises and crashes the turn. Coerce known string fields to str."""
+        for f in self._STR_FIELDS:
+            v = act.get(f)
+            if v is not None and not isinstance(v, str):
+                act[f] = str(v)
+
     def _alias_path(self, act):
         """P3.2 alias_repair: fill a missing `path` from a small model's aliases
         (filename/file/…). The alias table is resolved once in __init__ from the
@@ -1592,6 +1603,7 @@ class Agent:
                         if self._add_note(act["note"]):
                             self.session.log("note", items=list(self.notes))
 
+                    self._coerce_str_fields(act)   # advisory engine may emit a non-string field
                     kind = act.get("action")
                     trace["action"] = kind
                     if kind == "say":
