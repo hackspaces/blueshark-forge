@@ -1971,7 +1971,7 @@ class TestBackgroundBash(unittest.TestCase):
         self.assertIn("pid", obs)
         self.assertIn("KEEPS RUNNING", obs)
         from forge import tools
-        self.assertIsNone(tools._BG_PROCS[-1].poll())    # still alive
+        self.assertIsNone(tools._BG_PROCS[-1]["proc"].poll())    # still alive (P6.6 registry dict)
 
     def test_instant_crash_is_reported(self):
         obs, ok = execute({"action": "bash", "command": "echo boom >&2; exit 3", "background": True}, "/tmp")
@@ -1991,10 +1991,56 @@ class TestBackgroundBash(unittest.TestCase):
     def test_kill_background_cleans_up(self):
         from forge import tools
         execute({"action": "bash", "command": "sleep 30", "background": True}, "/tmp")
-        p = tools._BG_PROCS[-1]
+        p = tools._BG_PROCS[-1]["proc"]                  # P6.6 registry dict
         tools._kill_background()
         p.wait(timeout=5)
         self.assertIsNotNone(p.poll())
+
+    def test_roster_lists_live_procs_and_appends_to_bash(self):
+        from forge import tools
+        execute({"action": "bash", "command": "sleep 30", "background": True}, "/tmp")
+        self.assertIn("bg: pid", tools.bg_roster())
+        obs, ok = execute({"action": "bash", "command": "echo hi"}, "/tmp")
+        self.assertIn("hi", obs)
+        self.assertIn("bg: pid", obs)                    # roster rides a normal bash obs
+
+    def test_bg_events_reports_a_death_exactly_once(self):
+        import time as _t
+        from forge import tools
+        execute({"action": "bash", "command": "sleep 30", "background": True}, "/tmp")
+        self.assertEqual(tools.bg_events(), [])          # alive → nothing to report
+        tools._kill_background()
+        tools._BG_PROCS[-1]["proc"].wait(timeout=5)
+        ev = tools.bg_events()
+        self.assertEqual(len(ev), 1)
+        self.assertIn("EXITED", ev[0])
+        self.assertEqual(tools.bg_events(), [])          # fires ONCE (reported_dead)
+
+    def test_death_notice_pushed_into_the_loop(self):
+        from forge import tools
+        d = tempfile.mkdtemp()
+        _write(os.path.join(d, "x.txt"), "hi\n")
+        # start a bg proc, then kill it before the 2nd step so bg_events fires between steps
+        class B:
+            name = "b"
+            def __init__(self): self.i = 0
+            def stream(self, m, schema=None, temperature=0.0):
+                acts = ['{"thought":"start","action":"bash","command":"sleep 30 &"}',
+                        '{"thought":"read","action":"read_file","path":"x.txt"}',
+                        '{"thought":"done","action":"say","message":"done"}']
+                a = acts[min(self.i, 2)]; self.i += 1
+                if self.i == 2:                           # between step 1 and step 2, kill the bg proc
+                    tools._kill_background()
+                    if tools._BG_PROCS:
+                        tools._BG_PROCS[-1]["proc"].wait(timeout=5)
+                yield a
+            def chat(self, m, schema=None, temperature=0.0):
+                return '{"action":"say","message":"done"}'
+        a = Agent(B(), sm.EphemeralSession(d, "b"), max_steps=6)
+        a.send("start a server")
+        self.assertTrue(any("[background]" in m.get("content", "") and "EXITED" in m.get("content", "")
+                            for m in a.messages))         # the death was pushed unprompted
+        tools._BG_PROCS.clear()
 
 
 class TestApprovalGate(unittest.TestCase):

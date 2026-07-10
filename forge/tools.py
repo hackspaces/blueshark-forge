@@ -356,8 +356,19 @@ def _maybe_offload(text, label, cwd):
 # The agent starts one, gets a pid + live log file back IMMEDIATELY, and keeps
 # working — test with curl, tail the log, kill the pid. All are cleaned up when
 # the forge session exits.
+# P6.6 supervisor: each entry is {proc, cmd, log, started, reported_dead} so the harness
+# can PROBE background procs every step — pushing a death notice the moment one exits and
+# keeping a live roster in context so pids survive compaction.
 _BG_PROCS = []
 _BG_TRAILING_AMP = __import__("re").compile(r"(?<![&|])&\s*$")
+
+
+def _bg_tail(log, n=600):
+    try:
+        with open(log, errors="replace") as f:
+            return f.read()[-n:]
+    except OSError:
+        return ""
 
 
 def _run_background(cmd, cwd):
@@ -367,17 +378,15 @@ def _run_background(cmd, cwd):
     p = subprocess.Popen(cmd, cwd=cwd, shell=True, stdout=lf, stderr=subprocess.STDOUT,
                          start_new_session=True)
     lf.close()                           # the child holds its own inherited fd; don't leak the parent's
-    _BG_PROCS.append(p)
+    e = {"proc": p, "cmd": cmd, "log": log, "started": time.time(), "reported_dead": False}
+    _BG_PROCS.append(e)
     if len(_BG_PROCS) == 1:
         import atexit
         atexit.register(_kill_background)
     time.sleep(1.2)                      # long enough to catch an instant crash
     if p.poll() is not None:
-        try:
-            with open(log, errors="replace") as f:
-                tail = f.read()[-800:]
-        except OSError:
-            tail = ""
+        e["reported_dead"] = True        # this immediate crash is reported now — don't re-fire it
+        tail = _bg_tail(log, 800)
         return (f"(background command exited immediately, code {p.returncode}) output:\n{tail}",
                 p.returncode == 0)
     return (f"✓ running in the background: pid {p.pid}, output → {log}\n"
@@ -386,9 +395,36 @@ def _run_background(cmd, cwd):
             f"It is stopped automatically when this forge session ends.", True)
 
 
+def bg_events():
+    """P6.6: notices for background procs that have EXITED since the last probe. Each fires
+    ONCE (reported_dead). The harness pushes these into context unprompted at each step, so a
+    server that dies at step 10 is visible instead of the model debugging a phantom for five."""
+    out = []
+    for e in _BG_PROCS:
+        if e["reported_dead"]:
+            continue
+        p = e["proc"]
+        if p.poll() is not None:
+            e["reported_dead"] = True
+            tail = _bg_tail(e["log"])
+            out.append(f"[background] pid {p.pid} (`{e['cmd']}`) EXITED code {p.returncode}"
+                       + (f" — last output:\n{tail}" if tail.strip() else " (no output)"))
+    return out
+
+
+def bg_roster():
+    """P6.6: one line per still-alive background proc, appended to bash observations so the
+    pids/logs survive compaction (the model no longer has to remember them)."""
+    live = [e for e in _BG_PROCS if e["proc"].poll() is None]
+    if not live:
+        return ""
+    return "\n".join(f"bg: pid {e['proc'].pid} `{e['cmd']}` → {e['log']}" for e in live)
+
+
 def _kill_background():
     import signal
-    for p in _BG_PROCS:
+    for e in _BG_PROCS:
+        p = e["proc"]
         if p.poll() is None:
             try:
                 os.killpg(os.getpgid(p.pid), signal.SIGKILL)
@@ -839,8 +875,11 @@ def execute(action, cwd, stop=None):
             if testparse.is_test_runner(cmd):
                 d = testparse.digest(obs, cwd)
                 if d:
-                    preview, note = _maybe_offload(obs, "testrun", cwd)
-                    return d + "\n" + note, ok
+                    _, note = _maybe_offload(obs, "testrun", cwd)
+                    obs = d + note
+            roster = bg_roster()             # P6.6: keep live bg pids/logs in context
+            if roster:
+                obs = f"{obs}\n{roster}"
             return obs, ok
         if a == "list_files":
             lp = _resolve(cwd, action.get("path", "."))

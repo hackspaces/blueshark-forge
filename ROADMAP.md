@@ -590,7 +590,7 @@ The loop becomes safe to be wrong in (checkpoints), able to decompose (subagents
 
 ### P6.6 · Background process supervisor: crash push + pinned roster, no more remember-the-pid
 
-**Status: open · Impact 3/5 · Effort S · Depends on: none**
+**Status: done · Impact 3/5 · Effort S · Depends on: none** · note: `_BG_PROCS` upgraded from a bare Popen list to a registry of `{proc, cmd, log, started, reported_dead}`. New `tools.bg_events()` (probes each proc; a bg proc that EXITED since the last step yields a `[background] pid N (`cmd`) EXITED code C — last output:` notice, fired ONCE via `reported_dead`) and `tools.bg_roster()` (one `bg: pid N `cmd` → log` line per live proc). The agent probes at each step boundary in `_prepare_and_generate` right after `_absorb_inbox`, pushing death notices into context unprompted (as an `inbox` event, sender `background` — the UI renders it for free); the bash branch appends the roster so pids/logs survive compaction. A crashed server is now visible the moment it dies instead of the model debugging a phantom for five steps. (The leaked-log-fd fix the spec mentioned was already done in the v0.7.2 review pass.) +3 tests (roster-on-bash, fire-once death, unprompted-push-into-loop); 2 existing bg tests updated for the registry-dict shape. Full suite 442 green.
 
 **What.** Upgrade _BG_PROCS to a registry of {proc, cmd, log, started, reported_dead} with a per-step probe: when a background process has died since the last step, the harness pushes '[background] pid 1234 (`npm run dev`) EXITED code 1 — last log lines: …' into messages unprompted. While any bg process is alive, a one-line roster ('bg: 1234 `npm run dev` → .forge/output/bg-1.log') is appended to bash observations so pids survive compaction.
 

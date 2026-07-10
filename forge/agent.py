@@ -1478,6 +1478,13 @@ class Agent:
         prompt (messages + plan pin), generate the raw action, recalibrate the token ledger,
         and log the raw output. Returns (raw, prompt, pin) for the rest of the step."""
         self._absorb_inbox()
+        # P6.6: push background-process death notices the instant they happen — a server that
+        # crashes mid-task is otherwise invisible and the model debugs a phantom for five steps.
+        from .tools import bg_events
+        for notice in bg_events():
+            self.messages.append({"role": "user", "content": notice})
+            self.session.log("inbox", sender="background", text=notice)
+            self.on_event("inbox", sender="background", text=notice)
         # P4.1: re-stat tracked files so a bash/redirect/edit that changed a file's mtime
         # since it was read is caught before the gate/read-cache consult the ledger.
         self.ledger.refresh()
