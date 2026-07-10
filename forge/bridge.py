@@ -15,10 +15,16 @@ protocol, in both directions:
 If ~/.claude/fleet doesn't exist (no Claude Code fleet on this machine),
 every function degrades to a no-op and forge's native fleet works alone.
 """
+import contextlib
 import json
 import os
 import time
 import urllib.request
+
+try:
+    import fcntl
+except ImportError:
+    fcntl = None
 
 DIR = os.path.expanduser("~/.claude/fleet")
 INBOX = os.path.join(DIR, "inbox.json")
@@ -61,6 +67,30 @@ def _write_inbox(entries):
     os.replace(tmp, INBOX)
 
 
+@contextlib.contextmanager
+def _inbox_lock():
+    """Serialize the inbox read-modify-write across processes (forge + Claude Code),
+    so concurrent registrations don't lose an entry. os.replace prevents a torn READ;
+    this flock prevents a lost UPDATE. No-op where fcntl is unavailable / dir missing."""
+    if fcntl is None:
+        yield
+        return
+    try:
+        os.makedirs(DIR, exist_ok=True)
+        f = open(INBOX + ".lock", "w")
+    except OSError:
+        yield
+        return
+    try:
+        fcntl.flock(f, fcntl.LOCK_EX)
+        yield
+    finally:
+        try:
+            fcntl.flock(f, fcntl.LOCK_UN)
+        finally:
+            f.close()
+
+
 def claude_peers():
     """Live Claude Code sessions, normalized to forge registry shape."""
     peers = []
@@ -80,13 +110,14 @@ def register(session):
     if not available() or not session.port:
         return
     try:
-        entries = [e for e in _read_inbox() if e.get("pid") != os.getpid() and _pid_alive(e.get("pid"))]
-        entries.append({
-            "pid": os.getpid(), "cwd": session.cwd, "sessionId": session.sid,
-            "name": session.name, "port": session.port, "startedAt": time.time() * 1000,
-            "kind": "forge",
-        })
-        _write_inbox(entries)
+        with _inbox_lock():
+            entries = [e for e in _read_inbox() if e.get("pid") != os.getpid() and _pid_alive(e.get("pid"))]
+            entries.append({
+                "pid": os.getpid(), "cwd": session.cwd, "sessionId": session.sid,
+                "name": session.name, "port": session.port, "startedAt": time.time() * 1000,
+                "kind": "forge",
+            })
+            _write_inbox(entries)
     except OSError:
         pass
 
@@ -95,7 +126,8 @@ def unregister():
     if not available():
         return
     try:
-        _write_inbox([e for e in _read_inbox() if e.get("pid") != os.getpid()])
+        with _inbox_lock():
+            _write_inbox([e for e in _read_inbox() if e.get("pid") != os.getpid()])
     except OSError:
         pass
 
