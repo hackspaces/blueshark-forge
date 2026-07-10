@@ -73,8 +73,9 @@ def _have_model(name):
     try:
         out = subprocess.check_output(["ollama", "list"], text=True, timeout=10)
         base = name.split(":")[0]
-        return any(line.split()[0].split(":")[0] == base and name.split(":")[-1] in line for line in out.splitlines()[1:]) \
-            or any(name == line.split()[0] for line in out.splitlines()[1:])
+        rows = [ln for ln in out.splitlines()[1:] if ln.split()]   # skip blank lines (else split()[0] IndexErrors)
+        return any(line.split()[0].split(":")[0] == base and name.split(":")[-1] in line for line in rows) \
+            or any(name == line.split()[0] for line in rows)
     except (subprocess.SubprocessError, OSError):
         return False
 

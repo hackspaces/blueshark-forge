@@ -3490,6 +3490,74 @@ class TestLineAnchoredEdit(unittest.TestCase):
         self.assertTrue(obs[4][1])                           # now the edit lands
         self.assertEqual(_read(fp), "a = 10\nb = 2\nc = 3\nd = 4\ne = 5\nf = 60\n")
 
+    # ---- review-fix regressions: end_line region guard, empty anchor, atomic writes --
+    def test_anchored_end_line_beyond_read_span_is_blocked(self):
+        # a PARTIAL read (lines 1-3), then an anchored edit whose end_line (8) overruns
+        # the seen span, must be BLOCKED — not silently delete lines 4-8 (the anchor
+        # only guards start_line).
+        fp = os.path.join(self.d, "r.py")
+        original = "".join(f"line{i}\n" for i in range(1, 11))   # 10 lines
+        _write(fp, original)
+        actions = [
+            '{"thought":"read","action":"read_file","path":"r.py","offset":1,"limit":3}',
+            '{"thought":"overrun","action":"edit_file","path":"r.py","start_line":1,"end_line":8,"anchor":"line1","new":"X"}',
+            '{"thought":"done","action":"say","message":"done"}',
+        ]
+        a, events, obs = self._drive(self.d, actions)
+        self.assertFalse(obs[1][1])                          # blocked
+        self.assertIn("only read PART", obs[1][0])
+        self.assertEqual(_read(fp), original)                # file untouched — no silent deletion
+
+    def test_empty_anchor_only_matches_a_truly_identical_line(self):
+        from forge.tools import _anchor_ok
+        self.assertTrue(_anchor_ok("", ""))                  # exact blank match is fine
+        self.assertFalse(_anchor_ok("", "   "))              # blank anchor must NOT match a whitespace line
+        self.assertFalse(_anchor_ok("", "code"))
+        self.assertTrue(_anchor_ok("}", "    }"))            # real content stays whitespace-tolerant
+        self.assertFalse(_anchor_ok("x=1", "x = 2"))
+
+    def test_writes_are_atomic_and_leave_no_temp_file(self):
+        import glob
+        _write(os.path.join(self.d, "f.txt"), "one\ntwo\n")
+        execute({"action": "write_file", "path": "w.txt", "content": "hello\n"}, self.d)
+        execute({"action": "edit_file", "path": "f.txt", "start_line": 1, "end_line": 1,
+                 "anchor": "one", "new": "ONE"}, self.d)
+        self.assertEqual(_read(os.path.join(self.d, "w.txt")), "hello\n")
+        self.assertEqual(_read(os.path.join(self.d, "f.txt")), "ONE\ntwo\n")
+        self.assertEqual(glob.glob(os.path.join(self.d, ".forge-tmp-*")), [])   # no leaked temp file
+
+    def test_atomic_write_preserves_an_executable_files_mode(self):
+        import stat
+        sp = os.path.join(self.d, "s.sh")
+        _write(sp, "#!/bin/sh\necho hi\n")
+        os.chmod(sp, 0o755)
+        execute({"action": "edit_file", "path": "s.sh", "start_line": 2, "end_line": 2,
+                 "anchor": "echo hi", "new": "echo bye"}, self.d)
+        self.assertEqual(_read(sp), "#!/bin/sh\necho bye\n")
+        self.assertTrue(os.stat(sp).st_mode & stat.S_IXUSR)   # +x bit survived the edit
+
+
+class TestReadKeyDecode(unittest.TestCase):
+    """tui._read_key: an undecodable stdin byte must NOT read as the b'' EOF sentinel
+    (which the REPL treats as quit) — it is skipped and the next key is returned."""
+    def test_undecodable_byte_is_skipped_not_treated_as_eof(self):
+        from forge.tui import _read_key
+        r, w = os.pipe()
+        try:
+            os.write(w, b"\x80a")                            # one bad byte, then 'a'
+            self.assertEqual(_read_key(r), "a")              # bad byte skipped, 'a' returned
+        finally:
+            os.close(r); os.close(w)
+
+    def test_real_eof_still_returns_empty_bytes(self):
+        from forge.tui import _read_key
+        r, w = os.pipe()
+        os.close(w)                                          # writer closed → EOF
+        try:
+            self.assertEqual(_read_key(r), b"")
+        finally:
+            os.close(r)
+
 
 class TestRepoMap(unittest.TestCase):
     """P4.4 — ranked symbol-aware repo map, token-budgeted briefing, outline reads."""

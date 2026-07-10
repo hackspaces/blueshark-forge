@@ -78,6 +78,34 @@ class TestIterSSE(unittest.TestCase):
         lines = ["data: " + json.dumps({"choices": [{"delta": {"content": "z"}}]})]
         self.assertEqual("".join(c for c, u in iter_sse(lines)), "z")
 
+    def test_hostile_frames_do_not_crash_and_content_is_always_str(self):
+        # non-object frames, non-dict choices/delta, and non-string content must NOT
+        # raise (AttributeError/TypeError previously escaped and killed the stream).
+        lines = [
+            b"data: 5", b"data: null", b'data: "x"', b"data: [1,2]",
+            _sse({"choices": "nope"}),                        # choices not a list
+            _sse({"choices": [5]}),                           # choices[0] not a dict
+            _sse({"choices": [{"delta": None}]}),             # delta null
+            _sse({"choices": [{"delta": "txt"}]}),            # delta a string
+            _sse({"choices": [{"delta": {"content": 5}}]}),   # non-string content
+            _sse({"choices": [{"delta": {"content": None}}]}),
+            _sse({"choices": [{"delta": {"content": "good"}}]}),
+            _sse({"choices": [], "usage": {"prompt_tokens": 9}}),
+            b"data: [DONE]",
+        ]
+        out = list(iter_sse(lines))                            # must not raise
+        self.assertEqual("".join(c for c, u in out), "good")
+        self.assertTrue(all(isinstance(c, str) for c, u in out))
+        self.assertEqual([u for c, u in out if u][0]["prompt_tokens"], 9)
+
+    def test_usage_attached_to_a_content_chunk_is_surfaced(self):
+        # some engines attach usage to the final CONTENT chunk, not a separate empty one
+        lines = [_sse({"choices": [{"delta": {"content": "hi"}}],
+                       "usage": {"prompt_tokens": 42}})]
+        out = list(iter_sse(lines))
+        self.assertEqual("".join(c for c, u in out), "hi")
+        self.assertEqual([u for c, u in out if u][0]["prompt_tokens"], 42)
+
 
 class TestIterNDJSON(unittest.TestCase):
     def test_content_then_done_frame(self):
@@ -113,6 +141,22 @@ class TestIterNDJSON(unittest.TestCase):
         out = list(iter_ndjson(lines))       # must not raise
         self.assertEqual("".join(c for c, u in out), "ok")
         self.assertEqual([u for c, u in out if u][0]["prompt_eval_count"], 5)
+
+    def test_non_object_and_null_message_frames_do_not_crash(self):
+        # `{"message": null}` makes `.get("message", {})` return None (not the default);
+        # a non-object frame or non-string content must not raise into the loop.
+        lines = [
+            b"5", b"null", b'"x"', b"[1]",
+            json.dumps({"message": None}).encode(),            # present-but-null
+            json.dumps({"message": {"content": 7}}).encode(),  # non-string content
+            json.dumps({"message": "txt"}).encode(),           # message not a dict
+            json.dumps({"message": {"content": "good"}, "done": True,
+                        "prompt_eval_count": 11}).encode(),
+        ]
+        out = list(iter_ndjson(lines))       # must not raise
+        self.assertEqual("".join(c for c, u in out), "good")
+        self.assertTrue(all(isinstance(c, str) for c, u in out))
+        self.assertEqual([u for c, u in out if u][0]["prompt_eval_count"], 11)
 
 
 class TestStreamIntegration(unittest.TestCase):

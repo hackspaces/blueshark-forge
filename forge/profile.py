@@ -34,6 +34,7 @@ I/O errors so a broken or read-only store can never raise into the agent loop.
 import json
 import os
 import re
+import tempfile
 
 from .util import slurp
 
@@ -100,10 +101,18 @@ def load(model):
 def _save(model, data):
     try:
         os.makedirs(PROFILE_DIR, exist_ok=True)
-        tmp = _path(model) + ".tmp"
-        with open(tmp, "w") as f:
-            json.dump(data, f)
-        os.replace(tmp, _path(model))
+        # A UNIQUE temp name (not a fixed "<slug>.json.tmp") so two fleet sessions
+        # recording for the same model don't write the same temp fd and corrupt it.
+        fd, tmp = tempfile.mkstemp(dir=PROFILE_DIR, prefix="." + _slug(model) + "-")
+        try:
+            with os.fdopen(fd, "w") as f:
+                json.dump(data, f)
+            os.replace(tmp, _path(model))
+        except OSError:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
     except OSError:
         pass
 
@@ -130,21 +139,31 @@ def write_passport(model, probe_scores):
     _save(model, data)
 
 
+def _n(c, key):
+    """A count value coerced to a non-negative int (0 if missing / non-numeric). A
+    hand-edited or foreign-written passport (e.g. `{"loop":"5"}`) must never crash the
+    read paths, which run at Agent construction and `forge passport`."""
+    try:
+        return max(0, int(c.get(key, 0)))
+    except (TypeError, ValueError):
+        return 0
+
+
 def rates(model):
     """Derived per-session rates + the self-normalizing fuzzy-edit fraction. Used by
     ``knobs`` and by ``forge passport`` to explain a tuning decision."""
     data = load(model)
     c = data["counts"]
-    sessions = max(int(c.get("session", 0)), 0)
+    sessions = _n(c, "session")
     denom = max(sessions, 1)
-    edits = int(c.get("fuzzy_edit", 0)) + int(c.get("exact_edit", 0))
+    edits = _n(c, "fuzzy_edit") + _n(c, "exact_edit")
     return {
         "sessions": sessions,
-        "malformed_per_session": c.get("malformed", 0) / denom,
-        "loop_per_session": c.get("loop", 0) / denom,
-        "trunc_per_session": c.get("trunc_write", 0) / denom,
-        "escalate_per_session": c.get("escalate", 0) / denom,
-        "fuzzy_edit_frac": (c.get("fuzzy_edit", 0) / edits) if edits else 0.0,
+        "malformed_per_session": _n(c, "malformed") / denom,
+        "loop_per_session": _n(c, "loop") / denom,
+        "trunc_per_session": _n(c, "trunc_write") / denom,
+        "escalate_per_session": _n(c, "escalate") / denom,
+        "fuzzy_edit_frac": (_n(c, "fuzzy_edit") / edits) if edits else 0.0,
     }
 
 
@@ -160,14 +179,14 @@ def knobs(model, defaults):
     data = load(model)
     c = data["counts"]
     probe = data["probe"]
-    sessions = max(int(c.get("session", 0)), 0)
+    sessions = _n(c, "session")
 
     if sessions >= MIN_SESSIONS:
-        if c.get("loop", 0) / sessions >= LOOP_PRONE:
+        if _n(c, "loop") / sessions >= LOOP_PRONE:
             d["loop_threshold"] = TIGHT_LOOP_THRESHOLD
-        if c.get("trunc_write", 0) / sessions >= TRUNC_PRONE:
+        if _n(c, "trunc_write") / sessions >= TRUNC_PRONE:
             d["num_predict"] = max(int(d.get("num_predict", 0)), TRUNC_NUM_PREDICT)
-        if c.get("malformed", 0) / sessions >= MALFORMED_PRONE:
+        if _n(c, "malformed") / sessions >= MALFORMED_PRONE:
             d["heat_bump"] = max(float(d.get("heat_bump", 0.0)), HOT_HEAT_BUMP)
 
     # Active probe: a model that couldn't hold the action format under a temp-0 probe is

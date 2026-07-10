@@ -52,13 +52,22 @@ class Forged:
             h = _hash(text[:2000])
             if seen.get(e["sid"]) == h:
                 continue
-            seen[e["sid"]] = h; _save("seen-claims.json", seen)
             if fleet.harness_verified(e["sid"]):
                 log(f'TRUST: "{e["name"]}" already harness-verified this turn → skip')
+                seen[e["sid"]] = h; _save("seen-claims.json", seen)   # a real verdict — record it
                 continue
             log(f'TRUST: "{e["name"]}" claims done → verifying ({self.model})')
             files = fleet.edited_files(e["sid"], e["cwd"])   # scope per session — cheap
-            r = fleet.verify(text[:1500], e["cwd"], self.models, files=files)
+            try:
+                r = fleet.verify(text[:1500], e["cwd"], self.models, files=files)
+            except Exception as ex:
+                # A transient verify failure (test-suite timeout, backend error) must NOT
+                # mark the claim seen — that would suppress it permanently. Log and retry
+                # next tick; also keeps the exception from aborting the rest of the tick.
+                log(f'  verify error ("{e["name"]}"): {ex} — will retry next tick')
+                continue
+            # Only NOW, after a verdict was produced, record the claim as seen.
+            seen[e["sid"]] = h; _save("seen-claims.json", seen)
             with open(fleet.RECEIPTS, "a") as f:
                 f.write(json.dumps({"ts": time.time(), "sid": e["sid"], "cwd": e["cwd"],
                                     "verdict": r["verdict"], "evidence": r["evidence"]}) + "\n")

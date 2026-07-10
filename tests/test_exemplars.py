@@ -71,6 +71,16 @@ class TestStore(_StoreBase):
         self.assertIsNone(exemplars.fetch("m", "grep"))         # a kind never recorded
         self.assertIsNone(exemplars.fetch("other", "bash"))     # a model never recorded
 
+    def test_unreadable_present_store_never_raises_into_the_loop(self):
+        # a present-but-unreadable store (here: a DIRECTORY at the file path → slurp
+        # raises OSError) must degrade to empty, not raise into the malformed-nudge path.
+        os.makedirs(exemplars._path("dm"))                      # dir where a .jsonl is expected
+        os.makedirs(exemplars._counts_path())                   # dir where _malformed.json is expected
+        self.assertEqual(exemplars._load("dm"), [])
+        self.assertIsNone(exemplars.fetch("dm", "bash"))        # was: OSError escaped here
+        self.assertIsNone(exemplars.fetch_any("dm"))
+        self.assertEqual(exemplars.malformed_count("dm"), 0)
+
     def test_caps_at_five_per_kind_most_recent_wins(self):
         for n in range(7):
             exemplars.record("m", "bash", '{"action":"bash","command":"c%d"}' % n)

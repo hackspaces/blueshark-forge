@@ -509,11 +509,25 @@ def verify(claim, cwd, models, files=None):
                     scoped.append(os.path.join(work, rel))
         cmd = detect_test_cmd(work, files=scoped)
         if cmd:
-            p = subprocess.run(cmd, cwd=work, shell=True, capture_output=True, text=True, timeout=180)
-            det = _deterministic_verdict(cmd, p.returncode, p.stdout + p.stderr)
-            if det is not None:
-                return det
-            # pytest collected nothing → fall through to model reasoning
+            # start_new_session so a timeout kills the whole PROCESS GROUP — with
+            # shell=True the `timeout=` kill would otherwise hit only `sh -c` and orphan
+            # the real test process (pytest/node/go), leaking CPU. On timeout, fall
+            # through to model reasoning rather than crash the verify pass.
+            import signal
+            p = subprocess.Popen(cmd, cwd=work, shell=True, stdout=subprocess.PIPE,
+                                 stderr=subprocess.PIPE, text=True, start_new_session=True)
+            try:
+                out, err = p.communicate(timeout=180)
+                det = _deterministic_verdict(cmd, p.returncode, (out or "") + (err or ""))
+                if det is not None:
+                    return det
+            except subprocess.TimeoutExpired:
+                try:
+                    os.killpg(os.getpgid(p.pid), signal.SIGKILL)
+                except (OSError, ProcessLookupError):
+                    pass
+                p.wait()
+            # pytest collected nothing / timed out → fall through to model reasoning
 
         verdict, evidence = _gather_and_vote(models[0], work, claim)
         if verdict == "UNKNOWN" and len(models) > 1:

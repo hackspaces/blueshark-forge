@@ -33,7 +33,8 @@ def _git_files(root):
             # tracked + untracked-but-not-ignored
             u = subprocess.run(["git", "-C", root, "ls-files", "--others", "--exclude-standard"],
                                capture_output=True, text=True, timeout=10)
-            return sorted(set(r.stdout.split() + (u.stdout.split() if u.returncode == 0 else [])))
+            # splitlines(), NOT split(): a path with a space must stay one token.
+            return sorted(set(r.stdout.splitlines() + (u.stdout.splitlines() if u.returncode == 0 else [])))
     except (OSError, subprocess.SubprocessError):
         pass
     return None

@@ -70,7 +70,11 @@ def _read_key(fd):
     n = 2 if 0xC0 <= b0 < 0xE0 else 3 if 0xE0 <= b0 < 0xF0 else 4 if 0xF0 <= b0 < 0xF8 else 1
     if n > 1:
         ch += os.read(fd, n - 1)                          # UTF-8 continuation bytes
-    return ch.decode("utf-8", "ignore")
+    decoded = ch.decode("utf-8", "ignore")
+    # An undecodable byte (bad paste, mis-set locale) decodes to "" — which callers
+    # would conflate with the b"" EOF sentinel and QUIT the session. Skip it and read
+    # the next key instead of signalling EOF.
+    return decoded if decoded else _read_key(fd)
 
 
 def _read_key_or_wake(fd, wake_fd):

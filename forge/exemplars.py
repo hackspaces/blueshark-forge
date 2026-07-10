@@ -62,8 +62,12 @@ def _load(model):
     p = _path(model)
     if not os.path.exists(p):
         return []
+    try:
+        raw = slurp(p)                    # an unreadable-but-present file must not raise into the loop
+    except OSError:
+        return []
     out = []
-    for line in slurp(p).splitlines():
+    for line in raw.splitlines():
         try:
             d = json.loads(line)
         except json.JSONDecodeError:
@@ -149,7 +153,7 @@ def _load_counts():
         return {}
     try:
         d = json.loads(slurp(p))
-    except json.JSONDecodeError:
+    except (json.JSONDecodeError, OSError):   # OSError: unreadable-but-present must not raise into the loop
         return {}
     return d if isinstance(d, dict) else {}
 

@@ -620,14 +620,45 @@ def _number_lines(contents, start):
     return "\n".join(f"{start + i}\t{c}" for i, c in enumerate(contents))
 
 
+def _atomic_write(path, text):
+    """Write `text` to `path` atomically: a temp file in the SAME directory, then
+    os.replace (atomic on POSIX). A mid-write failure (ENOSPC, interrupt) leaves the
+    ORIGINAL file intact instead of a truncated/empty one — the syntax gate guards
+    invalid CONTENT, this guards a failed WRITE."""
+    import tempfile
+    d = os.path.dirname(path) or "."
+    fd, tmp = tempfile.mkstemp(dir=d, prefix=".forge-tmp-")
+    try:
+        with os.fdopen(fd, "w") as f:
+            f.write(text)
+        # mkstemp makes the temp 0600 and os.replace keeps the temp's mode, so without
+        # this an edit would STRIP an existing file's perms (e.g. a script's +x bit).
+        try:
+            os.chmod(tmp, os.stat(path).st_mode)          # preserve an existing file's mode
+        except OSError:                                    # new file → match a normal open() (umask-based)
+            um = os.umask(0)
+            os.umask(um)
+            os.chmod(tmp, 0o666 & ~um)
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
 def _anchor_ok(anchor, current):
     """True if the anchor (the expected current text of the edited start line)
     matches the actual line. Exact match, or — like _fuzzy_replace — ignoring
     leading/trailing whitespace, so a model that slips one line's indentation
-    still lands while a genuine MISCOUNT (different content) is rejected."""
+    still lands while a genuine MISCOUNT (different content) is rejected. A BLANK
+    anchor (empty after strip) matches ONLY by exact equality — otherwise it would
+    match any blank line and let a miscounted start_line splice the wrong region."""
     if anchor == current:
         return True
-    return anchor.strip() == current.strip()
+    a = anchor.strip()
+    return bool(a) and a == current.strip()
 
 
 def _anchored_edit(action, path, text):
@@ -667,8 +698,7 @@ def _anchored_edit(action, path, text):
     if block:
         return (f"that edit would make {rel} invalid — {err}. The file was NOT changed. "
                 "Fix the replacement and retry.", False)
-    with open(path, "w") as f:
-        f.write(newtext)
+    _atomic_write(path, newtext)
     # echo the post-edit region ±3 lines, numbered — line numbers BELOW the splice
     # have shifted, so the model must re-read for fresh numbers before editing elsewhere.
     new_last = start - 1 + len(newlines)             # 1-based last line of the inserted block
@@ -797,8 +827,7 @@ def execute(action, cwd, stop=None):
                 return (f"that content would make {action['path']} invalid — {err}. "
                         "The file was NOT written. Fix it and retry.", False)
             os.makedirs(os.path.dirname(p) or ".", exist_ok=True)
-            with open(p, "w") as f:
-                f.write(content)
+            _atomic_write(p, content)
             return f"wrote {action['path']} ({len(content)} bytes)" + _syntax_tail(err), True
         if a == "edit_file":
             p = _resolve(cwd, action.get("path", ""))
@@ -850,8 +879,7 @@ def execute(action, cwd, stop=None):
             if block:
                 return (f"that edit would make {action['path']} invalid — {err}. "
                         "The file was NOT changed. Fix the snippet and retry.", False)
-            with open(p, "w") as f:
-                f.write(newtext)
+            _atomic_write(p, newtext)
             return f"edited {action['path']} ({how})" + _syntax_tail(err), True
         return f"(unknown action: {a})", False
     except Exception as e:

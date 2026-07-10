@@ -907,6 +907,18 @@ class Agent:
         e = self.ledger.get(fp)
         if e is None or e.whole or not e.spans:
             return True
+        # P5.3 anchored dialect: the `anchor` guards only start_line; a miscounted
+        # end_line would silently splice/delete lines the model never read. Require the
+        # FULL [start,end] range to fall within a span it actually saw.
+        if act.get("start_line") is not None:
+            try:
+                start = int(act.get("start_line"))
+                end = int(act.get("end_line", start))
+            except (TypeError, ValueError):
+                return True
+            if end < start:
+                return True
+            return any(a <= start and end <= b for a, b in e.spans)
         old = act.get("old", "")
         try:
             with open(fp, errors="replace") as f:
@@ -1697,8 +1709,11 @@ class Agent:
                             continue
                         # partial-read guard: editing a region the model never read
                         # still requires a region read (a 10-line read is not the file).
-                        if kind == "edit_file" and act.get("old") and not self._edit_region_seen(act, fp):
-                            obs = (f"Blocked: you only read PART of {act.get('path')} — the text you're editing "
+                        # Covers BOTH dialects: an {old,new} snippet located outside the
+                        # read spans, and a P5.3 anchored [start,end] range that overruns them.
+                        if kind == "edit_file" and (act.get("old") or act.get("start_line") is not None) \
+                                and not self._edit_region_seen(act, fp):
+                            obs = (f"Blocked: you only read PART of {act.get('path')} — the range you're editing "
                                    "is outside the lines you read. Read that region first (use offset/limit), "
                                    "then edit.")
                             trace["ok"] = False

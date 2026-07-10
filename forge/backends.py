@@ -73,12 +73,24 @@ def iter_sse(lines):
             return
         try:
             obj = json.loads(data)
-            if obj.get("usage") and not obj.get("choices"):
-                yield "", obj["usage"]
-            else:
-                yield obj["choices"][0]["delta"].get("content", ""), None
-        except (json.JSONDecodeError, KeyError, IndexError):
+        except json.JSONDecodeError:
             continue
+        if not isinstance(obj, dict):     # a bare number/array/string/null is not a frame
+            continue
+        # A hostile or quirky engine can send a non-dict `choices[0]`/`delta`, a
+        # non-string `content`, or attach `usage` to a content-carrying chunk — none
+        # may crash the stream (an uncaught AttributeError/TypeError here kills the
+        # turn or silently truncates, dropping the usage frame forever).
+        usage = obj.get("usage") or None
+        content = ""
+        choices = obj.get("choices")
+        if isinstance(choices, list) and choices and isinstance(choices[0], dict):
+            delta = choices[0].get("delta")
+            if isinstance(delta, dict):
+                c = delta.get("content", "")
+                content = c if isinstance(c, str) else ""
+        if content or usage:
+            yield content, usage
 
 
 def iter_ndjson(lines):
@@ -94,7 +106,13 @@ def iter_ndjson(lines):
             obj = json.loads(line)
         except json.JSONDecodeError:
             continue
-        yield obj.get("message", {}).get("content", ""), None
+        if not isinstance(obj, dict):     # a bare number/array/string/null is not a frame
+            continue
+        # `message` present-but-null makes `.get("message", {})` return None (not the
+        # default), and a non-string `content` would crash the downstream join — guard both.
+        msg = obj.get("message")
+        content = msg.get("content", "") if isinstance(msg, dict) else ""
+        yield (content if isinstance(content, str) else ""), None
         if obj.get("done"):
             yield "", {"prompt_eval_count": obj.get("prompt_eval_count")}
             return
@@ -168,7 +186,10 @@ class OllamaBackend:
             resp = json.loads(r.read())
         if resp.get("prompt_eval_count"):
             self.last_prompt_tokens = resp["prompt_eval_count"]
-        return resp["message"]["content"]
+        try:
+            return resp["message"]["content"]
+        except (KeyError, TypeError):     # a 200 with an error/unexpected body → clean message, not a crash
+            raise ForgeError(f"Unexpected response from Ollama at {self.url}: {str(resp)[:200]}")
 
     def stream(self, messages, schema=None, temperature=0.0):
         with self._open(self._req(self._body(messages, schema, temperature, True))) as r:

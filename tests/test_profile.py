@@ -142,6 +142,27 @@ class TestKnobs(_Store):
         profile.knobs("m", DEFAULTS)
         self.assertEqual(DEFAULTS["loop_threshold"], DEFAULT_LOOP_THRESHOLD)
 
+    def test_hand_edited_string_counts_do_not_crash_reads(self):
+        # a passport foreign-written with string counts must not crash knobs/rates
+        # (they run at Agent construction and `forge passport`).
+        import json
+        with open(profile._path("m"), "w") as f:
+            json.dump({"counts": {"loop": "5", "session": "4", "malformed": "x"}}, f)
+        k = profile.knobs("m", DEFAULTS)         # must not raise
+        self.assertEqual(k["loop_threshold"], 2)  # "5"/"4" coerced → loop-prone
+        r = profile.rates("m")                    # must not raise
+        self.assertEqual(r["sessions"], 4)
+        self.assertEqual(r["malformed_per_session"], 0.0)   # non-numeric → 0
+
+    def test_save_uses_a_unique_temp_and_leaves_none_behind(self):
+        import glob
+        profile.record("a:m", "loop")
+        profile.record("b:m", "loop")            # distinct model, same dir
+        self.assertEqual(profile.load("a:m")["counts"], {"loop": 1})
+        self.assertEqual(profile.load("b:m")["counts"], {"loop": 1})
+        # no fixed "<slug>.json.tmp" (or any temp) left behind
+        self.assertEqual(glob.glob(os.path.join(self.dir, "*.tmp")), [])
+
 
 # --------------------------------------------------------------- active probe scoring
 
