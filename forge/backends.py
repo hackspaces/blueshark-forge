@@ -269,6 +269,8 @@ class OpenAICompatBackend:
             import sys
             print(f"[forge] {self.url}: this engine did not accept any json_schema dialect; "
                   "running WITHOUT constrained decoding (outputs may be less reliable).", file=sys.stderr)
+            return          # do NOT persist "none": a transient/unrelated 400 that echoes the
+                            # request body would otherwise permanently disable schema across runs.
         try:
             from . import config
             config.set_key("schema_dialect", dialect)

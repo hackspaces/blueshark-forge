@@ -384,8 +384,10 @@ class TestSchemaDialect(unittest.TestCase):
         out = b.chat([{"role": "user", "content": "hi"}], schema={"type": "object"})
         self.assertEqual(out, "OK")
         self.assertEqual(seen, ["response_format", "guided_json", "json_schema", "none"])
-        self.assertEqual(b._schema_dialect, "none")
-        self.assertEqual(self.persisted.get("schema_dialect"), "none")
+        self.assertEqual(b._schema_dialect, "none")             # session-local fallback
+        self.assertIsNone(self.persisted.get("schema_dialect"))  # NOT persisted: re-probe next run
+                                                                 # (a transient/unrelated 400 must not
+                                                                 #  permanently disable constrained decoding)
 
     def test_non_schema_400_propagates(self):
         def dispatch(body):
