@@ -1473,6 +1473,50 @@ class Agent:
                          prompt_tokens=getattr(self.backend, "last_prompt_tokens", 0))
         return raw, prompt, pin
 
+    def _handle_malformed(self, raw, prompt, step, trace):
+        """The malformed-JSON strike path (deterministic salvage already failed). Counts
+        the strike + passport/exemplar telemetry, bumps retry-heat, then resolves to ONE of:
+          ("proceed", raw, act) — the 3rd strike borrowed one action from a stronger rung;
+                                  execute it this step (no strike carried, no abort);
+          ("continue", None, None) — appended a retry nudge (its own past valid action of the
+                                     guessed kind when available); re-generate next step;
+          ("abort", None, None) — the 5th strike: the model can't hold the format, end the turn.
+        """
+        self.stuck["malformed"] += 1
+        self._bump_stuck("malformed", STUCK_MALFORMED_W)   # P5.7
+        self._heat = min(0.7, self._heat + self.heat_bump)   # P5.5 / P5.8
+        trace["malformed"] = True
+        self.on_event("malformed")
+        self.session.log("malformed", v=TRACE_V, step=step, raw=raw[:200])
+        exemplars.record_malformed(self.backend.name)   # P5.6: keys the cold-start head-pin
+        # P5.8 passport telemetry: a strike, + a trunc_write when the output was a truncated
+        # write_file (the num_predict-budget failure) so the passport can raise the budget.
+        if self._passport_on:
+            profile.record(self.backend.name, "malformed")
+            if exemplars.guess_kind(raw) == "write_file":
+                profile.record(self.backend.name, "trunc_write")
+        # P5.7: route the THIRD strike through _borrow (the failure mode most correlated with
+        # model size, which the old loop aborted at 5 without ever consulting a stronger rung).
+        braw = bact = None
+        if self.stuck["malformed"] >= MALFORMED_BORROW_AT:
+            braw, bact = self._borrow(prompt, step, trace)
+        if bact is not None:
+            return "proceed", braw, bact
+        # P5.6: quote one of the model's OWN past valid actions of the guessed kind — a far
+        # stronger anchor than the bare text nudge. Plain nudge when no exemplar exists yet.
+        guessed = exemplars.guess_kind(raw)
+        ex = exemplars.fetch(self.backend.name, guessed) if guessed else None
+        if ex:
+            nudge = (f"That was not valid action JSON. Here is a valid `{guessed}` action "
+                     "you emitted earlier — reply with ONE JSON action object in exactly "
+                     f"this shape:\n{ex}")
+        else:
+            nudge = "That was not valid action JSON. Reply with one JSON action object only."
+        self.messages.append({"role": "user", "content": nudge})
+        if self.stuck["malformed"] >= MALFORMED_ABORT_AT:
+            return "abort", None, None
+        return "continue", None, None
+
     def send(self, user_text):
         self.messages.append({"role": "user", "content": user_text})
         # P4.5 just-in-time retrieval: turn-start, inject ONE deterministic
@@ -1528,51 +1572,12 @@ class Agent:
                         # through to the malformed strike + text nudge + abort-at-5.
                         act, stage = self._salvage(raw)
                         if act is None:
-                            self.stuck["malformed"] += 1
-                            self._bump_stuck("malformed", STUCK_MALFORMED_W)   # P5.7
-                            self._heat = min(0.7, self._heat + self.heat_bump)   # P5.5 / P5.8
-                            trace["malformed"] = True
-                            self.on_event("malformed")
-                            self.session.log("malformed", v=TRACE_V, step=step, raw=raw[:200])
-                            # P5.6: tally the strike (keys the cold-start head-pin).
-                            exemplars.record_malformed(self.backend.name)
-                            # P5.8 passport telemetry: a malformed strike, and — when the
-                            # output was a truncated write_file (the num_predict-budget
-                            # failure) — a `trunc_write` too, so the passport can raise
-                            # this model's output budget.
-                            if self._passport_on:
-                                profile.record(self.backend.name, "malformed")
-                                if exemplars.guess_kind(raw) == "write_file":
-                                    profile.record(self.backend.name, "trunc_write")
-                            # P5.7: route the THIRD malformed strike through _borrow —
-                            # the failure mode MOST correlated with model size, which the
-                            # old loop aborted at 5 without ever consulting a stronger
-                            # rung. A borrowed action replaces the stuck cheap output and
-                            # executes below (no strike, no abort). No stronger rung / the
-                            # escalation lever off → fall through to the nudge + abort-at-5.
-                            braw = bact = None
-                            if self.stuck["malformed"] >= MALFORMED_BORROW_AT:
-                                braw, bact = self._borrow(prompt, step, trace)
-                            if bact is not None:
-                                raw, act = braw, bact
-                                # fall through: execute the borrowed action this step.
-                            else:
-                                # P5.6: if we can guess what kind this output was
-                                # ATTEMPTING, quote one of the model's OWN past valid
-                                # actions of that kind — a far stronger anchor than the
-                                # bare text nudge. Plain nudge when no exemplar exists yet.
-                                guessed = exemplars.guess_kind(raw)
-                                ex = exemplars.fetch(self.backend.name, guessed) if guessed else None
-                                if ex:
-                                    nudge = (f"That was not valid action JSON. Here is a valid `{guessed}` action "
-                                             "you emitted earlier — reply with ONE JSON action object in exactly "
-                                             f"this shape:\n{ex}")
-                                else:
-                                    nudge = "That was not valid action JSON. Reply with one JSON action object only."
-                                self.messages.append({"role": "user", "content": nudge})
-                                if self.stuck["malformed"] >= MALFORMED_ABORT_AT:
-                                    return "(the model could not hold the action format)"
+                            control, raw, act = self._handle_malformed(raw, prompt, step, trace)
+                            if control == "continue":
                                 continue
+                            if control == "abort":
+                                return "(the model could not hold the action format)"
+                            # control == "proceed": raw/act are a BORROWED action — fall through
                         else:
                             self.on_event("salvage", stage=stage)
                             self.session.log("salvage", v=TRACE_V, step=step, stage=stage)
