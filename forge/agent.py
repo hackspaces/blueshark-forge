@@ -1112,7 +1112,7 @@ class Agent:
                 continue
             self._alias_path(cand)
             ck = cand.get("action")
-            if self._missing_required(ck, cand) or self._gate(ck, cand):
+            if self._missing_required(ck, cand) or self._gate_silent(ck, cand):   # no prompt while scoring
                 continue
             # a candidate that drifts to an edit/write of a file the model hasn't read
             # must not slip past the read-before-edit gate the greedy already cleared —
@@ -1238,6 +1238,20 @@ class Agent:
             head = (act.get("command") or "").strip().split()
             return f"bash:{head[0] if head else ''}"
         return act.get("action")
+
+    def _gate_silent(self, kind, act):
+        """Side-effect-free gate check for SCORING throwaway resample candidates:
+        True if the action would be blocked, WITHOUT prompting the user or persisting
+        an approval (which _gate does in manual mode). Auto never blocks; plan blocks
+        mutating actions; manual blocks a mutating action unless already 'always'-approved."""
+        if kind not in self.MUTATING or self.mode == "auto":
+            return False
+        if kind == "fleet_send" and (not act.get("message")
+                                     or act.get("target", "").strip().lower() in ("", "list", "sessions")):
+            return False
+        if self.mode == "plan":
+            return True
+        return self._approval_key(act) not in self.approvals   # manual: blocked unless pre-approved (no prompt)
 
     def _gate(self, kind, act):
         """Mode gate for mutating actions. Returns a block message, or None to
