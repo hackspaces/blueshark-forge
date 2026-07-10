@@ -287,12 +287,42 @@ _BASH_HINTS = [
 ]
 _BASH_HINTS = [(__import__("re").compile(p, __import__("re").I), h) for p, h in _BASH_HINTS]
 
+_IS_DARWIN = __import__("platform").system() == "Darwin"
+
+# Environment fluency: macOS ships BSD userland, not GNU. A command that works on Linux is
+# absent or behaves differently here — the model wastes turns rediscovering it (this session
+# hit `timeout: command not found`). These OS-gated hints turn that into one actionable line.
+_DARWIN_HINTS = [
+    (r"command not found:\s*timeout\b|\btimeout\b[^\n]{0,20}(?:command )?not found",
+     "hint: macOS has no GNU `timeout`. Use `gtimeout` (needs `brew install coreutils`), or a "
+     "shell pattern: `( cmd & pid=$!; sleep N; kill $pid 2>/dev/null )`."),
+    (r"command not found:\s*g(?:timeout|sed|date|realpath|head|split|stat)\b|"
+     r"\bg(?:timeout|sed|date|realpath|head|split|stat)\b[^\n]{0,20}(?:command )?not found",
+     "hint: that GNU coreutils binary isn't installed here — `brew install coreutils` (GNU tools "
+     "are g-prefixed on macOS: gsed, gtimeout, gdate, grealpath…)."),
+    (r"sed:.*(?:invalid command code|extra characters at the end|-i may not be used|command [a-z] expects)",
+     "hint: BSD/macOS `sed -i` requires a backup-suffix arg — write `sed -i '' 's/…/…/' file` "
+     "(empty '' = edit in place, no backup), or use `perl -i -pe` / `gsed -i`."),
+    (r"readlink: illegal option -- f|readlink:.*-- f",
+     "hint: BSD `readlink` has no `-f`. Use `realpath`, or `python3 -c "
+     "'import os,sys;print(os.path.realpath(sys.argv[1]))' <path>`."),
+    (r"date: illegal option -- d",
+     "hint: BSD `date` has no `-d`. Use `date -v` (e.g. `date -v-1d`) or `gdate -d` (coreutils)."),
+]
+_DARWIN_HINTS = [(__import__("re").compile(p, __import__("re").I), h) for p, h in _DARWIN_HINTS]
+
 
 def error_hint(text):
     """Return the first matching recovery hint for a failed bash observation, or ''.
-    Pure and deterministic — the caller appends it to the failure observation."""
+    Pure and deterministic — the caller appends it to the failure observation. OS-specific
+    hints (macOS/BSD-userland gotchas) are checked first when we're on that OS."""
+    text = text or ""
+    if _IS_DARWIN:
+        for rx, hint in _DARWIN_HINTS:
+            if rx.search(text):
+                return hint
     for rx, hint in _BASH_HINTS:
-        if rx.search(text or ""):
+        if rx.search(text):
             return hint
     return ""
 

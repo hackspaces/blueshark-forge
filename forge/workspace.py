@@ -192,6 +192,15 @@ def environment(cwd):
                 lines.append(f"Git: on branch {branch}" + (f", {dirty} uncommitted change(s)" if dirty else ", clean"))
         except (OSError, subprocess.SubprocessError):
             pass
+    # OS-userland quirks: macOS ships BSD tools, not GNU — surface the differences so the
+    # model uses the right command for THIS box instead of a Linux habit that fails here.
+    if platform.system() == "Darwin":
+        note = ("Userland: BSD (macOS), not GNU — `timeout`→use `gtimeout`, `sed -i` needs a "
+                "backup-suffix arg (`sed -i '' …`), no `readlink -f` / `date -d`.")
+        note += (" GNU coreutils installed (g-prefixed: gsed, gtimeout, gdate…)."
+                 if (shutil.which("gtimeout") or shutil.which("gsed"))
+                 else " GNU coreutils NOT installed — use the BSD forms above.")
+        lines.append(note)
     return "ENVIRONMENT\n" + "\n".join(lines)
 
 
