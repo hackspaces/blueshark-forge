@@ -1595,12 +1595,29 @@ class Agent:
             return "abort", None, None
         return "continue", None, None
 
-    def send(self, user_text):
+    def _log_step(self, trace, t0):
+        """P3.1 flight recorder: emit EXACTLY ONE 'step' record per loop iteration (from the
+        loop's finally, so any continue/return/raise still logs it). Guarded so a logging
+        error can't mask a raising backend — the original exception still propagates."""
+        try:
+            trace["elapsed_ms"] = int((time.monotonic() - t0) * 1000)
+            used, window = self._fill()
+            trace["used"], trace["window"] = used, window
+            if self._compacted:
+                trace["compacted"] = True
+                self._compacted = False
+            self.session.log("step", **trace)
+        except Exception:
+            pass
+
+    def _begin_turn(self, user_text):
+        """Turn setup: append the user message (+ the P4.5 JIT-retrieval note), reset the
+        per-turn flags and the P5.7 stuck ledger, and decay one escalation rung at the turn
+        boundary (unless sticky) so the next turn proposes-small again."""
         self.messages.append({"role": "user", "content": user_text})
-        # P4.5 just-in-time retrieval: turn-start, inject ONE deterministic
-        # "[retrieved context]" note (matched files + symbols + the test command)
-        # so the first pure-retrieval steps become zero steps. Skipped when the
-        # prompt names nothing real; wrapped so retrieval NEVER breaks a turn.
+        # P4.5 just-in-time retrieval: inject ONE deterministic "[retrieved context]" note
+        # (matched files + symbols + test command) so the first pure-retrieval steps become
+        # zero steps. Skipped when the prompt names nothing real; wrapped so it NEVER breaks a turn.
         if self._lv("workspace"):
             try:
                 note = self._retrieval_note(user_text)
@@ -1614,19 +1631,19 @@ class Agent:
         self._heat = 0.0   # P5.5: greedy for the first try of every turn
         self.session.log("user", text=user_text)
         self.session.set_status("working")
-        recent = []
-        # P5.7 unified per-turn stuck ledger — one weighted score (replacing the old
-        # disjoint bad / fail_counts / total_fails) drives escalation at self.stuck_at;
-        # `malformed` and `sig_fails` still count the two borrow triggers.
+        # P5.7 unified per-turn stuck ledger — one weighted score (replacing the old disjoint
+        # bad / fail_counts / total_fails) drives escalation at self.stuck_at.
         self.stuck = {"score": 0.0, "events": [], "last_err_by_sig": {},
                       "malformed": 0, "sig_fails": {}, "borrows": 0}
         self.clean_streak = 0
         self._prewarmed = False
-        # P5.7 tier decay: relax one escalation rung at the turn boundary (so the next
-        # turn proposes-small again) unless the machine pins escalation sticky. No-op at
-        # the base rung.
+        # P5.7 tier decay: relax one escalation rung at the turn boundary unless sticky.
         if not self.sticky_escalation:
             self._deescalate()
+
+    def send(self, user_text):
+        self._begin_turn(user_text)
+        recent = []
         try:
             for step in range(1, self.max_steps + 1):
                 if self.stop.is_set():
@@ -1950,19 +1967,7 @@ class Agent:
                     if recorded_fp:
                         self.ledger.set_obs_msg(recorded_fp, obs_msg)
                 finally:
-                    # ONE step record per iteration. Guarded so a raising backend is
-                    # surfaced (the original exception propagates) — not masked by a
-                    # logging error — while the trace still lands on the happy path.
-                    try:
-                        trace["elapsed_ms"] = int((time.monotonic() - _t0) * 1000)
-                        used, window = self._fill()
-                        trace["used"], trace["window"] = used, window
-                        if self._compacted:
-                            trace["compacted"] = True
-                            self._compacted = False
-                        self.session.log("step", **trace)
-                    except Exception:
-                        pass
+                    self._log_step(trace, _t0)
 
             return "(hit the step limit — ask me to continue)"
         finally:
