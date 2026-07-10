@@ -3653,6 +3653,67 @@ class TestReadKeyDecode(unittest.TestCase):
             os.close(r)
 
 
+class TestBatchEdit(unittest.TestCase):
+    """P6.5 atomic multi-edit: an `edits:[{old,new},…]` array applied validate-first,
+    all-or-nothing; and the loop-signature fix so distinct edits to one file don't trip."""
+    def setUp(self):
+        self.d = tempfile.mkdtemp()
+
+    def test_batch_applies_all_hunks_at_once(self):
+        _write(os.path.join(self.d, "f.py"), "a = 1\nb = 2\nc = 3\n")
+        out, ok = execute({"action": "edit_file", "path": "f.py", "edits": [
+            {"old": "a = 1", "new": "a = 10"},
+            {"old": "c = 3", "new": "c = 30"}]}, self.d)
+        self.assertTrue(ok)
+        self.assertIn("applied 2 edits", out)
+        self.assertEqual(_read(os.path.join(self.d, "f.py")), "a = 10\nb = 2\nc = 30\n")
+
+    def test_batch_is_atomic_on_any_failure(self):
+        original = "a = 1\nb = 2\n"
+        _write(os.path.join(self.d, "f.py"), original)
+        out, ok = execute({"action": "edit_file", "path": "f.py", "edits": [
+            {"old": "a = 1", "new": "a = 10"},        # would apply
+            {"old": "NOPE", "new": "x"}]}, self.d)     # fails → whole batch aborts
+        self.assertFalse(ok)
+        self.assertIn("edit 2/2", out)
+        self.assertIn("NOTHING was written", out)
+        self.assertEqual(_read(os.path.join(self.d, "f.py")), original)   # file untouched
+
+    def test_batch_hunks_apply_against_running_text(self):
+        _write(os.path.join(self.d, "f.py"), "x = 1\n")
+        out, ok = execute({"action": "edit_file", "path": "f.py", "edits": [
+            {"old": "x = 1", "new": "x = 2"},          # then the next hunk sees x = 2
+            {"old": "x = 2", "new": "x = 3"}]}, self.d)
+        self.assertTrue(ok)
+        self.assertEqual(_read(os.path.join(self.d, "f.py")), "x = 3\n")
+
+    def test_batch_refused_if_it_would_break_syntax(self):
+        original = "def f():\n    return 1\n"
+        _write(os.path.join(self.d, "g.py"), original)
+        out, ok = execute({"action": "edit_file", "path": "g.py", "edits": [
+            {"old": "return 1", "new": "return ("}]}, self.d)    # invalid python
+        self.assertFalse(ok)
+        self.assertIn("invalid", out)
+        self.assertEqual(_read(os.path.join(self.d, "g.py")), original)
+
+    def test_distinct_edits_to_one_file_do_not_trip_the_loop(self):
+        fp = os.path.join(self.d, "r.py")
+        _write(fp, "a = 1\nb = 2\nc = 3\n")
+        actions = [
+            '{"thought":"read","action":"read_file","path":"r.py"}',
+            '{"thought":"e1","action":"edit_file","path":"r.py","old":"a = 1","new":"a = 10"}',
+            '{"thought":"e2","action":"edit_file","path":"r.py","old":"b = 2","new":"b = 20"}',
+            '{"thought":"e3","action":"edit_file","path":"r.py","old":"c = 3","new":"c = 30"}',
+            '{"thought":"done","action":"say","message":"done"}',
+        ]
+        events = []
+        a = Agent(ScriptBackend(actions), sm.EphemeralSession(self.d, "s"),
+                  max_steps=10, on_event=lambda k, **kw: events.append((k, kw)))
+        a.send("edit three lines")
+        self.assertFalse(any(k == "loop" for k, _ in events))         # no false loop trip
+        self.assertEqual(_read(fp), "a = 10\nb = 20\nc = 30\n")        # all three applied
+
+
 class TestRepoMap(unittest.TestCase):
     """P4.4 — ranked symbol-aware repo map, token-budgeted briefing, outline reads."""
 

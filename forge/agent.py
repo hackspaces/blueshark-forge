@@ -1531,9 +1531,11 @@ class Agent:
         verified done-gate flags, classifies a bash run (ran-tests vs file-touching), emits
         the diff + observation events, and logs the shaped observation. Returns
         (obs, ok, budget, recorded_fp) for the failure-accounting + compaction that follow."""
-        # capture the before-content so we can show a real diff after a write
+        # capture the before-content so we can show a real diff after a write — and, P6.5,
+        # after a BATCH edit (its per-hunk old/new aren't in the action, so a full pre/post
+        # diff is the only way to render it).
         before = ""
-        if kind == "write_file":
+        if kind == "write_file" or (kind == "edit_file" and act.get("edits")):
             _fp = os.path.join(self.session.cwd, act.get("path", ""))
             if os.path.isfile(_fp):
                 try:
@@ -1592,8 +1594,17 @@ class Agent:
             # P5.8 passport telemetry: classify the edit from execute()'s (fuzzy)/(exact) suffix.
             if self._passport_on:
                 profile.record(self.backend.name,
-                               "fuzzy_edit" if "(fuzzy)" in (obs or "") else "exact_edit")
-            self.on_event("diff", path=act.get("path", ""), old=act.get("old", ""), new=act.get("new", ""))
+                               "fuzzy_edit" if "fuzzy" in (obs or "") and "exact" not in (obs or "") else "exact_edit")
+            if act.get("edits"):     # P6.5 batch: per-hunk old/new aren't here — render a full pre/post diff
+                after = ""
+                try:
+                    with open(os.path.join(self.session.cwd, act.get("path", "")), errors="replace") as _f:
+                        after = _f.read()
+                except OSError:
+                    pass
+                self.on_event("diff", path=act.get("path", ""), old=before, new=after)
+            else:
+                self.on_event("diff", path=act.get("path", ""), old=act.get("old", ""), new=act.get("new", ""))
         elif ok and kind == "write_file":
             self.on_event("diff", path=act.get("path", ""), old=before, new=act.get("content", ""))
         self.session.log("observation", text=shape(obs, budget), ok=ok)
@@ -1903,8 +1914,14 @@ class Agent:
                         self._do_fleet_send(act, trace)
                         continue
 
-                    # include offset so paging one big file (same path, new range) isn't seen as a loop
-                    sig = f"{kind}:{act.get('command') or act.get('path') or act.get('pattern') or ''}:{act.get('offset', '')}"
+                    # include offset so paging one big file (same path, new range) isn't seen as a loop.
+                    # P6.5: also fold the EDIT payload in — otherwise three DIFFERENT successful edits
+                    # to one file share `edit_file:<path>:` and falsely trip the loop breaker.
+                    _edit_disc = ""
+                    if kind == "edit_file":
+                        _edit_disc = (str(act.get("start_line") or "") + (act.get("old") or "")
+                                      + json.dumps(act.get("edits") or "", sort_keys=True))[:120]
+                    sig = f"{kind}:{act.get('command') or act.get('path') or act.get('pattern') or ''}:{act.get('offset', '')}:{_edit_disc}"
                     trace["sig"] = sig
                     recent.append(sig)
                     # P5.8: loop_threshold is per-model (2 for loop-prone models, 3 default).

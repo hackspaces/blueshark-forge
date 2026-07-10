@@ -41,6 +41,13 @@ ACTION_SCHEMA = {
         "content": {"type": "string", "description": "full file content (write_file)"},
         "old": {"type": "string", "description": "exact text to replace (edit_file, {old,new} dialect)"},
         "new": {"type": "string", "description": "replacement text (edit_file)"},
+        "edits": {
+            "type": "array",
+            "items": {"type": "object",
+                      "properties": {"old": {"type": "string"}, "new": {"type": "string"}},
+                      "required": ["old", "new"]},
+            "description": "edit_file: apply MULTIPLE {old,new} replacements to one file atomically (all-or-nothing) — one turn instead of one edit per turn",
+        },
         "start_line": {"type": "integer", "description": "edit_file (line-anchored dialect): 1-based first line to replace — read the file first, numbers are shown in the read"},
         "end_line": {"type": "integer", "description": "edit_file (line-anchored dialect): 1-based last line to replace, inclusive (same as start_line for a single line)"},
         "anchor": {"type": "string", "description": "edit_file (line-anchored dialect): the current text of start_line copied verbatim from the numbered read — a guard so a miscounted range is rejected, not mis-spliced"},
@@ -92,7 +99,7 @@ _ACTION_FIELDS = {
     "bash":       ("command", "background"),
     "read_file":  ("path", "offset", "limit", "outline"),
     "write_file": ("path", "content"),
-    "edit_file":  ("path", "old", "new", "start_line", "end_line", "anchor"),
+    "edit_file":  ("path", "old", "new", "edits", "start_line", "end_line", "anchor"),
     "list_files": ("path",),
     "grep":       ("pattern", "path", "context"),
     "glob":       ("pattern",),
@@ -166,6 +173,9 @@ Actions:
                                   (a guard: a miscounted range is rejected, not mis-spliced). No need to
                                   reproduce the old text. Re-read for fresh line numbers after each edit.
   edit_file   {path, old, new}    fallback dialect: replace an exact snippet by its text
+  edit_file   {path, edits:[{old,new},…]}
+                                  apply SEVERAL replacements to one file at once, atomically
+                                  (all-or-nothing) — a rename + its call sites in ONE turn
   list_files  {path?}             list a directory
   grep        {pattern, path?, context?}   search file CONTENTS by regex (ripgrep; ±context lines, grouped by file)
   glob        {pattern}           find files by name (e.g. **/*.py); use this over `find`
@@ -640,6 +650,54 @@ def _syntax_tail(err):
     return f", still has errors — {err}" if err else ""
 
 
+def _apply_hunk(text, old, new):
+    """Apply ONE {old,new} replacement to `text` via the exact-unique → whitespace-tolerant
+    fuzzy-unique ladder. Returns (newtext, how) with how in {'exact','fuzzy'} on success,
+    or (None, reason) where reason is a short 'why it failed'. Shared by the P6.5 batch path
+    (the single-edit path keeps its richer closest-region autopsy)."""
+    if not old:
+        return None, "empty `old`"
+    n = text.count(old)
+    if n > 1:
+        return None, f"`old` appears {n} times (not unique — add surrounding context)"
+    if n == 1:
+        return text.replace(old, new, 1), "exact"
+    newtext, matched, _how = _fuzzy_replace(text, old, new)
+    if matched:
+        return newtext, "fuzzy"
+    tlines = text.split("\n")
+    olines = [ln.strip() for ln in old.strip("\n").split("\n")]
+    hits = _fuzzy_hits(tlines, olines) if any(olines) else []
+    if len(hits) > 1:
+        return None, f"`old` matches {len(hits)} places (ignoring indentation — add context)"
+    return None, "`old` not found"
+
+
+def _batch_edit(action, path, text, edits, cwd):
+    """P6.5 atomic multi-edit: apply an `edits:[{old,new},…]` array VALIDATE-FIRST,
+    all-or-nothing. Each hunk applies against the RUNNING text (so a later hunk sees the
+    earlier ones); ANY failure aborts the whole batch with an indexed report and writes
+    NOTHING. The final text is syntax-gated once (valid→invalid regression refused), then
+    written once. Returns (obs, ok)."""
+    running, hows = text, []
+    for i, e in enumerate(edits, 1):
+        if not isinstance(e, dict):
+            return f"edit failed: edit {i}/{len(edits)} is not an {{old,new}} object — NOTHING was written.", False
+        newtext, how = _apply_hunk(running, e.get("old", ""), e.get("new", ""))
+        if newtext is None:
+            return (f"edit failed at edit {i}/{len(edits)}: {how} — NOTHING was written. "
+                    f"Fix edit {i} and resend the whole batch.", False)
+        running, _ = newtext, hows.append(how)
+    err, block = _gate(path, running, text)          # only a valid→invalid regression is refused
+    if block:
+        return (f"that batch would make {action.get('path')} invalid — {err}. "
+                "The file was NOT changed. Fix the edits and resend.", False)
+    _atomic_write(path, running)
+    exact, fuzzy = hows.count("exact"), hows.count("fuzzy")
+    return (f"applied {len(edits)} edits to {action.get('path')} ({exact} exact, {fuzzy} fuzzy)"
+            + _syntax_tail(err), True)
+
+
 # ---- P5.3: line-numbered reads + line-anchored edit dialect -------------------
 def _number_lines(contents, start):
     """Prefix each newline-free line in `contents` with its 1-based ABSOLUTE line
@@ -902,6 +960,10 @@ def execute(action, cwd, stop=None):
                 return f"no such file: {action.get('path')} — use write_file to create it", False
             with open(p, errors="replace") as f:
                 text = f.read()
+            # P6.5 atomic multi-edit: {edits:[{old,new},…]} applied validate-first, all-or-nothing.
+            edits = action.get("edits")
+            if isinstance(edits, list) and edits:
+                return _batch_edit(action, p, text, edits, cwd)
             # P5.3 line-anchored dialect: {start_line, end_line, anchor, new} splices
             # a line range verified by the anchor. The {old,new} dialect stays as fallback.
             if action.get("start_line") is not None:
