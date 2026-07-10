@@ -88,20 +88,31 @@ class Ledger:
         except OSError:
             return None
 
-    def _changed(self, e):
-        """True if the file on disk no longer matches the (mtime, size) recorded
-        at read time — a bash/edit/write/touch since the read."""
+    def _changed(self, e, strict=False):
+        """True if the file on disk no longer matches the (mtime, size) recorded at
+        read time. With `strict`, when (mtime, size) LOOK unchanged, also verify the
+        content sha1 — this closes the false-'current' hole where a same-size edit lands
+        in the same mtime tick (coarse-mtime FS, `touch -r`). Strict costs one file read,
+        so it is used only by the edit-time single-file gate, never the per-step bulk
+        refresh."""
         sig = self._stat(e.realpath)
         if sig is None:
             return True
-        return sig != (e.mtime, e.size)
+        if sig != (e.mtime, e.size):
+            return True
+        if strict and e.sha1 is not None:
+            cur = self._read(e.realpath)
+            if cur is not None and _sha1(cur) != e.sha1:
+                return True
+        return False
 
     def current(self, realpath):
-        """True iff the file is in context AND unchanged on disk since it was read."""
+        """True iff the file is in context AND unchanged on disk since it was read.
+        Strict: a same-size, same-mtime content change still reads as changed."""
         e = self.entries.get(realpath)
         if not e or not e.in_context:
             return False
-        return not self._changed(e)
+        return not self._changed(e, strict=True)
 
     def status(self, realpath):
         """One of: 'unread', 'evicted' (read then dropped from context),
@@ -111,7 +122,7 @@ class Ledger:
             return "unread"
         if not e.in_context:
             return "evicted"
-        if self._changed(e):
+        if self._changed(e, strict=True):     # match current()'s verdict so the block message is consistent
             return "changed"
         return "current"
 
