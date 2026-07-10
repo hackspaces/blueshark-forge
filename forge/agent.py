@@ -1443,6 +1443,36 @@ class Agent:
             note = note[:RETR_CHAR_CAP].rstrip() + "\n… (truncated)"
         return note
 
+    def _prepare_and_generate(self, step):
+        """One step's PREPARE + GENERATE phase (no control-flow exits — pure): absorb any
+        inbox messages, refresh the file-state ledger, run the compaction passes, build the
+        prompt (messages + plan pin), generate the raw action, recalibrate the token ledger,
+        and log the raw output. Returns (raw, prompt, pin) for the rest of the step."""
+        self._absorb_inbox()
+        # P4.1: re-stat tracked files so a bash/redirect/edit that changed a file's mtime
+        # since it was read is caught before the gate/read-cache consult the ledger.
+        self.ledger.refresh()
+        if self._lv("compaction"):
+            self._structural_compact(step)   # P4.2: deterministic pass first (zero model calls)
+            self._compact()                  # then the LLM summarizer at 70% (emergency in-turn gate)
+            self._floor()                    # then the hard floor: escape a full-window wedge
+        self._audit_prefix(step)             # P4.3: FORGE_DEBUG prefix-mutation audit (no-op by default)
+        pin = self._pin_state() if self._lv("plan_pin") else None
+        prompt = self.messages + ([pin] if pin else [])
+        self.on_event("thinking")
+        # P5.5 retry-heat: first try is greedy (heat 0.0); each nudge bumps heat so a resend
+        # is perturbed rather than a byte-identical greedy re-emission.
+        raw = self._generate(prompt, temperature=self._heat)
+        self._reclaimed = False              # P4.2: the token count now reflects any compaction
+        # P4.3: rebase the token ledger against the observed prompt_eval_count for the EXACT
+        # prompt just sent — an uncached call rebases tok_ratio; a warm-cache one is up-only.
+        self._recalibrate(prompt)
+        # P3.3 flight recorder: persist the RAW output of every step (incl. the malformed ones
+        # the parse discards); prompt_tokens lets a replay reproduce compaction timing.
+        self.session.log("model", v=TRACE_V, raw=raw, tier=self.tier,
+                         prompt_tokens=getattr(self.backend, "last_prompt_tokens", 0))
+        return raw, prompt, pin
+
     def send(self, user_text):
         self.messages.append({"role": "user", "content": user_text})
         # P4.5 just-in-time retrieval: turn-start, inject ONE deterministic
@@ -1486,36 +1516,7 @@ class Agent:
                 trace = {"v": TRACE_V, "step": step, "tier": self.tier}
                 _t0 = time.monotonic()
                 try:
-                    self._absorb_inbox()
-                    # P4.1: re-stat tracked files (bounded) so any bash/redirect/edit
-                    # that changed a file's mtime since it was read is caught before
-                    # the gate and the read cache consult the ledger this step.
-                    self.ledger.refresh()
-                    if self._lv("compaction"):
-                        self._structural_compact(step)   # P4.2: deterministic pass first (zero model calls)
-                        self._compact()                  # then the LLM summarizer at 70% (emergency in-turn gate)
-                        self._floor()                    # then the hard floor: escape a full-window wedge
-                    self._audit_prefix(step)             # P4.3: FORGE_DEBUG prefix-mutation audit (no-op by default)
-                    pin = self._pin_state() if self._lv("plan_pin") else None
-                    prompt = self.messages + ([pin] if pin else [])
-                    self.on_event("thinking")
-                    # P5.5 retry-heat: first try of a turn is greedy (heat 0.0); each
-                    # malformed/loop/fail/declined nudge bumps heat so the resend is
-                    # perturbed rather than a byte-identical greedy re-emission.
-                    raw = self._generate(prompt, temperature=self._heat)
-                    # P4.2: the real prompt-token count now reflects any compaction —
-                    # stop overriding _fill with the char estimate.
-                    self._reclaimed = False
-                    # P4.3: rebase the token ledger against the observed prompt_eval_count
-                    # for the EXACT prompt just sent (messages + pin) — an uncached call
-                    # rebases tok_ratio; a warm-cache one is an up-only cross-check.
-                    self._recalibrate(prompt)
-                    # P3.3 flight recorder: persist the RAW model output of every
-                    # step — including the malformed ones the parse below discards
-                    # (the valuable ones). prompt_tokens is the exact count for THIS
-                    # generation, so a replay can reproduce compaction timing.
-                    self.session.log("model", v=TRACE_V, raw=raw, tier=self.tier,
-                                     prompt_tokens=getattr(self.backend, "last_prompt_tokens", 0))
+                    raw, prompt, pin = self._prepare_and_generate(step)
 
                     try:
                         act = json.loads(raw)
