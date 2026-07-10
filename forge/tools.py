@@ -33,7 +33,7 @@ ACTION_SCHEMA = {
         "thought": {"type": "string", "description": "brief reasoning, one line"},
         "action": {
             "type": "string",
-            "enum": ["bash", "read_file", "write_file", "edit_file", "list_files", "grep", "glob", "fleet_send", "say"],
+            "enum": ["bash", "read_file", "write_file", "edit_file", "list_files", "grep", "glob", "run_tests", "fleet_send", "say"],
         },
         "command": {"type": "string", "description": "shell command (bash)"},
         "background": {"type": "boolean", "description": "bash: run as a background process (servers, watchers) — returns pid + log file immediately and keeps running while you continue"},
@@ -79,6 +79,7 @@ _REQUIRED_FIELDS = {
     "list_files": [],
     "grep":       ["pattern"],
     "glob":       ["pattern"],
+    "run_tests":  [],
     "fleet_send": ["target"],
     "say":        ["message"],
 }
@@ -95,6 +96,7 @@ _ACTION_FIELDS = {
     "list_files": ("path",),
     "grep":       ("pattern", "path", "context"),
     "glob":       ("pattern",),
+    "run_tests":  (),
     "fleet_send": ("target", "message"),
     "say":        ("message",),
 }
@@ -167,6 +169,9 @@ Actions:
   list_files  {path?}             list a directory
   grep        {pattern, path?, context?}   search file CONTENTS by regex (ripgrep; ±context lines, grouped by file)
   glob        {pattern}           find files by name (e.g. **/*.py); use this over `find`
+  run_tests   {}                  run the project's REAL test suite (auto-detected — no guessing the
+                                  command) and get a COMPACT digest: counts, which tests failed, the
+                                  assertion, and your files in the traceback. Prefer over `bash pytest`.
   fleet_send  {target, message}   message another session — forge or Claude Code (it receives it mid-work);
                                   target "list" (no message) lists every reachable session
   say         {message}           talk to the user (ends your turn)"""
@@ -379,6 +384,29 @@ def _kill_background():
                 os.killpg(os.getpgid(p.pid), signal.SIGKILL)
             except (OSError, ProcessLookupError):
                 pass
+
+
+def _run_tests(cwd, stop=None):
+    """P6.3: run the project's REAL test suite (auto-detected via detect_test_cmd) and
+    return a COMPACT digest instead of raw output — the model never guesses the runner,
+    and the counts + failing tests + assertions that a raw-output cut buries are surfaced.
+    Raw output is offloaded so it stays greppable. ok = the suite's exit code (all passed)."""
+    from . import fleet, testparse
+    try:
+        cmd = fleet.detect_test_cmd(cwd)
+    except Exception:
+        cmd = None
+    if not cmd:
+        return ("run_tests: no test suite detected here (looked for pytest / a tests dir / a "
+                "root test_*.py / go.mod / a package.json test script / Cargo.toml / Makefile "
+                "test). If you know the command, run it with bash.", False)
+    obs, ok = _run(cmd, cwd, timeout=180, stop=stop)
+    d = testparse.digest(obs, cwd)
+    if not d:                                    # unrecognized output shape → keep it whole
+        preview, note = _maybe_offload(obs, "testrun", cwd)
+        return f"$ {cmd}\n{preview}{note}", ok
+    _, note = _maybe_offload(obs, "testrun", cwd)
+    return f"$ {cmd}\n{d}{note}", ok
 
 
 def _run(cmd, cwd, timeout=None, stop=None):
@@ -738,13 +766,24 @@ def execute(action, cwd, stop=None):
     bash command when the user hits Esc."""
     a = action.get("action")
     try:
+        if a == "run_tests":
+            return _run_tests(cwd, stop=stop)
         if a == "bash":
             cmd = (action.get("command") or "").strip()
             if not cmd:
                 return "(no command provided)", False
             if action.get("background") or _BG_TRAILING_AMP.search(cmd):
                 return _run_background(_BG_TRAILING_AMP.sub("", cmd).strip(), cwd)
-            return _run(cmd, cwd, stop=stop)
+            obs, ok = _run(cmd, cwd, stop=stop)
+            # P6.3 opportunistic hook: if the model ran a known test runner by hand,
+            # digest its output too — the same needle-in-hay problem applies.
+            from . import testparse
+            if testparse.is_test_runner(cmd):
+                d = testparse.digest(obs, cwd)
+                if d:
+                    preview, note = _maybe_offload(obs, "testrun", cwd)
+                    return d + "\n" + note, ok
+            return obs, ok
         if a == "list_files":
             lp = _resolve(cwd, action.get("path", "."))
             if not lp:

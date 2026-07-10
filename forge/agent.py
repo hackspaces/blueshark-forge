@@ -1578,6 +1578,8 @@ class Agent:
         if ok and kind in ("write_file", "edit_file") and act.get("path"):
             self._mutated.add(os.path.realpath(os.path.join(self.session.cwd, act["path"])))
             self._verified = False
+        if ok and kind == "run_tests":
+            self._verified = True             # P6.3: a passing run_tests satisfies the done-gate
         if ok and kind == "bash":
             _cmd = act.get("command", "")
             from . import fleet as _fleet

@@ -2888,7 +2888,7 @@ class TestStructuralCompaction(unittest.TestCase):
 
     def test_below_trigger_is_a_noop(self):
         d = tempfile.mkdtemp()
-        a = self._agent(d, window=4000, tokens=100)       # 2.5% fill — well under 0.55
+        a = self._agent(d, window=8000, tokens=100)       # fill well under the 0.55 trigger
         big = "x = 1\n" * 500
         echo = {"role": "assistant",
                 "content": json.dumps({"action": "write_file", "path": "f.py", "content": big})}
