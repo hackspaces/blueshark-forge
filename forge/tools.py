@@ -892,9 +892,19 @@ def execute(action, cwd, stop=None):
                     region = _closest_region(text, old)
                     if region:
                         i, j, block = region
+                        # Models routinely can't reproduce `old` byte-exactly. Hand them a
+                        # ready-to-use LINE-ANCHORED edit for the closest region instead —
+                        # it needs no exact copy, just the line numbers + the anchor line
+                        # (both taken from the region), which is far higher-success.
+                        anchor = block.split("\n", 1)[0]
+                        template = json.dumps({"action": "edit_file", "path": action["path"],
+                                               "start_line": i, "end_line": j,
+                                               "anchor": anchor, "new": "<your replacement lines>"})
                         return (f"edit failed: `old` not found in {action['path']}. CLOSEST region "
                                 f"(lines {i}-{j}):\n{block}\n"
-                                f"Re-send edit_file with old copied EXACTLY from the region above.", False)
+                                f"EITHER re-send with `old` copied EXACTLY from the region above, OR "
+                                f"(easier — no exact copy needed) replace those lines with the line-anchored "
+                                f"form:\n{template}", False)
                     return f"edit failed: `old` not found in {action['path']} ({how}). Read the file and copy the EXACT text, or use write_file to rewrite it.", False
             # check the CANDIDATE text before writing — a failing edit never touches the file, but
             # a file that's ALREADY broken can be repaired one hunk at a time (block only valid→invalid)

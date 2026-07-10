@@ -3405,6 +3405,19 @@ class TestLineAnchoredEdit(unittest.TestCase):
         self.assertFalse(ok)
         self.assertIn("out of range", out)
 
+    def test_old_not_found_offers_ready_anchored_template(self):
+        # a near-miss `old` (word changed, so exact+fuzzy both fail) should return the
+        # closest region AND a ready-to-use line-anchored edit with correct line numbers.
+        _write(os.path.join(self.d, "m.py"),
+               "def f():\n    return sum(xs) / len(xs)\n")
+        out, ok = execute({"action": "edit_file", "path": "m.py",
+                           "old": "return total(xs) / len(xs)", "new": "return 0"}, self.d)
+        self.assertFalse(ok)
+        self.assertIn("CLOSEST region (lines 2-2)", out)
+        self.assertIn('"start_line": 2', out)          # anchored template offered
+        self.assertIn('"end_line": 2', out)
+        self.assertIn('"anchor": "    return sum(xs) / len(xs)"', out)
+
     def test_anchored_edit_never_turns_valid_file_invalid(self):
         _write(os.path.join(self.d, "g.py"), "x = 1\ny = 2\n")
         out, ok = execute({"action": "edit_file", "path": "g.py", "start_line": 1,
