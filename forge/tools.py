@@ -648,6 +648,16 @@ def _atomic_write(path, text):
         raise
 
 
+def _int(v, default):
+    """Coerce a model-supplied numeric field to int, falling back to `default` on a
+    missing/non-numeric value — a flat/advisory engine can emit "5" or even "abc"
+    where the grammar would have forced an integer."""
+    try:
+        return int(v)
+    except (TypeError, ValueError):
+        return default
+
+
 def _anchor_ok(anchor, current):
     """True if the anchor (the expected current text of the edited start line)
     matches the actual line. Exact match, or — like _fuzzy_replace — ignoring
@@ -734,7 +744,7 @@ def execute(action, cwd, stop=None):
             where = _resolve(cwd, action.get("path", "."))   # confine to the workspace, like read_file
             if not where:
                 return "path escapes the workspace — search inside the project", False
-            ctx = min(max(int(action.get("context", 2) or 0), 0), 5)
+            ctx = min(max(_int(action.get("context"), 2), 0), 5)
             # -H/--with-filename: force the `file:` prefix even for a single explicit
             # file, else rg drops it and _group_grep can't recover the filename or count.
             tool = "rg -nH --no-heading" if _which("rg") else "grep -rnH"
@@ -797,10 +807,10 @@ def execute(action, cwd, stop=None):
             with open(path, errors="replace") as f:
                 lines = f.readlines()
             total = len(lines)
-            offset = max(1, int(action.get("offset", 1)))
+            offset = max(1, _int(action.get("offset"), 1))
             if total and offset > total:
                 return f"offset {offset} is past the end — {action.get('path')} has only {total} lines", False
-            limit = max(1, int(action.get("limit", 800)))
+            limit = max(1, _int(action.get("limit"), 800))
             chunk = lines[offset - 1: offset - 1 + limit]
             # prefix each line with its 1-based ABSOLUTE number (honoring offset) so
             # the model can edit by line range instead of reproducing exact text. Each
