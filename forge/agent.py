@@ -1473,6 +1473,58 @@ class Agent:
                          prompt_tokens=getattr(self.backend, "last_prompt_tokens", 0))
         return raw, prompt, pin
 
+    def _handle_failure(self, kind, sig, obs, step, trace):
+        """Account a FAILED action (P5.7 stuck ledger + escalation). Returns
+        (tag, borrow_now, control):
+          control None            → proceed: caller appends the observation prefixed with `tag`;
+          control "continue"      → we escalated to a stronger rung (fresh context) — caller
+                                     skips the observation append and re-generates;
+          control ("return", msg) → stuck with no rung left to try — caller ends the turn.
+        `borrow_now` asks the caller to borrow one strong action AFTER the failed observation
+        is in context (the P5.7 sig-fail borrow trigger)."""
+        sig_fails = self.stuck["sig_fails"]
+        sig_fails[sig] = sig_fails.get(sig, 0) + 1
+        self._bump_stuck("fail", STUCK_FAIL_W)   # P5.7 tool failure +1
+        self.stuck["last_err_by_sig"][sig] = next(
+            (ln.strip() for ln in (obs or "").splitlines() if ln.strip()), "")[:200]
+        self._heat = min(0.7, self._heat + self.heat_bump)   # P5.5 / P5.8
+        tag = "  ⚠ this action FAILED — diagnose the cause before retrying.\n"
+        borrow_now = False
+        # per-command repeat (survives interleaved successes, unlike a consecutive counter)
+        if self._lv("loop_detect") and sig_fails[sig] >= SIG_FAIL_BORROW_AT:
+            self._bump_stuck("fail_loop", STUCK_LOOP_W)   # P5.7 sustained per-sig loop +2
+            trace["loop_trip"] = True
+            self.on_event("loop")
+            self.session.log("loop", v=TRACE_V, step=step, sig=sig, cause="fail", count=sig_fails[sig])
+            if self._passport_on:
+                profile.record(self.backend.name, "loop")   # P5.8 passport telemetry
+            tag = (f"  ⚠ `{sig}` has now failed {sig_fails[sig]} times. STOP retrying this exact thing. "
+                   "Change approach entirely: re-read the real file/error, rewrite with write_file instead of edit_file, "
+                   "or `say` to tell the user you're stuck and exactly what failed.\n")
+            borrow_now = True   # P5.7 sig-fail borrow (fires after the obs is in context)
+        # stuck: escalate to a stronger LOCAL model (unified score over threshold) — same task,
+        # same context — rather than grinding or giving up. Takes precedence over the borrow.
+        if self.stuck["score"] >= self.stuck_at:
+            if self._lv("escalation") and self.tier < len(self.ladder) - 1:
+                self._escalate(obs, trace)
+                return tag, borrow_now, "continue"
+            # Be accurate about WHY we stopped: only claim "even after escalating" if we
+            # actually climbed a rung; a single-model ladder never escalated.
+            lead = ("I'm stuck even after escalating through the local models"
+                    if self.tier > 0 else
+                    "I'm stuck, and there's no stronger local model to escalate to")
+            stuck = (f"{lead}. Last error: {obs[:200].strip()}. "
+                     "This needs a different approach — want me to try one, or take it yourself?")
+            self.session.log("assistant", text=stuck)
+            self.on_event("say", message=stuck)
+            return tag, borrow_now, ("return", stuck)
+        # deterministic recovery hint for the common bash failure signatures
+        if kind == "bash":
+            h = error_hint(obs)
+            if h:
+                tag += f"  ↳ {h}\n"
+        return tag, borrow_now, None
+
     def _escalate(self, last_error, trace):
         """Climb one ladder rung (P5.7): swap to the stronger backend, re-resolve its aliases
         + per-model knobs, warm it, hand it the full context with a fresh-start instruction,
@@ -1878,52 +1930,11 @@ class Agent:
                     tag = ""
                     borrow_now = False
                     if not ok:
-                        sig_fails = self.stuck["sig_fails"]
-                        sig_fails[sig] = sig_fails.get(sig, 0) + 1
-                        self._bump_stuck("fail", STUCK_FAIL_W)   # P5.7 tool failure +1
-                        self.stuck["last_err_by_sig"][sig] = next(
-                            (ln.strip() for ln in (obs or "").splitlines() if ln.strip()), "")[:200]
-                        self._heat = min(0.7, self._heat + self.heat_bump)   # P5.5 / P5.8
-                        tag = "  ⚠ this action FAILED — diagnose the cause before retrying.\n"
-                        # per-command repeat (survives interleaved successes, unlike a consecutive counter)
-                        if self._lv("loop_detect") and sig_fails[sig] >= SIG_FAIL_BORROW_AT:
-                            self._bump_stuck("fail_loop", STUCK_LOOP_W)   # P5.7 sustained per-sig loop +2
-                            trace["loop_trip"] = True
-                            self.on_event("loop")
-                            self.session.log("loop", v=TRACE_V, step=step, sig=sig, cause="fail", count=sig_fails[sig])
-                            if self._passport_on:
-                                profile.record(self.backend.name, "loop")   # P5.8 passport telemetry
-                            tag = (f"  ⚠ `{sig}` has now failed {sig_fails[sig]} times. STOP retrying this exact thing. "
-                                   "Change approach entirely: re-read the real file/error, rewrite with write_file instead of edit_file, "
-                                   "or `say` to tell the user you're stuck and exactly what failed.\n")
-                            # P5.7: a per-signature failure that keeps repeating is the
-                            # SECOND borrow trigger — consult the stronger rung for one
-                            # action, appended (after the observation below) as an
-                            # in-context suggestion the cheap model can adopt next step.
-                            borrow_now = True
-                        # stuck: escalate to a stronger LOCAL model (unified stuck score
-                        # over threshold) — same task, same context — rather than grinding
-                        # or giving up. All still local. Takes precedence over the borrow.
-                        if self.stuck["score"] >= self.stuck_at:
-                            if self._lv("escalation") and self.tier < len(self.ladder) - 1:
-                                self._escalate(obs, trace)
-                                continue
-                            # Be accurate about WHY we stopped: only claim "even after
-                            # escalating" if we actually climbed a rung; a single-model
-                            # ladder never escalated, so say there's nowhere to escalate.
-                            lead = ("I'm stuck even after escalating through the local models"
-                                    if self.tier > 0 else
-                                    "I'm stuck, and there's no stronger local model to escalate to")
-                            stuck = (f"{lead}. Last error: {obs[:200].strip()}. "
-                                     "This needs a different approach — want me to try one, or take it yourself?")
-                            self.session.log("assistant", text=stuck)
-                            self.on_event("say", message=stuck)
-                            return stuck
-                        # deterministic recovery hint for the common bash failure signatures
-                        if kind == "bash":
-                            h = error_hint(obs)
-                            if h:
-                                tag += f"  ↳ {h}\n"
+                        tag, borrow_now, control = self._handle_failure(kind, sig, obs, step, trace)
+                        if control == "continue":       # escalated to a fresh rung — skip the obs append
+                            continue
+                        if isinstance(control, tuple):  # ("return", stuck_msg): no rung left, end the turn
+                            return control[1]
                     obs_msg = {"role": "user", "content": f"{tag}Observation:\n{shape(obs, budget)}"}
                     self.messages.append(obs_msg)
                     # P4.2 meta: tag this observation (kind/action/path/step/ok) so the
