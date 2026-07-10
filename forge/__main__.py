@@ -59,7 +59,9 @@ def _make_ladder(spec):
     url = cfg.get("base_url") or None
     key = cfg.get("api_key") or None
     ladder = [make_backend(s.strip(), engine=eng, base_url=url, api_key=key)
-              for s in spec.split(",") if s.strip()]
+              for s in (spec or "").split(",") if s.strip()]
+    if not ladder:
+        raise ForgeError("no model configured — pass --model or run `forge setup`.")
     # P3.3 flight recorder: FORGE_RECORD=<path> wraps every rung so each model call
     # appends a {digest, raw, prompt_tokens} cassette row. Unset → zero wrapping,
     # zero behavior change.
@@ -458,7 +460,10 @@ def main():
                 "down": cmd_down, "receipts": cmd_receipts, "learnings": cmd_learnings,
                 "forget": cmd_forget, "trace": cmd_trace, "bench": cmd_bench, "replay": cmd_replay,
                 "passport": cmd_passport}
-    (dispatch.get(args.cmd) or cmd_chat)(args)
+    try:
+        (dispatch.get(args.cmd) or cmd_chat)(args)
+    except ForgeError as e:
+        print(f"✗ {e}", file=sys.stderr); sys.exit(1)
 
 
 if __name__ == "__main__":
