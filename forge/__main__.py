@@ -293,6 +293,44 @@ def cmd_trace(args):
               f"{fill:>5}  {oks:>4}  {flags:<30}  {('?' if ms is None else ms):>6}")
 
 
+def cmd_corpus(args):
+    """Flywheel turn one: turn forge session transcripts into harness-native training data —
+    SFT examples (context → the action that worked) + preference pairs (the moments the
+    harness corrected the model: malformed→valid JSON, narrate→act). Writes JSONL."""
+    import glob
+    from . import corpus, fleet
+    from .agent import SYSTEM
+    if args.all:
+        files = sorted(glob.glob(os.path.join(sessmod.SESSIONS, "*.jsonl")), key=os.path.getmtime)
+        sids = [os.path.basename(f)[:-len(".jsonl")] for f in files]
+    else:
+        sid = args.sid
+        if sid == "last":
+            files = glob.glob(os.path.join(sessmod.SESSIONS, "*.jsonl"))
+            if not files:
+                print("no sessions found."); return
+            sid = os.path.basename(max(files, key=os.path.getmtime))[:-len(".jsonl")]
+        sids = [sid]
+    if not sids:
+        print("no sessions found."); return
+    system = None if args.no_system else SYSTEM
+    rows = []
+    for sid in sids:
+        recs = fleet._records(sid, tail_bytes=10 ** 9)
+        rows.extend(corpus.build_jsonl(recs, sid=sid, system=system))
+    nsft = sum(1 for r in rows if r["split"] == "sft")
+    npref = sum(1 for r in rows if r["split"] == "pref")
+    if args.out:
+        with open(args.out, "w") as f:
+            for r in rows:
+                f.write(json.dumps(r) + "\n")
+        print(f"wrote {len(rows)} rows ({nsft} SFT, {npref} preference) from {len(sids)} "
+              f"session(s) → {args.out}")
+    else:
+        print(f"{nsft} SFT examples + {npref} preference pairs from {len(sids)} session(s). "
+              f"Add --out corpus.jsonl to write them.")
+
+
 def cmd_replay(args):
     """P3.3 — re-drive a recorded session through the harness with NO model.
     `sid` defaults to 'last'. With --to-fixture, snapshot the session's raws into
@@ -427,6 +465,12 @@ def main():
     p_tr = sub.add_parser("trace", help="pretty-print a session's step trace")
     p_tr.add_argument("sid", nargs="?", default="last", help="session id (or 'last', the default)")
 
+    p_co = sub.add_parser("corpus", help="turn session transcripts into harness-native training data (SFT + preference pairs)")
+    p_co.add_argument("sid", nargs="?", default="last", help="session id (or 'last', the default)")
+    p_co.add_argument("--all", action="store_true", help="every recorded session, not just one")
+    p_co.add_argument("--out", metavar="FILE", help="write JSONL to FILE (default: just print the counts)")
+    p_co.add_argument("--no-system", dest="no_system", action="store_true", help="omit the forge system prompt from each example's context")
+
     p_rp = sub.add_parser("replay", help="re-drive a recorded session through the harness with NO model")
     p_rp.add_argument("sid", nargs="?", default="last", help="session id (or 'last', the default)")
     p_rp.add_argument("--strict", action="store_true", help="assert each recorded prompt digest matches (trips on any prompt change)")
@@ -464,7 +508,7 @@ def main():
                               api_key=args.api_key, models=models))
     dispatch = {"run": cmd_run, "status": cmd_status, "send": cmd_send, "up": cmd_up,
                 "down": cmd_down, "receipts": cmd_receipts, "learnings": cmd_learnings,
-                "forget": cmd_forget, "trace": cmd_trace, "bench": cmd_bench, "replay": cmd_replay,
+                "forget": cmd_forget, "trace": cmd_trace, "corpus": cmd_corpus, "bench": cmd_bench, "replay": cmd_replay,
                 "passport": cmd_passport}
     try:
         (dispatch.get(args.cmd) or cmd_chat)(args)
