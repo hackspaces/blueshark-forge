@@ -132,6 +132,18 @@ class Session:
         self._drain_wake()
         return msgs
 
+    def close(self):
+        """Release the wake-pipe fds. Idempotent; push()/drain() already guard None,
+        so it is safe to call while the session object still exists."""
+        for attr in ("_wake_r", "_wake_w"):
+            fd = getattr(self, attr, None)
+            if fd is not None:
+                try:
+                    os.close(fd)
+                except OSError:
+                    pass
+                setattr(self, attr, None)
+
     def _drain_wake(self):
         """Empty the wake pipe (read until EAGAIN) so a stale byte can't keep a
         drained, empty inbox spuriously readable."""
@@ -224,6 +236,7 @@ class Session:
             pass
         from . import bridge
         bridge.unregister()
+        self.close()   # release the wake-pipe fds at session teardown
 
 
 class EphemeralSession:
