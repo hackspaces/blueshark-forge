@@ -3538,6 +3538,15 @@ class TestLineAnchoredEdit(unittest.TestCase):
         self.assertEqual(_read(sp), "#!/bin/sh\necho bye\n")
         self.assertTrue(os.stat(sp).st_mode & stat.S_IXUSR)   # +x bit survived the edit
 
+    def test_edit_preserves_crlf_line_endings(self):
+        cp = os.path.join(self.d, "c.txt")
+        with open(cp, "wb") as f:
+            f.write(b"one\r\ntwo\r\nthree\r\n")               # CRLF file
+        execute({"action": "edit_file", "path": "c.txt", "start_line": 2, "end_line": 2,
+                 "anchor": "two", "new": "TWO"}, self.d)
+        with open(cp, "rb") as f:
+            self.assertEqual(f.read(), b"one\r\nTWO\r\nthree\r\n")   # endings preserved, not flattened to LF
+
 
 class TestReadKeyDecode(unittest.TestCase):
     """tui._read_key: an undecodable stdin byte must NOT read as the b'' EOF sentinel

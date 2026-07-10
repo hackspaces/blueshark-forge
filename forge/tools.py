@@ -627,9 +627,22 @@ def _atomic_write(path, text):
     invalid CONTENT, this guards a failed WRITE."""
     import tempfile
     d = os.path.dirname(path) or "."
+    # Preserve the existing file's line endings: a universal-newlines read collapses
+    # \r\n→\n, so writing back plain would rewrite a CRLF file to LF (a spurious
+    # whole-file diff). If the current file is CRLF-dominant and `text` is LF-only,
+    # re-apply CRLF. newline="" writes the chosen endings verbatim (no re-translation).
+    if "\r\n" not in text:
+        try:
+            with open(path, "rb") as rf:
+                head = rf.read(65536)
+            crlf = head.count(b"\r\n")
+            if crlf and crlf > head.count(b"\n") - crlf:      # CRLF outnumbers bare-LF lines
+                text = text.replace("\n", "\r\n")
+        except OSError:
+            pass                                              # new file → keep LF
     fd, tmp = tempfile.mkstemp(dir=d, prefix=".forge-tmp-")
     try:
-        with os.fdopen(fd, "w") as f:
+        with os.fdopen(fd, "w", newline="") as f:
             f.write(text)
         # mkstemp makes the temp 0600 and os.replace keeps the temp's mode, so without
         # this an edit would STRIP an existing file's perms (e.g. a script's +x bit).
