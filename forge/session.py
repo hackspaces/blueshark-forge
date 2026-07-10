@@ -147,6 +147,8 @@ class Session:
         session = self
 
         class H(BaseHTTPRequestHandler):
+            timeout = 10        # bound a stalled connection so a slow/absent body can't pin a thread forever
+
             def log_message(self, *a):
                 pass
 
@@ -181,7 +183,14 @@ class Session:
                     self.send_response(400); self.end_headers(); return
                 if n < 0 or n > 1_000_000:            # bound the read
                     self.send_response(413); self.end_headers(); return
-                body = self.rfile.read(n).decode("utf-8", "replace")
+                try:
+                    body = self.rfile.read(n).decode("utf-8", "replace")
+                except OSError:                       # timed-out / dropped body — close, don't hang
+                    try:
+                        self.send_response(408); self.end_headers()
+                    except OSError:
+                        pass
+                    return
                 sender = "".join(c for c in self.headers.get(from_header, "peer") if c.isalnum() or c in "-_.:")[:64]
                 session.push(sender, body)
                 self.send_response(200); self.end_headers(); self.wfile.write(b"ok")
