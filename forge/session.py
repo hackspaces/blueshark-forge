@@ -127,9 +127,13 @@ class Session:
                 pass
 
     def drain(self):
+        # Drain the wake pipe INSIDE the lock, before the swap: otherwise a push() in
+        # the gap between swap and drain leaves its message queued with its wake byte
+        # discarded → a lost wakeup. A push racing this blocks on the lock and re-arms
+        # its byte after the swap, so its message stays selectable.
         with self._lock:
+            self._drain_wake()
             msgs, self._inbox = self._inbox, []
-        self._drain_wake()
         return msgs
 
     def close(self):
