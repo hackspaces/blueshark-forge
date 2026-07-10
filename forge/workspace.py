@@ -152,6 +152,19 @@ def _ver(tool, arg="--version"):
         return None
 
 
+def _python_env(cwd):
+    """The interpreter that actually has the project's deps, when it isn't bare `python3`:
+    a local virtualenv, or a uv/poetry project. Returns a short 'use this' line or None."""
+    for venv in (".venv", "venv", "env"):
+        if os.path.isfile(os.path.join(cwd, venv, "bin", "python")):
+            return f"a local venv — use `{venv}/bin/python` (bare `python3` won't have the deps)"
+    if os.path.isfile(os.path.join(cwd, "uv.lock")) and shutil.which("uv"):
+        return "a uv project — run via `uv run python` / `uv run pytest`"
+    if os.path.isfile(os.path.join(cwd, "poetry.lock")) and shutil.which("poetry"):
+        return "a poetry project — run via `poetry run python` / `poetry run pytest`"
+    return None
+
+
 def environment(cwd):
     """Base computer awareness: OS, shell, tools, git state — so the agent uses
     the right commands for THIS machine."""
@@ -163,10 +176,14 @@ def environment(cwd):
     ]
     # available tools (presence, with versions for the common runtimes)
     present = []
-    for t in ("git", "node", "npm", "pnpm", "yarn", "python3", "pytest", "cargo", "go", "rg", "docker", "make"):
+    for t in ("git", "node", "npm", "pnpm", "yarn", "python3", "pytest", "cargo", "go", "rg",
+              "docker", "make", "jq", "gh", "curl", "ruby", "deno", "bun", "uv", "poetry"):
         if shutil.which(t):
             present.append(t)
     lines.append("Tools available: " + ", ".join(present))
+    pyenv = _python_env(cwd)
+    if pyenv:
+        lines.append(f"Python env: {pyenv}")
     # machine intelligence (from `forge setup`), so the model knows its constraints
     try:
         from . import config as _cfg

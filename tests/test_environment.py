@@ -56,6 +56,20 @@ class TestEnvironmentBriefing(unittest.TestCase):
         self.assertIn("Tools available:", env)
         self.assertIn("OS:", env)
 
+    def test_detects_a_local_venv_interpreter(self):
+        import tempfile
+        d = tempfile.mkdtemp()
+        os.makedirs(os.path.join(d, ".venv", "bin"))
+        open(os.path.join(d, ".venv", "bin", "python"), "w").close()
+        env = workspace.environment(d)
+        self.assertIn("Python env:", env)
+        self.assertIn(".venv/bin/python", env)                    # surfaces the real interpreter
+
+    def test_no_python_env_line_without_a_venv(self):
+        import tempfile
+        d = tempfile.mkdtemp()
+        self.assertNotIn("Python env:", workspace.environment(d))
+
 
 if __name__ == "__main__":
     unittest.main()
