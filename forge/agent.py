@@ -1473,6 +1473,32 @@ class Agent:
                          prompt_tokens=getattr(self.backend, "last_prompt_tokens", 0))
         return raw, prompt, pin
 
+    def _escalate(self, last_error, trace):
+        """Climb one ladder rung (P5.7): swap to the stronger backend, re-resolve its aliases
+        + per-model knobs, warm it, hand it the full context with a fresh-start instruction,
+        and reset the per-turn stuck ledger. Precondition (checked by the caller): a stronger
+        rung exists and the escalation lever is on."""
+        if self._passport_on:   # P5.8: the escalation belongs to the rung being LEFT
+            profile.record(self.backend.name, "escalate")
+        self.tier += 1
+        self.backend = self.ladder[self.tier]
+        self._aliases = profiles.resolve(self.backend.name).get("aliases", ())
+        self._resolve_knobs()   # P5.8: re-tune for the stronger rung
+        self._prewarmed = False
+        trace["escalated"] = True
+        self.on_event("escalate", model=self.backend.name)
+        self.session.log("escalate", model=self.backend.name)
+        if hasattr(self.backend, "warm"):
+            self.backend.warm()
+        self.messages.append({"role": "user", "content":
+            f"[The previous model kept failing. You are now a stronger model taking over the SAME task with full context above. Step back, re-diagnose from the real errors, and solve it. Last error: {last_error[:200].strip()}]"})
+        # reset the per-turn stuck ledger for a fresh start on the new rung
+        self.stuck["score"] = 0.0
+        self.stuck["sig_fails"].clear()
+        self.stuck["last_err_by_sig"].clear()
+        self.stuck["malformed"] = 0
+        self.clean_streak = 0
+
     def _handle_malformed(self, raw, prompt, step, trace):
         """The malformed-JSON strike path (deterministic salvage already failed). Counts
         the strike + passport/exemplar telemetry, bumps retry-heat, then resolves to ONE of:
@@ -1880,26 +1906,7 @@ class Agent:
                         # or giving up. All still local. Takes precedence over the borrow.
                         if self.stuck["score"] >= self.stuck_at:
                             if self._lv("escalation") and self.tier < len(self.ladder) - 1:
-                                if self._passport_on:   # P5.8: the escalation belongs to the rung being LEFT
-                                    profile.record(self.backend.name, "escalate")
-                                self.tier += 1
-                                self.backend = self.ladder[self.tier]
-                                self._aliases = profiles.resolve(self.backend.name).get("aliases", ())
-                                self._resolve_knobs()   # P5.8: re-tune for the stronger rung
-                                self._prewarmed = False
-                                trace["escalated"] = True
-                                self.on_event("escalate", model=self.backend.name)
-                                self.session.log("escalate", model=self.backend.name)
-                                if hasattr(self.backend, "warm"):
-                                    self.backend.warm()
-                                self.messages.append({"role": "user", "content":
-                                    f"[The previous model kept failing. You are now a stronger model taking over the SAME task with full context above. Step back, re-diagnose from the real errors, and solve it. Last error: {obs[:200].strip()}]"})
-                                # reset the per-turn stuck ledger for a fresh start on the new rung
-                                self.stuck["score"] = 0.0
-                                self.stuck["sig_fails"].clear()
-                                self.stuck["last_err_by_sig"].clear()
-                                self.stuck["malformed"] = 0
-                                self.clean_streak = 0
+                                self._escalate(obs, trace)
                                 continue
                             # Be accurate about WHY we stopped: only claim "even after
                             # escalating" if we actually climbed a rung; a single-model
