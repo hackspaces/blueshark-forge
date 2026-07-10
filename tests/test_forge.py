@@ -2196,6 +2196,16 @@ class TestVerifierV2(unittest.TestCase):
     voting, and an honest UNKNOWN that never becomes a false REFUTED."""
 
     # ---- detect_test_cmd: new engines + claim scoping -----------------------
+    def test_detect_test_cmd_root_level_test_file(self):
+        from forge import fleet
+        d = tempfile.mkdtemp()
+        self.assertIsNone(fleet.detect_test_cmd(d))                 # nothing yet
+        _write(os.path.join(d, "test_thing.py"), "import unittest\n")
+        self.assertEqual(fleet.detect_test_cmd(d), "python3 -m unittest")   # bare test_*.py in root
+        d2 = tempfile.mkdtemp()
+        _write(os.path.join(d2, "thing_test.py"), "import unittest\n")
+        self.assertEqual(fleet.detect_test_cmd(d2), "python3 -m unittest")  # *_test.py too
+
     def test_detect_test_cmd_go_and_package_managers(self):
         from forge import fleet
         d = tempfile.mkdtemp()

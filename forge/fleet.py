@@ -226,6 +226,14 @@ def detect_test_cmd(cwd, files=None):
         return ("pytest -q " + scope).rstrip() if scope else "pytest -q"
     if os.path.exists(os.path.join(cwd, "Cargo.toml")):
         return "cargo test"
+    # A bare root-level test_*.py / *_test.py (no pyproject, no tests/ dir) — the common
+    # layout for a small Python project. Discover with stdlib unittest (always present).
+    try:
+        if any((f.startswith("test_") and f.endswith(".py")) or f.endswith("_test.py")
+               for f in os.listdir(cwd)):
+            return "python3 -m unittest"
+    except OSError:
+        pass
     return None
 
 
