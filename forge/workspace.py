@@ -214,9 +214,9 @@ def environment(cwd):
     if platform.system() == "Darwin":
         note = ("Userland: BSD (macOS), not GNU — `timeout`→use `gtimeout`, `sed -i` needs a "
                 "backup-suffix arg (`sed -i '' …`), no `readlink -f` / `date -d`.")
-        note += (" GNU coreutils installed (g-prefixed: gsed, gtimeout, gdate…)."
-                 if (shutil.which("gtimeout") or shutil.which("gsed"))
-                 else " GNU coreutils NOT installed — use the BSD forms above.")
+        gtools = [g for g in ("gtimeout", "gsed", "gdate", "grealpath") if shutil.which(g)]
+        note += (f" GNU tools present: {', '.join(gtools)}." if gtools
+                 else " No GNU coreutils / gnu-sed installed — use the BSD forms above.")
         lines.append(note)
     return "ENVIRONMENT\n" + "\n".join(lines)
 
