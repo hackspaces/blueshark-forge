@@ -232,11 +232,17 @@ def replay_records(meta, turns, strict=False, window=DEFAULT_WINDOW,
         max_steps = max(len(all_rows) + 5, 20)
     ladder = build_ladder(all_rows, strict=strict, window=window)
     work = cwd or tempfile.mkdtemp(prefix="forge-replay-")
-    sess = _CollectSession(work, sid=meta.get("sid", "replay"))
-    agent = Agent(ladder, sess, max_steps=max_steps, autonomous=True)
-    agent.mode = meta.get("mode", "auto")
-    terminals = [agent.send(tn["user"]) for tn in turns]
-    return {"terminals": terminals, "session": sess, "agent": agent, "cwd": work}
+    created = cwd is None                      # only clean up a tempdir WE made
+    try:
+        sess = _CollectSession(work, sid=meta.get("sid", "replay"))
+        agent = Agent(ladder, sess, max_steps=max_steps, autonomous=True)
+        agent.mode = meta.get("mode", "auto")
+        terminals = [agent.send(tn["user"]) for tn in turns]
+        return {"terminals": terminals, "session": sess, "agent": agent, "cwd": work}
+    finally:
+        if created:                            # replay is complete on return — the throwaway tree is done
+            import shutil
+            shutil.rmtree(work, ignore_errors=True)
 
 
 def load_fixture(path):
