@@ -418,10 +418,12 @@ class TestDoneGate(unittest.TestCase):
         from forge import fleet
         for c in ("echo x > f", "cat x >> log", "sed -i s/a/b/ f", "perl -i -pe s/a/b/ f",
                   "rm f", "mv a b", "cp a b", "mkdir d", "chmod +x s", "git checkout f",
-                  "git reset --hard", "/bin/rm -rf x", "FOO=1 tee out"):
+                  "git reset --hard", "/bin/rm -rf x", "FOO=1 tee out",
+                  "python -c \"open('f','w').write('x')\"", "node -e fs.writeFileSync"):
             self.assertTrue(fleet.bash_mutates(c), c)
         for c in ("ls -la", "cat f", "grep -rn x .", "git status", "git diff", "git log",
-                  "pytest -q", "make test", "python app.py 2>&1", "echo hi", "git add -A", ""):
+                  "pytest -q", "make test", "python app.py 2>&1", "echo hi", "git add -A",
+                  "python --version", "node script.js", ""):
             self.assertFalse(fleet.bash_mutates(c), c)
 
     def test_model_running_its_own_tests_satisfies_the_gate(self):

@@ -279,6 +279,13 @@ _MUTATING_HEADS = frozenset((
 _GIT_WRITE = frozenset((
     "apply", "checkout", "restore", "reset", "stash", "clean", "revert",
     "cherry-pick", "merge", "rebase", "pull"))
+# An interpreter running INLINE code can write files with no shell redirect
+# (`python -c "open('f','w')..."`, `node -e "fs.writeFileSync(...)"`). We gate on the
+# inline-code FLAG, not the head — `python app.py` (running the app) stays read-only.
+_INTERP_HEADS = frozenset((
+    "python", "python2", "python3", "node", "nodejs", "deno", "bun",
+    "ruby", "perl", "php"))
+_INTERP_INLINE = frozenset(("-c", "-e", "-p", "-n", "--eval", "--exec"))
 
 
 def bash_mutates(command):
@@ -303,6 +310,8 @@ def bash_mutates(command):
             return True
         if base == "git" and len(toks) > 1 and toks[1] in _GIT_WRITE:
             return True
+        if base in _INTERP_HEADS and _INTERP_INLINE.intersection(toks):
+            return True                           # interpreter running INLINE code can write files
     return False
 
 
