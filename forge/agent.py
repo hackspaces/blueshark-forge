@@ -1473,6 +1473,28 @@ class Agent:
                          prompt_tokens=getattr(self.backend, "last_prompt_tokens", 0))
         return raw, prompt, pin
 
+    def _do_fleet_send(self, act, trace):
+        """The fleet_send action: an empty/`list` target (or no message) returns the reachable
+        roster; otherwise deliver to the named forge/Claude peer. Records the observation; the
+        caller always continues to the next step afterward."""
+        from . import fleet
+        target, msg = act.get("target", ""), act.get("message", "")
+        try:
+            if target.strip().lower() in ("", "list", "sessions") or not msg:
+                obs, ok = f"Reachable sessions (forge + Claude Code): {fleet.roster()}", True
+            else:
+                peer = fleet.send(target, msg, sender=self.session.name,
+                                  sender_cwd=self.session.cwd, sender_sid=self.session.sid)
+                runtime = " claude" if peer.get("kind") == "claude" else ""
+                obs, ok = f"delivered to{runtime} {peer['name']} ({peer['sid'][:8]})", True
+        except SystemExit as e:
+            obs, ok = str(e), False
+        trace["ok"] = ok
+        self.session.log("action", action="fleet_send", args={"target": target}, thought=act.get("thought", ""))
+        self.on_event("action", action="fleet_send", detail=target, thought=act.get("thought", ""))
+        self.on_event("observation", text=obs, ok=ok)
+        self.messages.append({"role": "user", "content": f"Observation:\n{obs}"})
+
     def _execute_and_record(self, kind, act, raw, step, trace):
         """Run the action and RECORD everything about it (straight-line, no loop exits).
         Executes; on success resets retry-heat, harvests the exemplar, relaxes the stuck
@@ -1846,23 +1868,7 @@ class Agent:
                         continue
 
                     if kind == "fleet_send":
-                        from . import fleet
-                        target, msg = act.get("target", ""), act.get("message", "")
-                        try:
-                            if target.strip().lower() in ("", "list", "sessions") or not msg:
-                                obs, ok = f"Reachable sessions (forge + Claude Code): {fleet.roster()}", True
-                            else:
-                                peer = fleet.send(target, msg, sender=self.session.name,
-                                                  sender_cwd=self.session.cwd, sender_sid=self.session.sid)
-                                runtime = " claude" if peer.get("kind") == "claude" else ""
-                                obs, ok = f"delivered to{runtime} {peer['name']} ({peer['sid'][:8]})", True
-                        except SystemExit as e:
-                            obs, ok = str(e), False
-                        trace["ok"] = ok
-                        self.session.log("action", action="fleet_send", args={"target": target}, thought=act.get("thought", ""))
-                        self.on_event("action", action="fleet_send", detail=target, thought=act.get("thought", ""))
-                        self.on_event("observation", text=obs, ok=ok)
-                        self.messages.append({"role": "user", "content": f"Observation:\n{obs}"})
+                        self._do_fleet_send(act, trace)
                         continue
 
                     # include offset so paging one big file (same path, new range) isn't seen as a loop
