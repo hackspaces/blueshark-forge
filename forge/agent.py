@@ -328,6 +328,7 @@ class Agent:
         # resolves to the universal default list, so alias_repair is byte-for-byte
         # unchanged; a qwen-family backend gets the family's recorded extras merged in.
         self._aliases = profiles.resolve(self.backend.name).get("aliases", ())
+        self.autonomous = autonomous
         base = (system if system is not None else SYSTEM) + (AUTONOMOUS if autonomous else "")
         self.messages = [{"role": "system", "content": base}]
         if workspace and self._lv("workspace"):
@@ -357,6 +358,7 @@ class Agent:
         self._mutated = set()    # P2.1 done-gate: paths mutated THIS turn
         self._verified = False   # a test run this turn already passed
         self._bounced = False    # the done-gate already bounced/nudged once this turn
+        self._narrated = False   # the 'act, don't narrate' guard already bounced once this turn
         self.stop = threading.Event()  # set from the UI (Esc) to interrupt mid-run
         self.mode = "auto"             # auto | plan | manual (set by the UI)
         self.approve = lambda desc: "yes"   # manual-mode hook: 'yes' | 'always' | 'no'
@@ -1294,6 +1296,33 @@ class Agent:
         return ("the user DECLINED this action. Do not retry it as-is — take a different approach, "
                 "or `say` to ask them how to proceed.")
 
+    # "Act, don't narrate" guard: an intent phrase near the start of a message followed
+    # (within a few words) by a file-work verb — "I'll implement …", "let me fix …",
+    # "I'm going to rewrite …". Deliberately excludes explain/describe/answer verbs so a
+    # legitimate answer to a question is not caught.
+    _NARRATE_RE = re.compile(
+        r"\b(i'?ll|i will|i'?m going to|i am going to|let me|let'?s|i plan to|going to|"
+        r"about to|now i'?ll|first[,\s]|next[,\s])\b.{0,60}?"
+        r"\b(implement|write|create|add|fix|update|modify|edit|make|build|change|"
+        r"refactor|rewrite|apply|start)\b", re.I)
+
+    def _narration_bounce(self, msg):
+        """Autonomous 'act, don't narrate' guard. A `say` that only DESCRIBES upcoming
+        file work — after a turn that changed NOTHING — is the model narrating its intent
+        instead of doing it (which the system prompt forbids). Bounce it ONCE per turn so
+        the model does the work rather than ending the turn. Returns a bounce message, or
+        None. Never fires outside autonomous mode, after any mutation, for a plain answer,
+        or a second time in one turn."""
+        if not self.autonomous or self._mutated or self._narrated:
+            return None
+        if not (msg and self._NARRATE_RE.search(msg.strip()[:160])):
+            return None
+        self._narrated = True
+        self.session.log("narrate_bounce", msg=(msg or "")[:120])
+        return ("You described what you're about to do but haven't actually done it — no "
+                "files changed this turn. Do the work NOW: make the edits/writes and run the "
+                "check, THEN report the outcome. Don't stop just to narrate your plan.")
+
     def _done_gate(self):
         """P2.1 — SYNCHRONOUS done-gate on `say`. If this turn mutated files and
         nothing has verified them, the HARNESS itself runs the project's real test
@@ -1724,6 +1753,7 @@ class Agent:
         self._mutated = set()
         self._verified = False
         self._bounced = False
+        self._narrated = False
         self._heat = 0.0   # P5.5: greedy for the first try of every turn
         self.session.log("user", text=user_text)
         self.session.set_status("working")
@@ -1804,7 +1834,7 @@ class Agent:
                     kind = act.get("action")
                     trace["action"] = kind
                     if kind == "say":
-                        bounce = self._done_gate()
+                        bounce = self._done_gate() or self._narration_bounce(act.get("message", ""))
                         if bounce:
                             self.messages.append({"role": "user", "content": bounce})
                             continue

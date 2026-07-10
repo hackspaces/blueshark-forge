@@ -509,6 +509,58 @@ class TestDoneGate(unittest.TestCase):
             sm2.SESSIONS = orig
 
 
+class TestNarrationGuard(unittest.TestCase):
+    """The autonomous 'act, don't narrate' guard: a `say` that only DESCRIBES upcoming
+    file work — after a turn that changed nothing — is bounced once so the model does the
+    work instead of stopping. It must NOT fire outside autonomous mode, after a mutation,
+    or for a plain answer to a question."""
+
+    def _drive(self, actions, autonomous):
+        d = tempfile.mkdtemp()
+        _write(os.path.join(d, "x.py"), "y = 1\n")
+        a = Agent(ScriptBackend(actions), sm.EphemeralSession(d, "n"),
+                  max_steps=8, autonomous=autonomous)
+        return a.send("implement the thing in x.py"), a
+
+    def test_preamble_say_bounced_in_autonomous_mode(self):
+        actions = [
+            '{"thought":"look","action":"read_file","path":"x.py"}',
+            '{"thought":"narrate","action":"say","message":"I will implement the fix now. Let me start."}',
+            '{"thought":"done","action":"say","message":"All done — the change is in place and verified."}',
+        ]
+        reply, a = self._drive(actions, autonomous=True)
+        self.assertIn("in place", reply)                       # the SECOND say returned, not the preamble
+        self.assertTrue(any("narrate_bounce" == k for k, _ in getattr(a.session, "logs", [])) or
+                        any("haven't actually done it" in m.get("content", "") for m in a.messages))
+
+    def test_preamble_say_accepted_when_not_autonomous(self):
+        actions = [
+            '{"thought":"look","action":"read_file","path":"x.py"}',
+            '{"thought":"narrate","action":"say","message":"I will implement the fix now. Let me start."}',
+        ]
+        reply, _ = self._drive(actions, autonomous=False)
+        self.assertIn("implement the fix now", reply)          # not autonomous → preamble ends the turn
+
+    def test_plain_answer_not_bounced(self):
+        # a real answer to a question (no intent-to-act phrase) must pass straight through
+        actions = [
+            '{"thought":"look","action":"read_file","path":"x.py"}',
+            '{"thought":"answer","action":"say","message":"This module defines y = 1 and nothing else."}',
+        ]
+        reply, _ = self._drive(actions, autonomous=True)
+        self.assertIn("defines y = 1", reply)
+
+    def test_not_bounced_after_a_real_change(self):
+        # once the turn has mutated a file, a say is the done-gate's business, not this guard
+        actions = [
+            '{"thought":"look","action":"read_file","path":"x.py"}',
+            '{"thought":"edit","action":"edit_file","path":"x.py","old":"y = 1","new":"y = 2"}',
+            '{"thought":"narrate","action":"say","message":"I will now update the docs too."}',
+        ]
+        reply, _ = self._drive(actions, autonomous=True)
+        self.assertIn("update the docs", reply)                # mutation happened → guard silent
+
+
 class TestConfig(unittest.TestCase):
     def test_load_defaults(self):
         from forge import config
