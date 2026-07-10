@@ -124,7 +124,7 @@ def build_ladder(records, strict=False, window=DEFAULT_WINDOW):
     """A replay ladder with one rung per recorded tier (so escalation can follow
     the recording), all sharing one ordered cursor over `records`."""
     cursor = _Cursor(records)
-    tiers = max((int(r.get("tier", 0)) for r in records), default=0) + 1
+    tiers = max((int(r.get("tier") or 0) for r in records), default=0) + 1   # `or 0`: tolerate a null tier
     return [ReplayBackend(cursor, name=f"replay:{t}", strict=strict, window=window)
             for t in range(max(1, tiers))]
 
@@ -173,8 +173,8 @@ def turns_from_records(recs):
             cur = {"user": r.get("text", ""), "model": []}
             turns.append(cur)
         elif t == "model" and cur is not None:
-            row = {"raw": r.get("raw", ""), "tier": r.get("tier", 0),
-                   "prompt_tokens": r.get("prompt_tokens", 0)}
+            row = {"raw": r.get("raw", ""), "tier": r.get("tier") or 0,
+                   "prompt_tokens": r.get("prompt_tokens") or 0}
             if r.get("digest"):
                 row["digest"] = r["digest"]
             cur["model"].append(row)
