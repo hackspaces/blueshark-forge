@@ -23,8 +23,20 @@ def _load(f, d):
 
 
 def _save(f, v):
-    with open(os.path.join(STATE, f), "w") as fh:
-        json.dump(v, fh)
+    # Atomic temp+replace: a crash mid-write must not leave a partial file that
+    # _load treats as empty (which would re-verify every claim + re-spam guard/learn).
+    import tempfile
+    path = os.path.join(STATE, f)
+    fd, tmp = tempfile.mkstemp(dir=STATE, prefix="." + f + "-")
+    try:
+        with os.fdopen(fd, "w") as fh:
+            json.dump(v, fh)
+        os.replace(tmp, path)
+    except OSError:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
 
 
 def _hash(s):
