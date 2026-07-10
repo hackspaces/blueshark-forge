@@ -7,8 +7,9 @@ agentic runtime — contributions should keep it that way.
 
 - **Stdlib only.** No third-party runtime dependencies. If you think you need one,
   open an issue first to discuss.
-- **Tests are required.** Every behavior change or bug fix comes with a test in
-  `tests/test_forge.py`. If you fix an edge case, add a test that fails without the fix.
+- **Tests are required.** Every behavior change or bug fix comes with a test in the
+  `tests/` suite (grouped by area — `test_backends.py`, `test_profile.py`, …). If you fix
+  an edge case, add a test that fails without the fix.
 - **Keep it readable.** Match the surrounding style: clear names, short functions,
   comments that explain *why*, not *what*.
 - **Security matters.** The `bash` tool is intentionally unsandboxed, but file

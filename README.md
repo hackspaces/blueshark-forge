@@ -330,7 +330,7 @@ forge/
 
 ```bash
 git clone https://github.com/hackspaces/blueshark-forge && cd blueshark-forge
-python -m unittest discover -s tests    # 34 tests, stdlib only, no deps
+python -m unittest discover -s tests    # 400+ tests, stdlib only, no deps
 ./forge-cli                             # run from the checkout without installing
 ```
 
