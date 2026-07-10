@@ -1473,6 +1473,80 @@ class Agent:
                          prompt_tokens=getattr(self.backend, "last_prompt_tokens", 0))
         return raw, prompt, pin
 
+    def _execute_and_record(self, kind, act, raw, step, trace):
+        """Run the action and RECORD everything about it (straight-line, no loop exits).
+        Executes; on success resets retry-heat, harvests the exemplar, relaxes the stuck
+        score / decays a rung; always populates the file-state ledger, sets the mutated/
+        verified done-gate flags, classifies a bash run (ran-tests vs file-touching), emits
+        the diff + observation events, and logs the shaped observation. Returns
+        (obs, ok, budget, recorded_fp) for the failure-accounting + compaction that follow."""
+        # capture the before-content so we can show a real diff after a write
+        before = ""
+        if kind == "write_file":
+            _fp = os.path.join(self.session.cwd, act.get("path", ""))
+            if os.path.isfile(_fp):
+                try:
+                    with open(_fp, errors="replace") as _f:
+                        before = _f.read()
+                except OSError:
+                    pass
+        self.session.log("action", action=kind, args={k: act.get(k) for k in ("command", "path") if act.get(k)}, thought=act.get("thought", ""))
+        self.on_event("action", action=kind, thought=act.get("thought", ""),
+                      detail=act.get("command") or act.get("path") or act.get("pattern") or "")
+        obs, ok = execute(act, self.session.cwd, stop=self.stop)
+        trace["ok"] = ok
+        if ok:
+            self._heat = 0.0   # P5.5: a clean execution unsticks — back to greedy
+            exemplars.record(self.backend.name, kind, raw)   # P5.6: harvest this valid action
+            # P5.7 verified progress: relax the stuck score + advance the clean streak;
+            # CLEAN_DECAY clean steps in a row decay one rung.
+            self._bump_stuck("progress", -STUCK_PROGRESS_W)
+            self.clean_streak += 1
+            if self.clean_streak >= CLEAN_DECAY and self.tier > 0:
+                self._deescalate()
+        budget = self._obs_budget()
+        # P4.1 ledger population — a ranged read records only its span; a write/edit ingests
+        # the new content as the cached (diffable) version.
+        recorded_fp = None
+        if ok and act.get("path"):
+            _rp = os.path.realpath(os.path.join(self.session.cwd, act["path"]))
+            if kind == "read_file":
+                self.ledger.record_read(_rp, step, offset=act.get("offset", 1), limit=act.get("limit"))
+                recorded_fp = _rp
+            elif kind == "write_file":
+                self.ledger.record_write(_rp, step, content=act.get("content"))
+                recorded_fp = _rp
+            elif kind == "edit_file":
+                if act.get("start_line") is not None:
+                    # P5.3: an anchored splice shifts every line number below it, so the
+                    # numbered read is now stale. Evict to FORCE a fresh numbered re-read.
+                    self.ledger.evict(_rp)
+                else:
+                    self.ledger.record_write(_rp, step)  # re-read the edited file from disk
+                    recorded_fp = _rp
+        if ok and kind in ("write_file", "edit_file") and act.get("path"):
+            self._mutated.add(os.path.realpath(os.path.join(self.session.cwd, act["path"])))
+            self._verified = False
+        if ok and kind == "bash":
+            _cmd = act.get("command", "")
+            from . import fleet as _fleet
+            if _is_test_cmd(_cmd, self.session.cwd):
+                self._verified = True         # the model ran the suite itself
+            elif _fleet.bash_mutates(_cmd):
+                self._mutated.add("<bash>")   # a file-touching bash still gates `say`
+                self._verified = False
+        if ok and kind == "edit_file":
+            # P5.8 passport telemetry: classify the edit from execute()'s (fuzzy)/(exact) suffix.
+            if self._passport_on:
+                profile.record(self.backend.name,
+                               "fuzzy_edit" if "(fuzzy)" in (obs or "") else "exact_edit")
+            self.on_event("diff", path=act.get("path", ""), old=act.get("old", ""), new=act.get("new", ""))
+        elif ok and kind == "write_file":
+            self.on_event("diff", path=act.get("path", ""), old=before, new=act.get("content", ""))
+        self.session.log("observation", text=shape(obs, budget), ok=ok)
+        self.on_event("observation", text=obs, ok=ok)
+        return obs, ok, budget, recorded_fp
+
     def _handle_failure(self, kind, sig, obs, step, trace):
         """Account a FAILED action (P5.7 stuck ledger + escalation). Returns
         (tag, borrow_now, control):
@@ -1873,76 +1947,7 @@ class Agent:
                         if score == 0.0:
                             act, kind = self._resample(act, kind, pin, step, score, trace)
 
-                    # capture the before-content so we can show a real diff after a write
-                    before = ""
-                    if kind == "write_file":
-                        _fp = os.path.join(self.session.cwd, act.get("path", ""))
-                        if os.path.isfile(_fp):
-                            try:
-                                with open(_fp, errors="replace") as _f:
-                                    before = _f.read()
-                            except OSError:
-                                pass
-
-                    self.session.log("action", action=kind, args={k: act.get(k) for k in ("command", "path") if act.get(k)}, thought=act.get("thought", ""))
-                    self.on_event("action", action=kind, thought=act.get("thought", ""),
-                                  detail=act.get("command") or act.get("path") or act.get("pattern") or "")
-                    obs, ok = execute(act, self.session.cwd, stop=self.stop)
-                    trace["ok"] = ok
-                    if ok:
-                        self._heat = 0.0   # P5.5: a clean execution unsticks — back to greedy
-                        exemplars.record(self.backend.name, kind, raw)   # P5.6: harvest this valid action
-                        # P5.7 verified progress: relax the stuck score and advance the
-                        # clean streak; CLEAN_DECAY clean steps in a row decay one rung.
-                        self._bump_stuck("progress", -STUCK_PROGRESS_W)
-                        self.clean_streak += 1
-                        if self.clean_streak >= CLEAN_DECAY and self.tier > 0:
-                            self._deescalate()
-                    budget = self._obs_budget()
-                    # P4.1 ledger population — a ranged read records only its span; a
-                    # write/edit ingests the new content as the cached (diffable) version.
-                    recorded_fp = None
-                    if ok and act.get("path"):
-                        _rp = os.path.realpath(os.path.join(self.session.cwd, act["path"]))
-                        if kind == "read_file":
-                            self.ledger.record_read(_rp, step, offset=act.get("offset", 1), limit=act.get("limit"))
-                            recorded_fp = _rp
-                        elif kind == "write_file":
-                            self.ledger.record_write(_rp, step, content=act.get("content"))
-                            recorded_fp = _rp
-                        elif kind == "edit_file":
-                            if act.get("start_line") is not None:
-                                # P5.3: an anchored splice shifts every line number below it,
-                                # so the model's numbered read is now stale. Evict (not record)
-                                # to FORCE a fresh numbered re-read before any further edit —
-                                # the echoed ±3 window only re-grounds the splice site itself.
-                                self.ledger.evict(_rp)
-                            else:
-                                self.ledger.record_write(_rp, step)  # re-read the edited file from disk
-                                recorded_fp = _rp
-                    if ok and kind in ("write_file", "edit_file") and act.get("path"):
-                        self._mutated.add(os.path.realpath(os.path.join(self.session.cwd, act["path"])))
-                        self._verified = False
-                    if ok and kind == "bash":
-                        _cmd = act.get("command", "")
-                        from . import fleet as _fleet
-                        if _is_test_cmd(_cmd, self.session.cwd):
-                            self._verified = True         # the model ran the suite itself
-                        elif _fleet.bash_mutates(_cmd):
-                            self._mutated.add("<bash>")   # a file-touching bash still gates `say`
-                            self._verified = False
-                    if ok and kind == "edit_file":
-                        # P5.8 passport telemetry: classify the edit from execute()'s
-                        # "(fuzzy)/(exact)" observation suffix — a model that leans on the
-                        # whitespace-tolerant fuzzy path is bad at reproducing exact text.
-                        if self._passport_on:
-                            profile.record(self.backend.name,
-                                           "fuzzy_edit" if "(fuzzy)" in (obs or "") else "exact_edit")
-                        self.on_event("diff", path=act.get("path", ""), old=act.get("old", ""), new=act.get("new", ""))
-                    elif ok and kind == "write_file":
-                        self.on_event("diff", path=act.get("path", ""), old=before, new=act.get("content", ""))
-                    self.session.log("observation", text=shape(obs, budget), ok=ok)
-                    self.on_event("observation", text=obs, ok=ok)
+                    obs, ok, budget, recorded_fp = self._execute_and_record(kind, act, raw, step, trace)
 
                     tag = ""
                     borrow_now = False
