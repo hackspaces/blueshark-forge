@@ -841,6 +841,9 @@ def execute(action, cwd, stop=None):
             if not p:
                 return "path escapes the workspace — use a path inside the project", False
             content = action.get("content", "")
+            if content and not content.endswith("\n"):
+                content = content + "\n"          # ensure a single final newline (editor default; quiet diffs)
+                action["content"] = content        # keep the harness ledger's cached copy in sync with disk
             prev = None
             if os.path.isfile(p):                 # only a valid→invalid regression is refused; an
                 with open(p, errors="replace") as f:   # already-broken file can be saved with partial progress

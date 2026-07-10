@@ -3541,6 +3541,14 @@ class TestLineAnchoredEdit(unittest.TestCase):
         self.assertTrue(_anchor_ok("}", "    }"))            # real content stays whitespace-tolerant
         self.assertFalse(_anchor_ok("x=1", "x = 2"))
 
+    def test_write_file_ensures_a_single_final_newline(self):
+        execute({"action": "write_file", "path": "a.py", "content": "x = 1"}, self.d)
+        self.assertEqual(_read(os.path.join(self.d, "a.py")), "x = 1\n")     # newline added
+        execute({"action": "write_file", "path": "b.py", "content": "y = 2\n"}, self.d)
+        self.assertEqual(_read(os.path.join(self.d, "b.py")), "y = 2\n")     # not doubled
+        execute({"action": "write_file", "path": "empty.txt", "content": ""}, self.d)
+        self.assertEqual(_read(os.path.join(self.d, "empty.txt")), "")       # empty stays empty
+
     def test_writes_are_atomic_and_leave_no_temp_file(self):
         import glob
         _write(os.path.join(self.d, "f.txt"), "one\ntwo\n")
