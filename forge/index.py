@@ -78,7 +78,9 @@ def _py_symbols(text):
     can read the body with a precise offset."""
     try:
         tree = ast.parse(text)
-    except (SyntaxError, ValueError):
+    except (SyntaxError, ValueError, RecursionError, MemoryError):
+        # RecursionError (deeply-nested/generated code) and MemoryError must NOT abort
+        # the whole index rebuild / outline read — this one file just yields no symbols.
         return []
     out = []
     for node in tree.body:
