@@ -127,8 +127,12 @@ def run_task(task_dir, backend, levers, max_steps=40, model=None):
 
     try:
         shutil.copytree(task_dir, work, dirs_exist_ok=True)
-        subprocess.run(["git", "init", "-q"], cwd=work,
-                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        try:
+            subprocess.run(["git", "init", "-q"], cwd=work,
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except OSError:
+            pass          # git absent → the task still runs; verdict is its verify.sh exit code
+
         setup = os.path.join(work, "setup.sh")
         if os.path.isfile(setup):
             _sh(setup, work)
