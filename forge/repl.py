@@ -221,7 +221,10 @@ def _menu_model(agent, screen, history):
     chosen = [models[int(t) - 1] if t.isdigit() and 1 <= int(t) <= len(models) else t for t in pick.split()]
     if not chosen:
         return
-    agent.set_ladder([make_backend(m) for m in chosen])
+    cfg = cfgmod.load()          # route through the CONFIGURED engine, not always ollama
+    agent.set_ladder([make_backend(m, engine=cfg.get("engine", "ollama"),
+                                   base_url=cfg.get("base_url") or None,
+                                   api_key=cfg.get("api_key") or None) for m in chosen])
     cfgmod.set_key("ladder", chosen)
     screen.emit(f"{GR}  ✓ ladder → {' → '.join(chosen)}{RST}  {DIM}(saved){RST}\n")
 
