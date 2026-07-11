@@ -1660,7 +1660,7 @@ class Agent:
                     "I'm stuck, and there's no stronger local model to escalate to")
             stuck = (f"{lead}. Last error: {obs[:200].strip()}. "
                      "This needs a different approach — want me to try one, or take it yourself?")
-            self.session.log("assistant", text=stuck)
+            self.session.log("assistant", text=stuck, stuck=True)
             self.on_event("say", message=stuck)
             return tag, borrow_now, ("return", stuck)
         # deterministic recovery hint for the common bash failure signatures
