@@ -312,7 +312,10 @@ def cmd_replay(args):
             print(f"✗ {e}", file=sys.stderr); sys.exit(1)
         print(f"wrote fixture {path}")
         return
-    print(replaymod.replay(sid, strict=args.strict))
+    if args.fault:
+        print(replaymod.replay_faults(sid, args.fault, strict=args.strict))
+    else:
+        print(replaymod.replay(sid, strict=args.strict))
 
 
 def cmd_bench(args):
@@ -428,6 +431,9 @@ def main():
     p_rp.add_argument("sid", nargs="?", default="last", help="session id (or 'last', the default)")
     p_rp.add_argument("--strict", action="store_true", help="assert each recorded prompt digest matches (trips on any prompt change)")
     p_rp.add_argument("--to-fixture", dest="to_fixture", metavar="NAME", help="snapshot this session's raws into tests/fixtures/<NAME>.jsonl")
+    from .faults import FAULTS as _FAULT_NAMES
+    p_rp.add_argument("--fault", action="append", choices=_FAULT_NAMES,
+                      help="inject a deterministic fault before zero-inference replay; repeat for several")
 
     p_bench = sub.add_parser("bench", help="harness-lift eval: same model bare vs full harness + per-lever ablation")
     p_bench.add_argument("--tasks", help="comma-separated subset of bench task names (default: all)")
