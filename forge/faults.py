@@ -120,8 +120,9 @@ def inject(turns, faults: Iterable[str]) -> Tuple[List[dict], List[Injection]]:
     return mutated, results
 
 
-def score(result: MappingLike, injections: Iterable[Injection]) -> Dict[str, Any]:
+def score(result: Dict[str, Any], injections: Iterable[Injection]) -> Dict[str, Any]:
     """Recovery/efficiency metrics from a replay result and its transcript records."""
+    injections = list(injections)
     records = list(result["session"].records)
     terminals = list(result.get("terminals") or [])
     terminal = terminals[-1] if terminals else ""
@@ -132,7 +133,7 @@ def score(result: MappingLike, injections: Iterable[Injection]) -> Dict[str, Any
     injected = [i for i in injections if i.injected]
     actions = sum(1 for r in records if r.get("type") == "action")
     return {
-        "faults_requested": len(list(injections)),
+        "faults_requested": len(injections),
         "faults_injected": len(injected),
         "recovered": bool(injected) and bool(terminals) and not bad_terminal and not false_completion,
         "terminal": terminal,
@@ -150,10 +151,6 @@ def score(result: MappingLike, injections: Iterable[Injection]) -> Dict[str, Any
         "context_tokens": sum(
             int(r.get("prompt_tokens") or 0) for r in records if r.get("type") == "model"),
     }
-
-
-# A structural alias avoids importing replay.py and creating a cycle.
-MappingLike = Dict[str, Any]
 
 
 def report(injections: Iterable[Injection], metrics: Dict[str, Any]) -> str:
