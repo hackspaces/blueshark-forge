@@ -9,6 +9,7 @@
 import argparse
 import json
 import os
+import shutil
 import sys
 import time
 import uuid
@@ -153,40 +154,100 @@ def _daemon_running():
         return None
 
 
+# --- status rendering helpers -------------------------------------------------
+
+_ANSI = {"reset": "\033[0m", "dim": "\033[2m", "bold": "\033[1m",
+         "green": "\033[32m", "yellow": "\033[33m", "cyan": "\033[36m",
+         "blue": "\033[34m", "red": "\033[31m"}
+
+
+def _color_on():
+    return (sys.stdout.isatty() and os.environ.get("NO_COLOR") is None
+            and os.environ.get("TERM") != "dumb")
+
+
+def _paint(text, *styles):
+    if not _color_on():
+        return text
+    return "".join(_ANSI[s] for s in styles) + text + _ANSI["reset"]
+
+
+def _tilde(path):
+    home = os.path.expanduser("~")
+    return "~" + path[len(home):] if path and path.startswith(home) else (path or "")
+
+
+def _fit(text, width):
+    """Collapse whitespace and hard-truncate to `width` columns with an ellipsis."""
+    text = " ".join((text or "").split())
+    if width < 1:
+        return ""
+    return text if len(text) <= width else text[:width - 1].rstrip() + "…"
+
+
 def cmd_status(args):
     from . import fleet, bridge
     pid = _daemon_running()
-    print(f"● autopilot UP (pid {pid})" if pid else "○ autopilot down  (start: forge up)")
-    print()
+    head = (_paint("●", "green") + " autopilot " + _paint("UP", "green", "bold") + f" · pid {pid}"
+            if pid else _paint("○", "dim") + " autopilot " + _paint("down", "dim")
+            + _paint("  · start: forge up", "dim"))
+
     live = sessmod.registry()
     claude = bridge.claude_peers()
     if not live and not claude:
-        print("no live forge or Claude Code sessions."); return
-    icon = {"working": "◐", "idle": "●"}
+        print(head + "\n\n" + _paint("no live forge or Claude Code sessions.", "dim"))
+        return
+
+    # unify both runtimes into one shape so they render identically
+    rows = []
     for e in live:
         st = e.get("status", "idle")
-        print(f"{icon.get(st,'●')} {e['name']}  [forge/{st}]  {e.get('model','')}  ({e['sid'][:8]})")
-        print(f"   {e['cwd']}")
-        # what is it doing? last user request + last assistant reply from the transcript
         recs = fleet._records(e["sid"])
-        last_user = next((r["text"] for r in reversed(recs) if r.get("type") == "user" and r.get("text")), None)
-        last_say = fleet.last_say(e["sid"])
-        if last_user:
-            print(f"   you:    {last_user[:120]}")
-        if last_say:
-            print(f"   forge:  {' '.join(last_say.split())[:150]}")
-        print()
+        you = next((r["text"] for r in reversed(recs)
+                    if r.get("type") == "user" and r.get("text")), None)
+        rows.append({"runtime": "forge", "status": st, "name": e["name"],
+                     "model": e.get("model", ""), "sid": e["sid"], "cwd": e["cwd"],
+                     "task": None, "you": you, "reply": fleet.last_say(e["sid"])})
     for e in claude:
-        print(f"◇ {e['name']}  [claude]  ({e['sid'][:8]})")
-        print(f"   {e['cwd']}")
         info = bridge.summarize(e)
-        if info["title"]:
-            print(f"   task:   {info['title'][:120]}")
-        if info["prompt"]:
-            print(f"   you:    {info['prompt'][:120]}")
-        if info["claude"]:
-            print(f"   claude: {info['claude'][:150]}")
+        rows.append({"runtime": "claude", "status": None, "name": e["name"],
+                     "model": "", "sid": e["sid"], "cwd": e["cwd"],
+                     "task": info["title"], "you": info["prompt"], "reply": info["claude"]})
+
+    W = shutil.get_terminal_size((100, 24)).columns
+    name_w = min(20, max(len(r["name"]) for r in rows))
+    n_forge = sum(1 for r in rows if r["runtime"] == "forge")
+    counts = _paint(f"{n_forge} forge · {len(rows) - n_forge} claude", "dim")
+    pad = max(1, W - len(_strip_ansi(head)) - len(_strip_ansi(counts)) - 2)
+    print(head + " " * pad + counts + "\n")
+
+    glyphs = {("forge", "idle"): ("●", "green"), ("forge", "working"): ("◐", "yellow"),
+              ("forge", "stuck"): ("◍", "red"), ("claude", None): ("◇", "cyan")}
+    for r in rows:
+        glyph, gcolor = glyphs.get((r["runtime"], r["status"]), ("●", "green"))
+        tag = f"forge/{r['status']}" if r["runtime"] == "forge" else "claude"
+        header = (f" {_paint(glyph, gcolor)}  {_paint(r['name'].ljust(name_w), 'cyan', 'bold')}"
+                  f"  {_paint(tag.ljust(13), 'dim')}  {_paint(r['sid'][:8], 'dim')}")
+        if r["model"]:
+            header += _paint(f"  {r['model']}", "dim")
+        print(header)
+        print(f"     {_paint(_fit(_tilde(r['cwd']), W - 5), 'dim')}")
+        # activity: task (claude) + last ask + last reply, each on its own fitted line
+        label_w = 6
+        avail = W - 5 - label_w - 1
+        if r["task"]:
+            print(f"     {_paint('task'.ljust(label_w), 'dim')} {_fit(r['task'], avail)}")
+        if r["you"]:
+            print(f"     {_paint('you'.ljust(label_w), 'dim')} {_paint(_fit(r['you'], avail), 'dim')}")
+        if r["reply"]:
+            rlabel = r["runtime"]
+            print(f"     {_paint(rlabel.ljust(label_w), gcolor)} {_fit(r['reply'], avail)}")
         print()
+
+
+def _strip_ansi(s):
+    import re as _re
+    return _re.sub(r"\033\[[0-9;]*m", "", s)
 
 
 def cmd_send(args):
