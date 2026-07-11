@@ -23,6 +23,7 @@ from . import backends
 from . import exemplars
 from . import profile
 from . import profiles
+from .authority import AuthorityPolicy
 from .execution import CompletionPolicy, EvidenceCollector
 from .ledger import Ledger
 from .tools import (ACTION_SCHEMA, ACTION_VARIANTS, ALL_ACTIONS, TOOL_HELP,
@@ -319,6 +320,7 @@ class Agent:
         self.max_steps = max_steps
         self.on_event = on_event or (lambda *a, **k: None)
         self.allowed = allowed
+        self.authority = AuthorityPolicy()
         # P3.2 levers: which scaffolding mechanisms are active this run. None = the
         # full harness (ALL_LEVERS); frozenset() = bare (every lever off). `_lv(name)`
         # gates each mechanism site so the default path is unchanged.
@@ -946,6 +948,7 @@ class Agent:
         legal = set(ALL_ACTIONS)
         if self.mode == "plan":
             legal -= set(self.MUTATING)
+        legal &= set(self.authority.legal_actions())
         if self.allowed is not None:
             legal &= set(self.allowed)
         return legal
@@ -1261,6 +1264,8 @@ class Agent:
         True if the action would be blocked, WITHOUT prompting the user or persisting
         an approval (which _gate does in manual mode). Auto never blocks; plan blocks
         mutating actions; manual blocks a mutating action unless already 'always'-approved."""
+        if not self.authority.evaluate(act).allowed:
+            return True
         if kind not in self.MUTATING or self.mode == "auto":
             return False
         if kind == "fleet_send" and (not act.get("message")
@@ -1271,8 +1276,12 @@ class Agent:
         return self._approval_key(act) not in self.approvals   # manual: blocked unless pre-approved (no prompt)
 
     def _gate(self, kind, act):
-        """Mode gate for mutating actions. Returns a block message, or None to
-        proceed. plan: read-only only. manual: ask the user y/always/no."""
+        """Authority + interaction-mode gate. Authority is harness-owned and is
+        checked first; model capability, ladder tier, and auto mode never expand it."""
+        decision = self.authority.evaluate(act)
+        if not decision.allowed:
+            self.session.log("authority_denied", decision=decision.to_dict())
+            return decision.reason
         if kind not in self.MUTATING or self.mode == "auto":
             return None
         if kind == "fleet_send" and (not act.get("message")
