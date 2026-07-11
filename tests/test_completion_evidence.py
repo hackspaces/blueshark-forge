@@ -134,7 +134,7 @@ class TestAgentPolicyIntegration(unittest.TestCase):
     def test_balanced_second_claim_is_an_explicit_override(self):
         agent, session = TestEvidenceAwareDoneGate()._agent_with_change()
         agent.completion_policy = CompletionPolicy("balanced")
-        with mock.patch("forge.fleet.detect_test_cmd", return_value="python -m unittest"), \\
+        with mock.patch("forge.fleet.detect_test_cmd", return_value="python -m unittest"), \
                 mock.patch("forge.tools._run", return_value=("FAILED", False)):
             self.assertIsNotNone(agent._done_gate("done"))
             self.assertIsNone(agent._done_gate("done anyway"))
