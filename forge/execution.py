@@ -4,9 +4,12 @@ This module is intentionally independent from the agent loop.  Existing transcri
 records remain valid while :class:`ExecutionTracker` projects them onto a stable
 protocol that replay, policy, fleet, and UI consumers can share.
 """
+import hashlib
+import os
+
 from dataclasses import asdict, dataclass, field
 from enum import Enum
-from typing import Any, Dict, Iterable, List, Mapping, Optional
+from typing import Any, Dict, List, Mapping, Optional
 
 
 PROTOCOL_VERSION = 1
@@ -91,6 +94,53 @@ class EvidenceContract:
             changed_files=list(value.get("changed_files", [])),
             verification=checks,
             unverified_assumptions=list(value.get("unverified_assumptions", [])),
+        )
+
+
+class EvidenceCollector:
+    """Turn-scoped, harness-owned evidence used by the completion gate.
+
+    Models never author this data. Mutating and verification tool outcomes feed the
+    collector directly, so completion provenance is grounded in runtime facts.
+    """
+
+    def __init__(self, cwd: str):
+        self.cwd = os.path.realpath(cwd)
+        self.reset()
+
+    def reset(self) -> None:
+        self.changed_files = set()
+        self.verification = []
+        self.unverified_assumptions = []
+
+    def record_change(self, path: str) -> None:
+        if not path:
+            return
+        if path == "<bash>":
+            self.changed_files.add(path)
+            return
+        real = os.path.realpath(path if os.path.isabs(path) else os.path.join(self.cwd, path))
+        try:
+            rel = os.path.relpath(real, self.cwd)
+        except ValueError:
+            rel = real
+        self.changed_files.add(rel)
+
+    def record_verification(self, command: str, ok: bool, artifact: str = "") -> None:
+        digest = hashlib.sha256((artifact or "").encode("utf-8", "replace")).hexdigest()[:16]
+        self.verification.append(VerificationEvidence(command, 0 if ok else 1, digest))
+
+    def record_assumption(self, assumption: str) -> None:
+        assumption = (assumption or "").strip()
+        if assumption and assumption not in self.unverified_assumptions:
+            self.unverified_assumptions.append(assumption)
+
+    def contract(self, claim: str) -> EvidenceContract:
+        return EvidenceContract(
+            claim=claim,
+            changed_files=sorted(self.changed_files),
+            verification=list(self.verification),
+            unverified_assumptions=list(self.unverified_assumptions),
         )
 
 
