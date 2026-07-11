@@ -1974,10 +1974,17 @@ class Agent:
                     # include offset so paging one big file (same path, new range) isn't seen as a loop.
                     # P6.5: also fold the EDIT payload in — otherwise three DIFFERENT successful edits
                     # to one file share `edit_file:<path>:` and falsely trip the loop breaker.
+                    # P7 semantic loop: the signature captures the action's EFFECT, not just its shape,
+                    # so a repeat is a loop only when the workspace would not change. edit_file folds
+                    # its payload; write_file folds a content hash — rewriting a file with NEW content
+                    # is a new hypothesis (distinct sig, healthy), rewriting the SAME bytes trips.
                     _edit_disc = ""
                     if kind == "edit_file":
                         _edit_disc = (str(act.get("start_line") or "") + (act.get("old") or "")
                                       + json.dumps(act.get("edits") or "", sort_keys=True))[:120]
+                    elif kind == "write_file":
+                        _edit_disc = hashlib.sha1(
+                            (act.get("content") or "").encode("utf-8", "replace")).hexdigest()
                     sig = f"{kind}:{act.get('command') or act.get('path') or act.get('pattern') or ''}:{act.get('offset', '')}:{_edit_disc}"
                     trace["sig"] = sig
                     recent.append(sig)

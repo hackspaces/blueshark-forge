@@ -10,6 +10,7 @@ SAY = '{"thought":"done","action":"say","message":"all set"}'
 BASH = '{"thought":"look","action":"bash","command":"echo hi"}'
 EDIT = ('{"thought":"edit","action":"edit_file","path":"x.py",'
         '"start_line":1,"end_line":1,"anchor":"x = 1","new":"x = 2"}')
+WRITE = '{"thought":"w","action":"write_file","path":"x.py","content":"x = 2\\n"}'
 
 
 def _turns(*raws):
@@ -62,6 +63,35 @@ class TestFaultInjection(unittest.TestCase):
         self.assertFalse(rows[0].injected)
         self.assertIn("unknown", rows[0].detail)
 
+    def test_repeat_storm_clones_the_first_real_action(self):
+        changed, rows = faults.inject(_turns(BASH, SAY), ["repeat_storm"])
+        model = changed[0]["model"]
+        self.assertEqual(len(model), 5)                       # BASH + 3 clones + SAY
+        self.assertTrue(all(r["raw"] == BASH for r in model[:4]))
+        self.assertTrue(rows[0].injected)
+        # a say-only fixture has nothing to storm
+        _u, skipped = faults.inject(_turns(SAY), ["repeat_storm"])
+        self.assertFalse(skipped[0].injected)
+
+    def test_stale_read_follows_a_mutation(self):
+        changed, rows = faults.inject(_turns(WRITE, SAY), ["stale_read"])
+        model = changed[0]["model"]
+        self.assertEqual(len(model), 3)                       # WRITE + re-read + SAY
+        self.assertIn('"action":"read_file"', model[1]["raw"])
+        self.assertIn("x.py", model[1]["raw"])
+        self.assertTrue(rows[0].injected)
+        _u, skipped = faults.inject(_turns(BASH, SAY), ["stale_read"])
+        self.assertFalse(skipped[0].injected)
+
+    def test_deceptive_completion_inserts_unverified_claim(self):
+        changed, rows = faults.inject(_turns(WRITE, SAY), ["deceptive_completion"])
+        model = changed[0]["model"]
+        self.assertIn('"action":"say"', model[1]["raw"])
+        self.assertIn("all tests pass", model[1]["raw"])
+        self.assertTrue(rows[0].injected)
+        _u, skipped = faults.inject(_turns(BASH, SAY), ["deceptive_completion"])
+        self.assertFalse(skipped[0].injected)
+
 
 class _Session:
     def __init__(self, records):
@@ -100,6 +130,31 @@ class TestFaultMetrics(unittest.TestCase):
         self.assertTrue(row["false_completion"])
         self.assertFalse(row["recovered"])
 
+    def test_verification_precision_and_workspace_corruption(self):
+        result = {
+            "terminals": ["done"],
+            "session": _Session([
+                {"type": "action", "action": "edit_file"},
+                {"type": "observation", "ok": False},        # a botched mutation
+                {"type": "action", "action": "write_file"},
+                {"type": "observation", "ok": True},
+                {"type": "assistant", "verified": True},
+                {"type": "assistant", "verified": False},    # one slipped-through claim
+            ]),
+        }
+        row = faults.score(result, [faults.Injection("wrong_edit_anchor", True, 1, "x")])
+        self.assertEqual(row["workspace_corruption_rate"], 0.5)   # 1 of 2 mutations failed
+        self.assertEqual(row["verification_precision"], 0.5)      # 1 of 2 judged completions verified
+        self.assertTrue(row["false_completion"])
+
+    def test_clean_run_has_full_precision_and_no_corruption(self):
+        result = {"terminals": ["done"], "session": _Session([
+            {"type": "assistant", "verified": True},
+        ])}
+        row = faults.score(result, [faults.Injection("truncate_output", True, 1, "x")])
+        self.assertEqual(row["verification_precision"], 1.0)
+        self.assertEqual(row["workspace_corruption_rate"], 0.0)
+
     def test_report_is_compact_and_explicit(self):
         injection = [faults.Injection("truncate_output", True, 1, "cut")]
         metrics = faults.score(
@@ -109,6 +164,8 @@ class TestFaultMetrics(unittest.TestCase):
         self.assertIn("truncate_output", text)
         self.assertIn("recovered:", text)
         self.assertIn("false-completion:", text)
+        self.assertIn("verification-precision:", text)
+        self.assertIn("workspace-corruption:", text)
 
 
 class TestReplayFaultIntegration(unittest.TestCase):

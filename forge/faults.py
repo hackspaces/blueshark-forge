@@ -11,6 +11,9 @@ FAULTS = (
     "wrong_edit_anchor",
     "force_compaction",
     "authority_violation",
+    "repeat_storm",
+    "stale_read",
+    "deceptive_completion",
 )
 
 
@@ -31,6 +34,31 @@ def _rows(turns):
         for row in turn.get("model", []):
             step += 1
             yield step, row
+
+
+def _find(turns, pred):
+    """First (step, turn, index, action) whose parsed action satisfies `pred`,
+    or None. Rows that are not valid JSON parse to an empty action."""
+    step = 0
+    for turn in turns:
+        rows = turn.get("model", [])
+        for idx, row in enumerate(rows):
+            step += 1
+            try:
+                action = json.loads(row.get("raw", ""))
+            except (TypeError, ValueError):
+                action = {}
+            if not isinstance(action, dict):   # a JSON array/string/number is not an action
+                action = {}
+            if pred(action):
+                return step, turn, idx, action
+    return None
+
+
+def _row_like(row, action):
+    """A new model row carrying `action` at the same tier/token pressure as `row`."""
+    return {"raw": json.dumps(action, separators=(",", ":")),
+            "tier": row.get("tier", 0), "prompt_tokens": row.get("prompt_tokens", 0)}
 
 
 def _truncate(turns) -> Injection:
@@ -98,12 +126,59 @@ def _authority_violation(turns) -> Injection:
                      detail="fixture has no non-terminal action")
 
 
+def _repeat_storm(turns) -> Injection:
+    """Duplicate the first real action so the harness sees the SAME move with no
+    intervening change — exercises the (semantic) loop breaker and its recovery."""
+    found = _find(turns, lambda a: a.get("action") not in (None, "", "say"))
+    if not found:
+        return Injection("repeat_storm", False, detail="fixture has no repeatable action")
+    step, turn, idx, _ = found
+    clone = dict(turn["model"][idx])
+    turn["model"][idx + 1:idx + 1] = [dict(clone) for _ in range(3)]
+    return Injection("repeat_storm", True, step,
+                     "three duplicate actions inserted to force a no-progress loop")
+
+
+def _stale_read(turns) -> Injection:
+    """Re-issue a read of a file right after it was mutated: the harness holds a
+    pre-edit snapshot, so this exercises the stale-read / ledger-eviction path."""
+    found = _find(turns, lambda a: a.get("action") in ("edit_file", "write_file") and a.get("path"))
+    if not found:
+        return Injection("stale_read", False, detail="fixture has no mutation to stale a read against")
+    step, turn, idx, action = found
+    reread = _row_like(turn["model"][idx],
+                       {"thought": "fault: re-read the file I just changed",
+                        "action": "read_file", "path": action["path"]})
+    turn["model"].insert(idx + 1, reread)
+    return Injection("stale_read", True, step,
+                     f"a now-stale re-read of {action['path']} inserted after its mutation")
+
+
+def _deceptive_completion(turns) -> Injection:
+    """Inject an unverified success claim right after a mutation — a `say` that the
+    evidence-aware done-gate must reject (changed files, no passing verification)."""
+    found = _find(turns, lambda a: a.get("action") in ("edit_file", "write_file"))
+    if not found:
+        return Injection("deceptive_completion", False,
+                         detail="fixture has no mutation to falsely complete")
+    step, turn, idx, _ = found
+    claim = _row_like(turn["model"][idx],
+                      {"thought": "fault: claim success without verifying",
+                       "action": "say", "message": "Done — implemented and all tests pass."})
+    turn["model"].insert(idx + 1, claim)
+    return Injection("deceptive_completion", True, step,
+                     "unverified success claim injected right after a workspace mutation")
+
+
 _APPLIERS = {
     "truncate_output": _truncate,
     "malformed_burst": _malformed_burst,
     "wrong_edit_anchor": _wrong_anchor,
     "force_compaction": _force_compaction,
     "authority_violation": _authority_violation,
+    "repeat_storm": _repeat_storm,
+    "stale_read": _stale_read,
+    "deceptive_completion": _deceptive_completion,
 }
 
 
@@ -132,6 +207,30 @@ def score(result: Dict[str, Any], injections: Iterable[Injection]) -> Dict[str, 
     false_completion = any(r.get("verified") is False for r in accepted)
     injected = [i for i in injections if i.injected]
     actions = sum(1 for r in records if r.get("type") == "action")
+    # verification precision: of the completions the gate judged, how many were truly
+    # verified (a false completion is a verified==False acceptance that slipped through).
+    verified_true = sum(1 for r in accepted if r.get("verified") is True)
+    verified_false = sum(1 for r in accepted if r.get("verified") is False)
+    judged = verified_true + verified_false
+    # None (not 1.0) when the run judged no completion — a run that verified nothing is
+    # not "perfectly precise"; report() renders it as n/a and aggregators can skip it.
+    verification_precision = round(verified_true / judged, 3) if judged else None
+    # workspace corruption: mutations whose write/edit FAILED (a botched or partial
+    # mutation) as a fraction of mutations that actually EXECUTED. A mutation is only
+    # counted once its observation arrives — a gate-blocked/invalid action (logged with
+    # no following observation) never executed and belongs in neither term.
+    mutations = corrupt = 0
+    pending_mutation = False
+    for r in records:
+        t = r.get("type")
+        if t == "action":
+            pending_mutation = r.get("action") in ("write_file", "edit_file")
+        elif t == "observation" and pending_mutation:
+            mutations += 1
+            if r.get("ok") is False:
+                corrupt += 1
+            pending_mutation = False
+    workspace_corruption_rate = round(corrupt / max(1, mutations), 3)
     return {
         "faults_requested": len(injections),
         "faults_injected": len(injected),
@@ -148,6 +247,8 @@ def score(result: Dict[str, Any], injections: Iterable[Injection]) -> Dict[str, 
         "authority_denials": sum(
             1 for r in records if r.get("type") == "authority_denied"),
         "false_completion": false_completion,
+        "verification_precision": verification_precision,
+        "workspace_corruption_rate": workspace_corruption_rate,
         "context_tokens": sum(
             int(r.get("prompt_tokens") or 0) for r in records if r.get("type") == "model"),
     }
@@ -169,6 +270,9 @@ def report(injections: Iterable[Injection], metrics: Dict[str, Any]) -> str:
         f"authority-denials: {metrics['authority_denials']}  "
         f"completion-rejections: {metrics['completion_rejections']}  "
         f"false-completion: {'YES' if metrics['false_completion'] else 'NO'}",
+        f"verification-precision: "
+        f"{'n/a' if metrics['verification_precision'] is None else metrics['verification_precision']}  "
+        f"workspace-corruption: {metrics['workspace_corruption_rate']}",
         f"context-tokens: {metrics['context_tokens']}  "
         f"tool-calls/fault: {metrics['tool_call_efficiency']}",
     ]

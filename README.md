@@ -167,10 +167,15 @@ forge replay last --fault truncate_output --fault authority_violation
 ```
 
 Available faults: `truncate_output`, `malformed_burst`, `wrong_edit_anchor`,
-`force_compaction`, and `authority_violation`. The report includes recovery,
-false-completion, action efficiency, observation failures, loops, escalations,
-authority denials, completion rejections, and context-token pressure. Injection
-changes a deep copy of the trace; the recorded session and workspace stay untouched.
+`force_compaction`, `authority_violation`, `repeat_storm` (duplicate an action to
+provoke a no-progress loop), `stale_read` (re-read a file right after mutating it),
+and `deceptive_completion` (an unverified "all tests pass" claim right after a
+change). The report includes recovery, false-completion, action efficiency,
+observation failures, loops, escalations, authority denials, completion rejections,
+**verification precision** (of the completions the gate judged, the share truly
+verified), **workspace-corruption rate** (mutations whose write/edit failed), and
+context-token pressure. Injection changes a deep copy of the trace; the recorded
+session and workspace stay untouched.
 
 ### Harness-lift benchmark
 
@@ -240,7 +245,10 @@ harness, and even a 9B becomes a real agent. The levers:
   call (Ollama `format` schema). A small model literally cannot emit a malformed
   call.
 - **Bounded steps** — the harness holds the loop; the model does one thing per turn.
-- **Loop detection** — repeated no-progress actions are broken automatically.
+- **Loop detection** — repeated actions are broken automatically, but *semantically*:
+  a repeat only counts as a loop when the workspace did not change between the repeats.
+  Re-running the tests after an edit is a new hypothesis and stays healthy; re-running
+  them with nothing changed is the loop.
 - **Autonomy scaffolding** — task mode tells the model to act, not ask.
 - **Verify-on-done** — a claim of "done" is checked, never trusted. Completion policy is
   deterministic: `FORGE_COMPLETION_POLICY=audit|balanced|strict` (default `balanced`).

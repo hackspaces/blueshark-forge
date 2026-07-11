@@ -326,6 +326,7 @@ def replay_faults(sid, fault_names, strict=False):
             "action_count": 0, "observation_failures": 0, "loops": 0,
             "escalations": 0, "authority_denials": 0,
             "completion_rejections": 0, "false_completion": False,
+            "verification_precision": 1.0, "workspace_corruption_rate": 0.0,
             "context_tokens": 0, "tool_call_efficiency": 0.0,
         })
     metrics = faults.score(result, injections)

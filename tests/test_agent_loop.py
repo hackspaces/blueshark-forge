@@ -214,6 +214,34 @@ class TestLoopDetection(unittest.TestCase):
         self.assertEqual(len(nudges), 2)                         # the nudge was appended each trip
         self.assertEqual(result, "done")                         # the say still lands afterwards
 
+    def test_writes_with_new_content_each_time_do_not_trip(self):
+        # P7 semantic loop: three writes to the SAME path but with DIFFERENT content
+        # each change the workspace — a new hypothesis, not a no-progress loop. The
+        # signature folds a content hash, so these are three distinct sigs and the
+        # breaker stays silent. (A content-blind sig would false-trip here.)
+        d = tempfile.mkdtemp()
+        writes = ['{"thought":"w","action":"write_file","path":"a.py","content":"v%d\\n"}' % i
+                  for i in range(3)]
+        events = []
+        a = Agent(_ScriptBackend(writes + [_SAY]), sm.EphemeralSession(d, "sem"),
+                  max_steps=12, on_event=lambda k, **kw: events.append((k, kw)))
+        result = a.send("write it")
+        self.assertEqual(sum(1 for k, _ in events if k == "loop"), 0)   # distinct effect → no loop
+        self.assertEqual(result, "done")
+
+    def test_rewriting_identical_bytes_still_trips(self):
+        # The other half of P7: re-emitting the SAME write (identical path AND content)
+        # is a genuine no-progress loop the breaker must still catch — the content hash
+        # collapses to one signature, so recent[-3:].count(sig) >= 3 trips.
+        d = tempfile.mkdtemp()
+        same = '{"thought":"w","action":"write_file","path":"a.py","content":"x = 1\\n"}'
+        events = []
+        a = Agent(_ScriptBackend([same] * 4 + [_SAY]), sm.EphemeralSession(d, "same"),
+                  max_steps=12, on_event=lambda k, **kw: events.append((k, kw)))
+        result = a.send("write it")
+        self.assertGreaterEqual(sum(1 for k, _ in events if k == "loop"), 1)   # no-op repeat → loop
+        self.assertEqual(result, "done")
+
 
 class TestCompaction(unittest.TestCase):
     """Context compaction (agent.py _compact/_summarize): head pinned, recent tail
