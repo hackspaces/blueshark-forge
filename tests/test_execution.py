@@ -1,8 +1,12 @@
 """Execution-state protocol and evidence-contract tests."""
+import json
+import os
+import tempfile
 import unittest
 
 from forge.execution import (EvidenceContract, ExecutionState, ExecutionTracker,
                              VerificationEvidence)
+from forge.session import Session
 
 
 class TestEvidenceContract(unittest.TestCase):
@@ -56,6 +60,23 @@ class TestExecutionTracker(unittest.TestCase):
         event = tracker.observe("inbox", {"sender": "background", "text": "pid 7 EXITED code 1"})
         self.assertEqual(event["event"], "ProcessExited")
         self.assertEqual(event["state_to"], "DIAGNOSE")
+
+
+class TestSessionProjection(unittest.TestCase):
+    def test_log_keeps_legacy_shape_and_adds_runtime_envelope(self):
+        session = object.__new__(Session)
+        session.path = os.path.join(tempfile.mkdtemp(), "session.jsonl")
+        session.execution = ExecutionTracker()
+        session.log("action", action="edit_file", args={"path": "x.py"})
+        session.log("observation", text="edited x.py", ok=True)
+        with open(session.path) as stream:
+            rows = [json.loads(line) for line in stream]
+        self.assertEqual(rows[0]["type"], "action")
+        self.assertEqual(rows[0]["action"], "edit_file")
+        self.assertEqual(rows[0]["runtime"]["event"], "ActionStarted")
+        self.assertEqual(rows[1]["runtime"]["event"], "WorkspaceChanged")
+        self.assertEqual(rows[1]["runtime"]["verification_obligation"],
+                         "verify the changed workspace before completion")
 
 
 if __name__ == "__main__":
