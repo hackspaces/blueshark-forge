@@ -23,6 +23,7 @@ from . import backends
 from . import exemplars
 from . import profile
 from . import profiles
+from .execution import EvidenceCollector
 from .ledger import Ledger
 from .tools import (ACTION_SCHEMA, ACTION_VARIANTS, ALL_ACTIONS, TOOL_HELP,
                     build_schema, required_fields, execute, dry_run, shape, error_hint)
@@ -359,6 +360,7 @@ class Agent:
         self._verified = False   # a test run this turn already passed
         self._bounced = False    # the done-gate already bounced/nudged once this turn
         self._narrated = False   # the 'act, don't narrate' guard already bounced once this turn
+        self.evidence = EvidenceCollector(self.session.cwd)  # harness-owned completion provenance
         self.stop = threading.Event()  # set from the UI (Esc) to interrupt mid-run
         self.mode = "auto"             # auto | plan | manual (set by the UI)
         self.approve = lambda desc: "yes"   # manual-mode hook: 'yes' | 'always' | 'no'
@@ -1323,7 +1325,7 @@ class Agent:
                 "files changed this turn. Do the work NOW: make the edits/writes and run the "
                 "check, THEN report the outcome. Don't stop just to narrate your plan.")
 
-    def _done_gate(self):
+    def _done_gate(self, claim=""):
         """P2.1 — SYNCHRONOUS done-gate on `say`. If this turn mutated files and
         nothing has verified them, the HARNESS itself runs the project's real test
         command (zero model tokens) and grounds acceptance in the exit code. It
@@ -1340,16 +1342,21 @@ class Agent:
         except Exception:
             cmd = None
         if not cmd:
-            return None                       # no detectable suite → accept gracefully
+            self.evidence.record_assumption("no test command detected")
+            return None                       # no detectable suite → accept with explicit provenance
         obs2, ok2 = tools._run(cmd, self.session.cwd, timeout=tools.BASH_TIMEOUT * 3, stop=self.stop)
         if _cmd_missing(obs2):                # exit 127 / not installed → not a usable test cmd
+            self.evidence.record_assumption("detected test command is unavailable: " + cmd)
             return None
+        self.evidence.record_verification(cmd, ok2, obs2)
         if ok2:
             self.session.log("verified", cmd=cmd, ok=True)
             self.on_event("done_check", cmd=cmd, ok=True)
             self.messages.append({"role": "user", "content": f"[done-gate] `{cmd}` passed"})
             return None
         self._bounced = True
+        contract = self.evidence.contract(claim)
+        self.session.log("completion_rejected", evidence=contract.to_dict(), reason="verification failed")
         self.on_event("done_check", cmd=cmd, ok=False)
         tail = "\n".join((obs2 or "").splitlines()[-15:])
         return (f"[done-check] `{cmd}` FAILS:\n{tail}\n— fix before finishing, or say why "
@@ -1585,17 +1592,23 @@ class Agent:
                     self.ledger.record_write(_rp, step)  # re-read the edited file from disk
                     recorded_fp = _rp
         if ok and kind in ("write_file", "edit_file") and act.get("path"):
-            self._mutated.add(os.path.realpath(os.path.join(self.session.cwd, act["path"])))
+            changed = os.path.realpath(os.path.join(self.session.cwd, act["path"]))
+            self._mutated.add(changed)
+            self.evidence.record_change(changed)
             self._verified = False
-        if ok and kind == "run_tests":
-            self._verified = True             # P6.3: a passing run_tests satisfies the done-gate
+        if kind == "run_tests":
+            self.evidence.record_verification("run_tests", ok, obs)
+            if ok:
+                self._verified = True         # P6.3: a passing run_tests satisfies the done-gate
         if ok and kind == "bash":
             _cmd = act.get("command", "")
             from . import fleet as _fleet
             if _is_test_cmd(_cmd, self.session.cwd):
+                self.evidence.record_verification(_cmd, True, obs)
                 self._verified = True         # the model ran the suite itself
             elif _fleet.bash_mutates(_cmd):
                 self._mutated.add("<bash>")   # a file-touching bash still gates `say`
+                self.evidence.record_change("<bash>")
                 self._verified = False
         if ok and kind == "edit_file":
             # P5.8 passport telemetry: classify the edit from execute()'s (fuzzy)/(exact) suffix.
@@ -1774,6 +1787,7 @@ class Agent:
         self._verified = False
         self._bounced = False
         self._narrated = False
+        self.evidence.reset()
         self._heat = 0.0   # P5.5: greedy for the first try of every turn
         self.session.log("user", text=user_text)
         self.session.set_status("working")
@@ -1854,12 +1868,14 @@ class Agent:
                     kind = act.get("action")
                     trace["action"] = kind
                     if kind == "say":
-                        bounce = self._done_gate() or self._narration_bounce(act.get("message", ""))
+                        bounce = self._done_gate(act.get("message", "")) or self._narration_bounce(act.get("message", ""))
                         if bounce:
                             self.messages.append({"role": "user", "content": bounce})
                             continue
                         msg = act.get("message", "")
-                        self.session.log("assistant", text=msg, thought=act.get("thought", ""))
+                        contract = self.evidence.contract(msg)
+                        self.session.log("assistant", text=msg, thought=act.get("thought", ""),
+                                         evidence=contract.to_dict(), verified=contract.verified)
                         self.on_event("say", message=msg)
                         return msg
 
@@ -2014,6 +2030,8 @@ class Agent:
                     tag = ""
                     borrow_now = False
                     if not ok:
+                        if kind == "bash" and _is_test_cmd(act.get("command", ""), self.session.cwd):
+                            self.evidence.record_verification(act.get("command", ""), False, obs)
                         tag, borrow_now, control = self._handle_failure(kind, sig, obs, step, trace)
                         if control == "continue":       # escalated to a fresh rung — skip the obs append
                             continue
