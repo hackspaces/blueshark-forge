@@ -82,6 +82,7 @@ class TestAuthorityPolicy(unittest.TestCase):
 
     def test_legal_actions_narrow_the_model_grammar(self):
         self.assertNotIn("edit_file", AuthorityPolicy("observe").legal_actions())
+        self.assertIn("fleet_send", AuthorityPolicy("observe").legal_actions())
         self.assertIn("edit_file", AuthorityPolicy("contribute").legal_actions())
         self.assertNotIn("bash", AuthorityPolicy("contribute").legal_actions())
         self.assertIn("bash", AuthorityPolicy("operator").legal_actions())
