@@ -23,7 +23,7 @@ from . import backends
 from . import exemplars
 from . import profile
 from . import profiles
-from .execution import EvidenceCollector
+from .execution import CompletionPolicy, EvidenceCollector
 from .ledger import Ledger
 from .tools import (ACTION_SCHEMA, ACTION_VARIANTS, ALL_ACTIONS, TOOL_HELP,
                     build_schema, required_fields, execute, dry_run, shape, error_hint)
@@ -361,6 +361,8 @@ class Agent:
         self._bounced = False    # the done-gate already bounced/nudged once this turn
         self._narrated = False   # the 'act, don't narrate' guard already bounced once this turn
         self.evidence = EvidenceCollector(self.session.cwd)  # harness-owned completion provenance
+        self.completion_policy = CompletionPolicy()
+        self._completion_decision = None
         self.stop = threading.Event()  # set from the UI (Esc) to interrupt mid-run
         self.mode = "auto"             # auto | plan | manual (set by the UI)
         self.approve = lambda desc: "yes"   # manual-mode hook: 'yes' | 'always' | 'no'
@@ -1326,41 +1328,61 @@ class Agent:
                 "check, THEN report the outcome. Don't stop just to narrate your plan.")
 
     def _done_gate(self, claim=""):
-        """P2.1 — SYNCHRONOUS done-gate on `say`. If this turn mutated files and
-        nothing has verified them, the HARNESS itself runs the project's real test
-        command (zero model tokens) and grounds acceptance in the exit code. It
-        bounces at most ONCE per turn — the second `say` always passes, no
-        livelock — and NEVER emits an observation-ok event (existing tests key on
-        that stream); it uses the distinct 'done_check' event plus a plain
-        user-message append. Returns a bounce message to append+continue, or None
-        to accept the say."""
-        if not self._mutated or self._verified or self._bounced:
+        """Evaluate completion evidence under the configured harness policy.
+
+        The first unsupported claim is rejected with a structured contract. Balanced
+        mode preserves Forge's historical second-claim escape hatch, but records it as
+        an explicit policy override; strict mode never accepts unverified mutations.
+        """
+        if not self._mutated:
+            self._completion_decision = self.completion_policy.evaluate(
+                self.evidence.contract(claim), attempt=1)
             return None
+
         from . import fleet, tools
-        try:
-            cmd = fleet.detect_test_cmd(self.session.cwd)
-        except Exception:
-            cmd = None
-        if not cmd:
-            self.evidence.record_assumption("no test command detected")
-            return None                       # no detectable suite → accept with explicit provenance
-        obs2, ok2 = tools._run(cmd, self.session.cwd, timeout=tools.BASH_TIMEOUT * 3, stop=self.stop)
-        if _cmd_missing(obs2):                # exit 127 / not installed → not a usable test cmd
-            self.evidence.record_assumption("detected test command is unavailable: " + cmd)
-            return None
-        self.evidence.record_verification(cmd, ok2, obs2)
-        if ok2:
-            self.session.log("verified", cmd=cmd, ok=True)
-            self.on_event("done_check", cmd=cmd, ok=True)
-            self.messages.append({"role": "user", "content": f"[done-gate] `{cmd}` passed"})
-            return None
-        self._bounced = True
+        # Only the first claim runs the automatic check. A second claim evaluates the
+        # same captured evidence, making the old bounce escape deterministic and auditable.
+        if not self._verified and not self._bounced:
+            try:
+                cmd = fleet.detect_test_cmd(self.session.cwd)
+            except Exception:
+                cmd = None
+            if not cmd:
+                self.evidence.record_assumption("no test command detected")
+            else:
+                obs2, ok2 = tools._run(cmd, self.session.cwd,
+                                       timeout=tools.BASH_TIMEOUT * 3, stop=self.stop)
+                if _cmd_missing(obs2):
+                    self.evidence.record_assumption(
+                        "detected test command is unavailable: " + cmd)
+                else:
+                    self.evidence.record_verification(cmd, ok2, obs2)
+                    if ok2:
+                        self._verified = True
+                        self.session.log("verified", cmd=cmd, ok=True)
+                        self.on_event("done_check", cmd=cmd, ok=True)
+                        self.messages.append({"role": "user", "content":
+                                              f"[done-gate] `{cmd}` passed"})
+                    else:
+                        self.on_event("done_check", cmd=cmd, ok=False)
+
         contract = self.evidence.contract(claim)
-        self.session.log("completion_rejected", evidence=contract.to_dict(), reason="verification failed")
-        self.on_event("done_check", cmd=cmd, ok=False)
-        tail = "\n".join((obs2 or "").splitlines()[-15:])
-        return (f"[done-check] `{cmd}` FAILS:\n{tail}\n— fix before finishing, or say why "
-                "this failure is out of scope")
+        attempt = 2 if self._bounced else 1
+        decision = self.completion_policy.evaluate(contract, attempt=attempt)
+        self._completion_decision = decision
+        self.session.log("completion_policy", mode=self.completion_policy.mode,
+                         attempt=attempt, decision=decision.to_dict(),
+                         evidence=contract.to_dict())
+        if decision.allowed:
+            return None
+
+        self._bounced = True
+        self.session.log("completion_rejected", evidence=contract.to_dict(),
+                         policy=decision.to_dict(), reason=decision.reason)
+        failed = [v.command for v in contract.verification if v.exit_code != 0]
+        detail = ("; failed: " + ", ".join(failed)) if failed else ""
+        return (f"[completion-policy:{decision.code}] {decision.reason}{detail}. "
+                "Gather passing evidence or change the implementation before finishing.")
 
     # ---- P4.5 just-in-time retrieval -----------------------------------------
     def _retrieval_ensure(self):
@@ -1788,6 +1810,7 @@ class Agent:
         self._bounced = False
         self._narrated = False
         self.evidence.reset()
+        self._completion_decision = None
         self._heat = 0.0   # P5.5: greedy for the first try of every turn
         self.session.log("user", text=user_text)
         self.session.set_status("working")
@@ -1874,8 +1897,10 @@ class Agent:
                             continue
                         msg = act.get("message", "")
                         contract = self.evidence.contract(msg)
+                        decision = self._completion_decision or self.completion_policy.evaluate(contract)
                         self.session.log("assistant", text=msg, thought=act.get("thought", ""),
-                                         evidence=contract.to_dict(), verified=contract.verified)
+                                         evidence=contract.to_dict(), verified=contract.verified,
+                                         policy=decision.to_dict())
                         self.on_event("say", message=msg)
                         return msg
 
