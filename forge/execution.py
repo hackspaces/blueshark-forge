@@ -144,6 +144,81 @@ class EvidenceCollector:
         )
 
 
+class PolicyOutcome(str, Enum):
+    ACCEPT = "accept"
+    REJECT = "reject"
+    ACCEPT_UNVERIFIED = "accept_unverified"
+
+
+@dataclass(frozen=True)
+class CompletionDecision:
+    outcome: PolicyOutcome
+    code: str
+    reason: str
+    recovery_state: Optional[ExecutionState] = None
+    override_used: bool = False
+
+    @property
+    def allowed(self) -> bool:
+        return self.outcome != PolicyOutcome.REJECT
+
+    def to_dict(self) -> Dict[str, Any]:
+        result = asdict(self)
+        result["outcome"] = self.outcome.value
+        if self.recovery_state is not None:
+            result["recovery_state"] = self.recovery_state.value
+        return result
+
+
+class CompletionPolicy:
+    """Deterministic policy over harness-built completion evidence.
+
+    Modes:
+      audit     never blocks, but labels unsupported completion;
+      balanced  rejects a failed check once, then permits the existing single-bounce
+                escape hatch as an explicit override; accepts missing-runner cases as
+                visibly unverified;
+      strict    rejects every changed workspace without passing evidence.
+    """
+
+    MODES = frozenset(("audit", "balanced", "strict"))
+
+    def __init__(self, mode: Optional[str] = None):
+        selected = (mode or os.environ.get("FORGE_COMPLETION_POLICY", "balanced")).lower()
+        self.mode = selected if selected in self.MODES else "balanced"
+
+    def evaluate(self, contract: EvidenceContract, attempt: int = 1) -> CompletionDecision:
+        if not contract.changed_files:
+            return CompletionDecision(PolicyOutcome.ACCEPT, "no_changes",
+                                      "completion did not change the workspace")
+        if contract.verified:
+            return CompletionDecision(PolicyOutcome.ACCEPT, "verified",
+                                      "all recorded verification evidence passed")
+
+        failed = any(item.exit_code != 0 for item in contract.verification)
+        if self.mode == "audit":
+            return CompletionDecision(PolicyOutcome.ACCEPT_UNVERIFIED, "audit_only",
+                                      "policy is audit-only; unsupported completion was recorded")
+
+        if failed:
+            if self.mode == "balanced" and attempt > 1:
+                return CompletionDecision(
+                    PolicyOutcome.ACCEPT_UNVERIFIED, "single_bounce_override",
+                    "verification failed, but the balanced policy permits the existing second-claim escape hatch",
+                    override_used=True)
+            return CompletionDecision(PolicyOutcome.REJECT, "verification_failed",
+                                      "one or more verification commands failed",
+                                      ExecutionState.DIAGNOSE)
+
+        if self.mode == "strict":
+            return CompletionDecision(PolicyOutcome.REJECT, "verification_missing",
+                                      "changed files require passing verification evidence",
+                                      ExecutionState.VERIFY)
+
+        return CompletionDecision(PolicyOutcome.ACCEPT_UNVERIFIED, "verifier_unavailable",
+                                  "no runnable verifier was available; assumptions are recorded")
+
+
 @dataclass(frozen=True)
 class EventEnvelope:
     event: RuntimeEvent
