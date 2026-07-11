@@ -31,14 +31,16 @@ ACTION_AUTHORITY = {
     "fleet_send": AuthorityLevel.OPERATOR,
 }
 
-# Commands that can destroy work, elevate privileges, install arbitrary remote code,
-# expose common secret stores, or rewrite published history require explicit admin.
+# Commands that can destroy work outside the project, elevate privileges, install
+# arbitrary remote code, expose common secret stores, or rewrite published history
+# require explicit admin. Everyday-safe shell (incl. `rm -rf <relative subdir>`,
+# `env`) stays at operator; only recursive-force deletes aimed at root/home/an
+# absolute path or a bare glob are treated as admin-only.
 _ADMIN_SHELL = (
     re.compile(r"(^|[;&|]\s*)sudo\b"),
-    re.compile(r"(^|[;&|]\s*)rm\s+[^\n]*-[^\n]*r[^\n]*f|(^|[;&|]\s*)rm\s+-rf\b"),
+    re.compile(r"(?=.*\brm\b)(?=.*-[a-zA-Z]*r)(?=.*-[a-zA-Z]*f)(?=.*\s(?:/|~|\$HOME|\*))"),
     re.compile(r"\bgit\s+(reset\s+--hard|clean\s+-[a-zA-Z]*f|push\s+[^\n]*--force)\b"),
     re.compile(r"\b(curl|wget)\b[^\n|]*\|\s*(sh|bash|zsh)\b"),
-    re.compile(r"(^|[;&|]\s*)(env|printenv)\b"),
     re.compile(r"\b(cat|less|head|tail)\s+[^\n]*(\.ssh|\.aws|\.gnupg|\.env)\b"),
 )
 
