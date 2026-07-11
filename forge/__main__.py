@@ -562,19 +562,25 @@ def main():
     p_setup.add_argument("--models", help="comma-separated model names, cheap→strong (for non-ollama engines)")
 
     args = ap.parse_args()
-    if args.cmd == "setup":
-        from . import setup as setupmod
-        models = [m.strip() for m in args.models.split(",")] if args.models else None
-        sys.exit(setupmod.run(auto=args.auto, engine=args.engine, url=args.url,
-                              api_key=args.api_key, models=models))
     dispatch = {"run": cmd_run, "status": cmd_status, "send": cmd_send, "up": cmd_up,
                 "down": cmd_down, "receipts": cmd_receipts, "learnings": cmd_learnings,
                 "forget": cmd_forget, "trace": cmd_trace, "corpus": cmd_corpus, "bench": cmd_bench, "replay": cmd_replay,
                 "passport": cmd_passport}
     try:
+        if args.cmd == "setup":
+            from . import setup as setupmod
+            models = [m.strip() for m in args.models.split(",")] if args.models else None
+            sys.exit(setupmod.run(auto=args.auto, engine=args.engine, url=args.url,
+                                  api_key=args.api_key, models=models))
         (dispatch.get(args.cmd) or cmd_chat)(args)
     except ForgeError as e:
         print(f"✗ {e}", file=sys.stderr); sys.exit(1)
+    except (KeyboardInterrupt, EOFError):
+        # Ctrl-C / Ctrl-D anywhere — during a prompt, a pull, a long run — exits clean,
+        # never a traceback. 130 is the shell convention for SIGINT. (The chat REPL
+        # swallows its own Ctrl-C to cancel a line, so it never reaches here.)
+        print()
+        sys.exit(130)
 
 
 if __name__ == "__main__":
