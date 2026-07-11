@@ -38,6 +38,7 @@ class RuntimeEvent(str, Enum):
     CONTEXT_COMPACTED = "ContextCompacted"
     COMPLETION_CLAIMED = "CompletionClaimed"
     COMPLETION_REJECTED = "CompletionRejected"
+    AUTHORITY_DENIED = "AuthorityDenied"
 
 
 READ_ACTIONS = frozenset(("read_file", "list_files", "grep", "glob"))
@@ -268,6 +269,8 @@ class ExecutionTracker:
             recovery = ExecutionState.DIAGNOSE
         elif event == RuntimeEvent.COMPLETION_REJECTED:
             recovery = ExecutionState.VERIFY
+        elif event == RuntimeEvent.AUTHORITY_DENIED:
+            recovery = ExecutionState.PLAN
         self.state = target
         return EventEnvelope(event, kind, previous, target, evidence,
                              obligation, recovery).to_dict()
@@ -296,6 +299,8 @@ class ExecutionTracker:
             return RuntimeEvent.CONTEXT_COMPACTED
         if kind in ("narrate_bounce", "completion_rejected"):
             return RuntimeEvent.COMPLETION_REJECTED
+        if kind == "authority_denied":
+            return RuntimeEvent.AUTHORITY_DENIED
         if kind == "assistant":
             # A stuck/hand-off message is logged as an `assistant` record too, but the
             # agent is giving up — not claiming completion. Don't project it to COMPLETE.
@@ -326,6 +331,7 @@ class ExecutionTracker:
             RuntimeEvent.COMPLETION_CLAIMED: ExecutionState.COMPLETE,
             RuntimeEvent.COMPLETION_REJECTED: ExecutionState.DIAGNOSE,
             RuntimeEvent.PROCESS_EXITED: ExecutionState.DIAGNOSE,
+            RuntimeEvent.AUTHORITY_DENIED: ExecutionState.DIAGNOSE,
         }
         return mapping.get(event, self.state)
 
