@@ -119,7 +119,7 @@ def _rm_requires_admin(args) -> bool:
             options = False
             continue
         if options and token.startswith("-") and token != "-":
-            if token in ("--recursive", "--dir"):
+            if token == "--recursive":
                 recursive = True
             elif token == "--force":
                 force = True
