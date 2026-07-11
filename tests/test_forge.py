@@ -17,6 +17,7 @@ from forge import session as sm            # noqa: E402
 from forge import ledger as ledger_mod     # noqa: E402
 from forge import profile as _profile      # noqa: E402
 from forge.agent import Agent              # noqa: E402
+from forge.authority import AuthorityPolicy  # noqa: E402
 
 # P5.8 hermetic redirect: Agents built here record passport telemetry; keep it out of
 # the real ~/.forge/profile (and out of the heat/loop assertions below) by pointing the
@@ -2075,11 +2076,13 @@ class TestModeGate(unittest.TestCase):
         a.mode = mode
         a.approvals = set(approvals)
         a.approve = approve or (lambda d: "yes")
+        a.authority = AuthorityPolicy("operator")   # harness authority is always present on a real Agent
         return a
 
     def test_auto_never_gates(self):
         a = self._agent("auto", approve=lambda d: self.fail("should not ask"))
-        self.assertIsNone(a._gate("bash", {"action": "bash", "command": "rm -rf /"}))
+        # auto mode does not gate ordinary shell — incl. a project-local `rm -rf <subdir>`
+        self.assertIsNone(a._gate("bash", {"action": "bash", "command": "rm -rf build"}))
 
     def test_plan_blocks_mutating_allows_readonly(self):
         a = self._agent("plan")
