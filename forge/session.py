@@ -14,6 +14,8 @@ import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
+from .execution import ExecutionTracker
+
 try:
     import fcntl
 except ImportError:  # non-Unix; locking becomes a no-op
@@ -94,6 +96,7 @@ class Session:
         self.token = secrets.token_hex(16)   # gates the inbox against other local processes
         self._inbox = []
         self._lock = threading.Lock()
+        self.execution = ExecutionTracker()
         # Wake pipe: push() writes a byte so an idle REPL blocked in select() wakes
         # the instant a fleet message lands, instead of rotting until the human types.
         try:
@@ -111,6 +114,14 @@ class Session:
     # ---- transcript ----
     def log(self, kind, **fields):
         rec = {"ts": time.time(), "type": kind, **fields}
+        # Additive projection: legacy record fields stay byte-for-byte readable,
+        # while platform consumers get one canonical event/state envelope.
+        try:
+            runtime = self.execution.observe(kind, fields)
+            if runtime is not None:
+                rec["runtime"] = runtime
+        except Exception:
+            pass  # provenance must never break the execution it observes
         with open(self.path, "a") as f:
             f.write(json.dumps(rec) + "\n")
 
