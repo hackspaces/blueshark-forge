@@ -224,7 +224,11 @@ harness, and even a 9B becomes a real agent. The levers:
 - **Bounded steps** — the harness holds the loop; the model does one thing per turn.
 - **Loop detection** — repeated no-progress actions are broken automatically.
 - **Autonomy scaffolding** — task mode tells the model to act, not ask.
-- **Verify-on-done** — a claim of "done" is checked, never trusted. Completion policy is\n  deterministic: `FORGE_COMPLETION_POLICY=audit|balanced|strict` (default `balanced`).\n  Balanced rejects a failed check once and records any second-claim escape as an explicit\n  override; strict requires passing evidence for every changed workspace.\n
+- **Verify-on-done** — a claim of "done" is checked, never trusted. Completion policy is
+  deterministic: `FORGE_COMPLETION_POLICY=audit|balanced|strict` (default `balanced`).
+  Balanced rejects a failed check once and records any second-claim escape as an explicit
+  override; strict requires passing evidence for every changed workspace.
+
 **Workspace + computer awareness** (like a real coding assistant): on start, forge
 builds a gitignore-aware map of the project, detects the language/project type,
 reads the git state, and learns the machine it's on (OS, shell, tool versions), all
