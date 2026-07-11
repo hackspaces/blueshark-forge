@@ -305,6 +305,33 @@ def write_fixture(sid, name):
     return path
 
 
+def replay_faults(sid, fault_names, strict=False):
+    """Inject deterministic faults into a recorded session, replay with no model,
+    and return recovery/efficiency metrics as a printable report."""
+    from . import faults
+    recs = _records_for(sid)
+    if not recs:
+        return f"no records for session {sid}."
+    meta = next((r for r in recs if r.get("type") == "meta"), None)
+    turns = turns_from_records(recs)
+    if not any(tn["user"] for tn in turns):
+        return f"session {sid} has no user turns to replay."
+    mutated, injections = faults.inject(turns, fault_names)
+    try:
+        result = replay_records(
+            meta, mutated, strict=strict, window=window_from_records(recs))
+    except ReplayDivergence as e:
+        return faults.report(injections, {
+            "recovered": False, "terminal": f"STRICT divergence — {e}",
+            "action_count": 0, "observation_failures": 0, "loops": 0,
+            "escalations": 0, "authority_denials": 0,
+            "completion_rejections": 0, "false_completion": False,
+            "context_tokens": 0, "tool_call_efficiency": 0.0,
+        })
+    metrics = faults.score(result, injections)
+    return faults.report(injections, metrics)
+
+
 def replay(sid, strict=False):
     """Re-drive a recorded session through the current harness with no model and
     report — as a printable string — the terminal state and the FIRST step at
