@@ -9,7 +9,6 @@
 import argparse
 import json
 import os
-import shutil
 import sys
 import time
 import uuid
@@ -104,14 +103,16 @@ def cmd_run(args):
     s = _new_session(ladder[0].name, os.path.abspath(args.dir))
     state = {"streamed": False, "said": False}
     def on_event(kind, **k):
+        W = term_width()
         if kind == "plan":
-            print("  plan:")
+            print(_paint("  plan:", "cyan"))
             for it in k["plan"]:
-                print(f"    {it}")
+                print(f"    {_fit(str(it), W - 4)}")
         elif kind == "action":
-            print(f"  · {k['action']}: {(k.get('detail') or '')[:80]}", end="", flush=True)
+            detail = _fit(k.get("detail") or "", W - len(k["action"]) - 12)
+            print(f"  {_paint('·', 'cyan')} {k['action']}: {_paint(detail, 'dim')}", end="", flush=True)
         elif kind == "observation":
-            print(f"  [{'ok' if k.get('ok') else 'fail'}]")
+            print("  " + (_paint("[ok]", "green") if k.get("ok") else _paint("[fail]", "red")))
         elif kind == "token":
             if not state["streamed"]:
                 print(); state["streamed"] = True
@@ -123,13 +124,13 @@ def cmd_run(args):
             else:
                 print(f"\n{k.get('message','')}")
         elif kind == "escalate":
-            print(f"  ↑ stuck — escalating to {k['model']}")
+            print(_paint(f"  ↑ stuck — escalating to {k['model']}", "yellow"))
         elif kind == "borrow":
-            print(f"  ⇡ borrowing one action from {k['model']}")
+            print(_paint(f"  ⇡ borrowing one action from {k['model']}", "yellow"))
         elif kind == "deescalate":
-            print(f"  ↓ recovered — back to {k['model']}")
+            print(_paint(f"  ↓ recovered — back to {k['model']}", "green"))
         elif kind == "inbox":
-            print(f"  ✉ {k['sender']}: {k['text'][:70]}")
+            print(_paint(f"  ✉ {k['sender']}: {_fit(k['text'], W - len(k['sender']) - 6)}", "magenta"))
     agent = Agent(_make_ladder(args.model), s, on_event=on_event, max_steps=args.max_steps, autonomous=True,
                   workspace=_workspace_ctx(os.path.abspath(args.dir), _ctx_budget(ladder[0])))
     try:
@@ -154,35 +155,7 @@ def _daemon_running():
         return None
 
 
-# --- status rendering helpers -------------------------------------------------
-
-_ANSI = {"reset": "\033[0m", "dim": "\033[2m", "bold": "\033[1m",
-         "green": "\033[32m", "yellow": "\033[33m", "cyan": "\033[36m",
-         "blue": "\033[34m", "red": "\033[31m"}
-
-
-def _color_on():
-    return (sys.stdout.isatty() and os.environ.get("NO_COLOR") is None
-            and os.environ.get("TERM") != "dumb")
-
-
-def _paint(text, *styles):
-    if not _color_on():
-        return text
-    return "".join(_ANSI[s] for s in styles) + text + _ANSI["reset"]
-
-
-def _tilde(path):
-    home = os.path.expanduser("~")
-    return "~" + path[len(home):] if path and path.startswith(home) else (path or "")
-
-
-def _fit(text, width):
-    """Collapse whitespace and hard-truncate to `width` columns with an ellipsis."""
-    text = " ".join((text or "").split())
-    if width < 1:
-        return ""
-    return text if len(text) <= width else text[:width - 1].rstrip() + "…"
+from .render import paint as _paint, fit as _fit, tilde as _tilde, term_width, strip_ansi as _strip_ansi
 
 
 def cmd_status(args):
@@ -214,7 +187,7 @@ def cmd_status(args):
                      "model": "", "sid": e["sid"], "cwd": e["cwd"],
                      "task": info["title"], "you": info["prompt"], "reply": info["claude"]})
 
-    W = shutil.get_terminal_size((100, 24)).columns
+    W = term_width()
     name_w = min(20, max(len(r["name"]) for r in rows))
     n_forge = sum(1 for r in rows if r["runtime"] == "forge")
     counts = _paint(f"{n_forge} forge · {len(rows) - n_forge} claude", "dim")
@@ -243,11 +216,6 @@ def cmd_status(args):
             rlabel = r["runtime"]
             print(f"     {_paint(rlabel.ljust(label_w), gcolor)} {_fit(r['reply'], avail)}")
         print()
-
-
-def _strip_ansi(s):
-    import re as _re
-    return _re.sub(r"\033\[[0-9;]*m", "", s)
 
 
 def cmd_send(args):
@@ -286,25 +254,32 @@ def cmd_receipts(args):
     f = os.path.expanduser("~/.forge/verdicts.jsonl")
     if not os.path.exists(f):
         print("no verdicts yet."); return
+    W = term_width()
     for line in slurp(f).splitlines()[-args.n:]:
         try:
             d = json.loads(line)
         except json.JSONDecodeError:
             continue
-        mark = "✓" if d.get("verdict") == "CONFIRMED" else "✗"
+        ok = d.get("verdict") == "CONFIRMED"
+        mark = _paint("✓", "green") if ok else _paint("✗", "red")
         proj = d.get("cwd", "").rstrip("/").split("/")[-1]
-        print(f"{mark} {time.strftime('%m-%d %H:%M', time.localtime(d.get('ts', 0)))}  {proj[:16]:16} {d.get('verdict')}")
-        print(f"    {(d.get('evidence','') or '')[:150]}")
+        ts = time.strftime("%m-%d %H:%M", time.localtime(d.get("ts", 0)))
+        verdict = _paint(d.get("verdict", "") or "", "green" if ok else "red")
+        print(f"{mark} {_paint(ts, 'dim')}  {_paint(proj[:16].ljust(16), 'cyan')} {verdict}")
+        ev = d.get("evidence", "") or ""
+        if ev:
+            print(f"    {_paint(_fit(ev, W - 4), 'dim')}")
 
 
 def cmd_learnings(args):
     from . import fleet
     facts = fleet.learnings(os.path.abspath(args.dir))
     if not facts:
-        print("(no learnings yet for this repo)"); return
+        print(_paint("(no learnings yet for this repo)", "dim")); return
+    W = term_width()
     for r in facts:
-        mark = "✓" if r.get("verified") else " "
-        print(f"{mark} {r.get('fact', '')}")
+        mark = _paint("✓", "green") if r.get("verified") else _paint("·", "dim")
+        print(f"{mark} {_fit(r.get('fact', ''), W - 2)}")
 
 
 def cmd_forget(args):
@@ -331,27 +306,32 @@ def cmd_trace(args):
         print(f"no records for session {sid}."); return
     meta = next((r for r in recs if r.get("type") == "meta"), None)
     if meta:
-        print(f"forge {meta.get('forge', '?')}  ·  model {meta.get('model', '?')}  ·  mode {meta.get('mode', '?')}")
+        print(_paint(f"forge {meta.get('forge', '?')}  ·  model {meta.get('model', '?')}  "
+                     f"·  mode {meta.get('mode', '?')}", "cyan", "bold"))
         ladder = meta.get("ladder") or []
         if ladder:
-            print(f"ladder: {', '.join(ladder)}")
-        print(f"cwd:    {meta.get('cwd', '?')}")
+            print(_paint(f"ladder: {' → '.join(ladder)}", "dim"))
+        print(_paint(f"cwd:    {_tilde(meta.get('cwd', '?'))}", "dim"))
         print()
     steps = [r for r in recs if r.get("type") == "step"]
     if not steps:
-        print("(no step records)"); return
+        print(_paint("(no step records)", "dim")); return
     FLAGS = ("malformed", "loop_trip", "gated", "escalated", "borrowed", "compacted")
-    print(f"{'step':>4}  {'tier':>4}  {'action':<11}  {'fill':>5}  {'ok':>4}  {'flags':<30}  {'ms':>6}")
-    print("-" * 74)
+    header = f"{'step':>4}  {'tier':>4}  {'action':<11}  {'fill':>5}  {'ok':>4}  {'flags':<30}  {'ms':>6}"
+    print(_paint(header, "dim"))
+    print(_paint("─" * len(header), "dim"))
     for r in steps:
         used, window = r.get("used"), r.get("window")
         fill = f"{100 * used / window:.0f}%" if used and window else "-"
         ok = r.get("ok")
-        oks = "-" if ok is None else ("ok" if ok else "FAIL")
-        flags = ",".join(f for f in FLAGS if r.get(f)) or "-"
+        oks = ("-" if ok is None else ("ok" if ok else "FAIL"))
+        oks_c = _paint(f"{oks:>4}", "red") if ok is False else _paint(f"{oks:>4}", "dim" if ok is None else "green")
+        active = [f for f in FLAGS if r.get(f)]
+        flags = ",".join(active) or "-"
+        flags_c = _paint(f"{flags:<30}", "yellow") if active else _paint(f"{flags:<30}", "dim")
         ms = r.get("elapsed_ms")
-        print(f"{r.get('step', '?'):>4}  {r.get('tier', 0):>4}  {(r.get('action') or '-'):<11}  "
-              f"{fill:>5}  {oks:>4}  {flags:<30}  {('?' if ms is None else ms):>6}")
+        print(f"{r.get('step', '?'):>4}  {r.get('tier', 0):>4}  {_paint((r.get('action') or '-').ljust(11), 'cyan')}  "
+              f"{fill:>5}  {oks_c}  {flags_c}  {('?' if ms is None else ms):>6}")
 
 
 def cmd_corpus(args):
