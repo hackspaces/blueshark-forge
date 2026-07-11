@@ -1,9 +1,9 @@
 """Harness-owned authority policy, independent of model capability."""
 import os
-import re
+import shlex
 from dataclasses import asdict, dataclass
 from enum import IntEnum
-from typing import Any, Dict, Mapping, Optional
+from typing import Any, Dict, Iterable, Mapping, Optional
 
 
 class AuthorityLevel(IntEnum):
@@ -14,8 +14,11 @@ class AuthorityLevel(IntEnum):
 
     @classmethod
     def parse(cls, value: Optional[str]) -> "AuthorityLevel":
-        name = (value or "operator").strip().upper()
-        return cls.__members__.get(name, cls.OPERATOR)
+        if value is None or not str(value).strip():
+            return cls.OPERATOR
+        name = str(value).strip().upper()
+        # A misspelled security setting must not silently grant shell authority.
+        return cls.__members__.get(name, cls.OBSERVE)
 
 
 ACTION_AUTHORITY = {
@@ -31,18 +34,159 @@ ACTION_AUTHORITY = {
     "fleet_send": AuthorityLevel.OPERATOR,
 }
 
-# Commands that can destroy work outside the project, elevate privileges, install
-# arbitrary remote code, expose common secret stores, or rewrite published history
-# require explicit admin. Everyday-safe shell (incl. `rm -rf <relative subdir>`,
-# `env`) stays at operator; only recursive-force deletes aimed at root/home/an
-# absolute path or a bare glob are treated as admin-only.
-_ADMIN_SHELL = (
-    re.compile(r"(^|[;&|]\s*)sudo\b"),
-    re.compile(r"(?=.*\brm\b)(?=.*-[a-zA-Z]*r)(?=.*-[a-zA-Z]*f)(?=.*\s(?:/|~|\$HOME|\*))"),
-    re.compile(r"\bgit\s+(reset\s+--hard|clean\s+-[a-zA-Z]*f|push\s+[^\n]*--force)\b"),
-    re.compile(r"\b(curl|wget)\b[^\n|]*\|\s*(sh|bash|zsh)\b"),
-    re.compile(r"\b(cat|less|head|tail)\s+[^\n]*(\.ssh|\.aws|\.gnupg|\.env)\b"),
-)
+_SHELLS = frozenset(("sh", "bash", "zsh"))
+_READ_COMMANDS = frozenset(("cat", "less", "head", "tail", "base64"))
+_SAFE_ENV_EXAMPLES = frozenset((".env.example", ".env.sample", ".env.template"))
+_CONTROL = frozenset((";", ";;", "&", "&&", "|", "||"))
+
+
+def _tokens(command: str):
+    """Shell-like tokens with control operators separated; None means fail closed."""
+    try:
+        lexer = shlex.shlex(command, posix=True, punctuation_chars=";&|")
+        lexer.whitespace_split = True
+        lexer.commenters = ""
+        return list(lexer)
+    except (TypeError, ValueError):
+        return None
+
+
+def _segments(tokens: Iterable[str]):
+    segment = []
+    for token in tokens:
+        if token in _CONTROL or token and set(token) <= set(";&|"):
+            if segment:
+                yield segment
+                segment = []
+        else:
+            segment.append(token)
+    if segment:
+        yield segment
+
+
+def _basename(token: str) -> str:
+    return os.path.basename(token or "")
+
+
+def _command_head(segment):
+    """Return (head, remaining tokens), skipping wrappers and assignments."""
+    i = 0
+    wrappers = frozenset(("command", "time", "nice", "nohup"))
+    while i < len(segment):
+        token = segment[i]
+        if "=" in token and not token.startswith(("/", "./", "../")):
+            i += 1
+            continue
+        if _basename(token) in wrappers:
+            i += 1
+            continue
+        if _basename(token) == "env":
+            i += 1
+            while i < len(segment) and "=" in segment[i]:
+                i += 1
+            continue
+        return _basename(token), segment[i + 1:]
+    return "", []
+
+
+def _option_letters(token: str):
+    if token.startswith("--") or not token.startswith("-"):
+        return frozenset()
+    return frozenset(token[1:])
+
+
+def _dangerous_target(target: str) -> bool:
+    target = (target or "").strip()
+    if not target:
+        return False
+    if target.startswith(("$", "~")) or os.path.isabs(target):
+        return True
+    norm = os.path.normpath(target)
+    if norm in (".", "..", "*") or norm.startswith("../"):
+        return True
+    # An unexpanded target cannot be proven workspace-confined.
+    if any(ch in target for ch in ("?", "[", "]")):
+        return True
+    return False
+
+
+def _rm_requires_admin(args) -> bool:
+    recursive = force = False
+    targets = []
+    options = True
+    for token in args:
+        if options and token == "--":
+            options = False
+            continue
+        if options and token.startswith("-") and token != "-":
+            if token in ("--recursive", "--dir"):
+                recursive = True
+            elif token == "--force":
+                force = True
+            else:
+                letters = _option_letters(token)
+                recursive = recursive or bool(letters.intersection(("r", "R")))
+                force = force or "f" in letters
+            continue
+        targets.append(token)
+    return recursive and force and any(_dangerous_target(t) for t in targets)
+
+
+def _secret_path(token: str) -> bool:
+    token = (token or "").rstrip("/")
+    if not token or token.startswith("-"):
+        return False
+    parts = [p for p in token.replace("\\", "/").split("/") if p]
+    if any(p in (".ssh", ".aws", ".gnupg") for p in parts):
+        return True
+    base = parts[-1] if parts else token
+    if base in _SAFE_ENV_EXAMPLES:
+        return False
+    return base == ".env" or base.startswith(".env.")
+
+
+def _remote_script_pipe(tokens) -> bool:
+    for i, token in enumerate(tokens):
+        if token != "|":
+            continue
+        left = list(_segments(tokens[:i]))
+        right = list(_segments(tokens[i + 1:]))
+        if not left or not right:
+            continue
+        lhead, _ = _command_head(left[-1])
+        rhead, _ = _command_head(right[0])
+        if lhead in ("curl", "wget") and rhead in _SHELLS:
+            return True
+    return False
+
+
+def shell_requires_admin(command: str) -> bool:
+    """Token-aware classification for recognizable high-risk shell operations."""
+    tokens = _tokens(command)
+    if tokens is None:
+        return True
+    if _remote_script_pipe(tokens):
+        return True
+    for segment in _segments(tokens):
+        head, args = _command_head(segment)
+        if head == "sudo":
+            return True
+        if head == "rm" and _rm_requires_admin(args):
+            return True
+        if head == "git" and args:
+            sub = args[0]
+            rest = args[1:]
+            if sub == "reset" and "--hard" in rest:
+                return True
+            if sub == "clean" and any("f" in _option_letters(x) or x == "--force" for x in rest):
+                return True
+            if sub == "push" and any(x == "--force" or x.startswith("--force=")
+                                     or x == "--force-with-lease"
+                                     or x.startswith("--force-with-lease=") for x in rest):
+                return True
+        if head in _READ_COMMANDS and any(_secret_path(token) for token in args):
+            return True
+    return False
 
 
 @dataclass(frozen=True)
@@ -75,10 +219,8 @@ class AuthorityPolicy:
             target = str(action.get("target", "")).strip().lower()
             if not action.get("message") or target in ("", "list", "sessions"):
                 return AuthorityLevel.OBSERVE
-        if kind == "bash":
-            command = str(action.get("command", ""))
-            if any(pattern.search(command) for pattern in _ADMIN_SHELL):
-                return AuthorityLevel.ADMIN
+        if kind == "bash" and shell_requires_admin(str(action.get("command", ""))):
+            return AuthorityLevel.ADMIN
         return required
 
     def evaluate(self, action: Mapping[str, Any]) -> AuthorityDecision:
