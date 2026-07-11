@@ -182,6 +182,10 @@ scaffolding is what makes a small local model usable.
   - **plan** — read-only: investigates, then presents a plan for approval
   - **manual** — asks before every mutating action: `y` yes once ·
     `a` always (saved — that action type won't ask again) · `n` no
+- **Authority** is separate from model capability: `FORGE_AUTHORITY=observe|contribute|operator|admin`
+  (default `operator`). Observe can inspect; contribute can edit and test; operator can
+  run normal shell commands and message peers; admin is required for destructive shell,
+  privilege escalation, remote scripts, secret-store reads, and forced history changes.
 - **Queue messages while it works** — just keep typing; Enter delivers your
   message to the agent between steps (it steers mid-task). Anything not
   absorbed becomes the next turn.
@@ -346,9 +350,11 @@ forge runs on **your** machine with **your** privileges — treat it like any co
 assistant that can edit files and run commands.
 
 - The **file tools** (`read/write/edit/grep/glob`) are confined to the working
-  directory. The **`bash` tool is intentionally *not* sandboxed** — it runs
-  arbitrary shell commands as you, on purpose (that's what a coding agent needs).
-  Run forge in repos you trust, or use OS-level sandboxing for untrusted code.
+  directory. The **`bash` tool is intentionally *not* sandboxed** — it runs with
+  your OS privileges. Harness authority still gates access: operator sessions handle
+  normal shell work, while recognized destructive/privileged/secret-sensitive commands
+  require `FORGE_AUTHORITY=admin`. Run forge in repos you trust, or use OS-level
+  sandboxing for untrusted code.
 - The **fleet inbox** (session-to-session messaging) is localhost-only and
   **token-authenticated**: only real forge sessions (which can read the private
   `~/.forge/registry.json`, mode 0600) can message each other. `~/.forge` is 0700.
