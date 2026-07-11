@@ -159,6 +159,19 @@ prompt_tokens}` cassette. Replay reconstructs the harness-**decision** path; ful
 fidelity of the file-system half needs a workspace snapshot (a `setup.sh`, like the
 bench fixtures), so replay runs in a throwaway dir and never touches your files.
 
+**Fault injection.** Add repeatable `--fault` flags to replay a real trace through
+adverse conditions without inference:
+
+```bash
+forge replay last --fault truncate_output --fault authority_violation
+```
+
+Available faults: `truncate_output`, `malformed_burst`, `wrong_edit_anchor`,
+`force_compaction`, and `authority_violation`. The report includes recovery,
+false-completion, action efficiency, observation failures, loops, escalations,
+authority denials, completion rejections, and context-token pressure. Injection
+changes a deep copy of the trace; the recorded session and workspace stay untouched.
+
 ### Harness-lift benchmark
 
 `forge bench` measures what the *harness* buys, not the weights: it runs each task
