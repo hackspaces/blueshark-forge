@@ -160,11 +160,39 @@ def _remote_script_pipe(tokens) -> bool:
     return False
 
 
-def shell_requires_admin(command: str) -> bool:
-    """Token-aware classification for recognizable high-risk shell operations."""
-    tokens = _tokens(command)
-    if tokens is None:
-        return True
+def _logical_lines(command: str):
+    """Split on newlines that are genuine command separators — outside single/double
+    quotes and not backslash-escaped (a line continuation). A newline inside a quoted
+    string is data and stays with its line, so a quoted multi-line literal is never
+    mistaken for separate commands."""
+    lines, buf = [], []
+    quote = None
+    escaped = False
+    for ch in command:
+        if escaped:
+            buf.append(ch)
+            escaped = False
+        elif ch == "\\" and quote != "'":
+            buf.append(ch)
+            escaped = True
+        elif quote:
+            buf.append(ch)
+            if ch == quote:
+                quote = None
+        elif ch in ("'", '"'):
+            quote = ch
+            buf.append(ch)
+        elif ch == "\n":
+            lines.append("".join(buf))
+            buf = []
+        else:
+            buf.append(ch)
+    lines.append("".join(buf))
+    return lines
+
+
+def _tokens_require_admin(tokens) -> bool:
+    """Classify one already-tokenized command stream."""
     if _remote_script_pipe(tokens):
         return True
     for segment in _segments(tokens):
@@ -186,6 +214,29 @@ def shell_requires_admin(command: str) -> bool:
                 return True
         if head in _READ_COMMANDS and any(_secret_path(token) for token in args):
             return True
+    return False
+
+
+def shell_requires_admin(command: str) -> bool:
+    """Token-aware classification for recognizable high-risk shell operations.
+
+    A single-line command is one token stream. A multi-line command is classified
+    both as a whole (so a backslash-continued command is seen joined) AND line by
+    line — an unquoted newline is a real command separator in shell, so a privileged
+    command on its own line must not hide behind a benign first line. Lines that are
+    fragments of a quoted multi-line string fail to tokenize and are skipped: they
+    are data, not commands. Malformed shell as a whole fails closed to admin.
+    """
+    tokens = _tokens(command)
+    if tokens is None:
+        return True
+    if _tokens_require_admin(tokens):
+        return True
+    if "\n" in command:
+        for line in _logical_lines(command):
+            line_tokens = _tokens(line)
+            if line_tokens is not None and _tokens_require_admin(line_tokens):
+                return True
     return False
 
 
