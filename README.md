@@ -184,8 +184,9 @@ scaffolding is what makes a small local model usable.
     `a` always (saved — that action type won't ask again) · `n` no
 - **Authority** is separate from model capability: `FORGE_AUTHORITY=observe|contribute|operator|admin`
   (default `operator`). Observe can inspect; contribute can edit and test; operator can
-  run normal shell commands and message peers; admin is required for destructive shell,
-  privilege escalation, remote scripts, secret-store reads, and forced history changes.
+  run normal shell commands and message peers; admin is required for destructive shell
+  that can escape the workspace, privilege escalation, remote scripts, secret-store reads,
+  and forced history changes. Invalid authority values fail closed to `observe`.
 - **Queue messages while it works** — just keep typing; Enter delivers your
   message to the agent between steps (it steers mid-task). Anything not
   absorbed becomes the next turn.
