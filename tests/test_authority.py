@@ -6,6 +6,7 @@ import unittest.mock as mock
 
 from forge.agent import Agent
 from forge.authority import AuthorityLevel, AuthorityPolicy
+from forge.execution import ExecutionTracker
 
 
 class _Backend:
@@ -110,6 +111,14 @@ class TestAgentAuthorityIntegration(unittest.TestCase):
         agent.tier = 9
         self.assertFalse(agent.authority.evaluate(
             {"action": "write_file", "path": "x.py"}).allowed)
+
+    def test_authority_denial_projects_to_canonical_runtime_event(self):
+        event = ExecutionTracker().observe(
+            "authority_denied",
+            {"decision": {"required": "contribute", "actual": "observe"}})
+        self.assertEqual(event["event"], "AuthorityDenied")
+        self.assertEqual(event["state_to"], "DIAGNOSE")
+        self.assertEqual(event["recovery_transition"], "PLAN")
 
     def test_environment_selects_authority_level(self):
         with mock.patch.dict(os.environ, {"FORGE_AUTHORITY": "strictly-invalid"}):
