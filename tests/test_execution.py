@@ -61,6 +61,20 @@ class TestExecutionTracker(unittest.TestCase):
         self.assertEqual(event["event"], "ProcessExited")
         self.assertEqual(event["state_to"], "DIAGNOSE")
 
+    def test_completion_claim_projects_to_complete(self):
+        tracker = ExecutionTracker()
+        event = tracker.observe("assistant", {"text": "all done"})
+        self.assertEqual(event["event"], "CompletionClaimed")
+        self.assertEqual(event["state_to"], "COMPLETE")
+
+    def test_stuck_handoff_is_not_a_completion(self):
+        # A stuck message is an `assistant` record but the agent is giving up, not
+        # finishing — it must not be projected as a completion into COMPLETE.
+        tracker = ExecutionTracker(ExecutionState.DIAGNOSE)
+        event = tracker.observe("assistant", {"text": "I'm stuck…", "stuck": True})
+        self.assertIsNone(event)
+        self.assertEqual(tracker.state, ExecutionState.DIAGNOSE)
+
 
 class TestSessionProjection(unittest.TestCase):
     def test_log_keeps_legacy_shape_and_adds_runtime_envelope(self):

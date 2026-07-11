@@ -172,6 +172,10 @@ class ExecutionTracker:
         if kind in ("narrate_bounce", "completion_rejected"):
             return RuntimeEvent.COMPLETION_REJECTED
         if kind == "assistant":
+            # A stuck/hand-off message is logged as an `assistant` record too, but the
+            # agent is giving up — not claiming completion. Don't project it to COMPLETE.
+            if fields.get("stuck"):
+                return None
             return RuntimeEvent.COMPLETION_CLAIMED
         if kind == "inbox" and fields.get("sender") == "background" and "EXITED" in str(fields.get("text", "")):
             return RuntimeEvent.PROCESS_EXITED
