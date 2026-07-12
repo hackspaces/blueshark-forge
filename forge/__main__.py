@@ -132,6 +132,7 @@ def cmd_run(args):
         elif kind == "inbox":
             print(_paint(f"  ✉ {k['sender']}: {_fit(k['text'], W - len(k['sender']) - 6)}", "magenta"))
     agent = Agent(_make_ladder(args.model), s, on_event=on_event, max_steps=args.max_steps, autonomous=True,
+                  goal=args.task,
                   workspace=_workspace_ctx(os.path.abspath(args.dir), _ctx_budget(ladder[0])))
     try:
         reply = agent.send(args.task)
@@ -312,6 +313,14 @@ def cmd_trace(args):
         if ladder:
             print(_paint(f"ladder: {' → '.join(ladder)}", "dim"))
         print(_paint(f"cwd:    {_tilde(meta.get('cwd', '?'))}", "dim"))
+        # H01: recover and show the run's task contract (works for legacy metas too)
+        from . import contract as contractmod
+        c = contractmod.TaskContract.from_dict(meta.get("contract"), fallback_mode=meta.get("mode", "auto"))
+        print(_paint(f"contract: {c.authority} authority · {c.completion_policy} policy · "
+                     f"{'verify-required' if c.requires_verification else 'audit-only'} · "
+                     f"{(c.max_steps or '∞')} steps", "dim"))
+        if c.goal:
+            print(_paint(f"goal:   {_fit(c.goal, term_width() - 8)}", "dim"))
         print()
     steps = [r for r in recs if r.get("type") == "step"]
     if not steps:
