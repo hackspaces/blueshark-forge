@@ -310,7 +310,7 @@ BE AUTONOMOUS — this is the core of how you work. When the user asks for somet
 
 class Agent:
     def __init__(self, backend, session, max_steps=60, on_event=None, autonomous=False,
-                 system=None, allowed=None, workspace=None, levers=None):
+                 system=None, allowed=None, workspace=None, levers=None, goal=""):
         # `backend` may be a single backend or a LADDER (list, cheapest→strongest
         # local models). The harness starts cheap and escalates a rung when stuck.
         self.ladder = backend if isinstance(backend, list) else [backend]
@@ -318,6 +318,7 @@ class Agent:
         self.backend = self.ladder[0]
         self.session = session
         self.max_steps = max_steps
+        self.goal = goal or ""          # H01: the run's task, recorded in the task contract
         self.on_event = on_event or (lambda *a, **k: None)
         self.allowed = allowed
         self.authority = AuthorityPolicy()
@@ -461,12 +462,22 @@ class Agent:
                 _seed_cmd = None
         if _seed_cmd:
             self.notes.append("test command: " + _seed_cmd)
+        # H01 task contract: the run's enforceable guardrails (authority + allowed
+        # actions, completion/verification obligation, approval mode, step budget),
+        # captured once so the run is self-describing and recoverable on resume/replay.
+        from . import contract as contractmod
+        self.contract = contractmod.from_runtime(
+            goal=self.goal, mode=self.mode,
+            authority_level=self.authority.level.name.lower(),
+            allowed_actions=self.authority.legal_actions(),
+            completion_policy_mode=self.completion_policy.mode,
+            max_steps=self.max_steps)
         # P3.1 meta record: one machine-readable header per session so a dead
         # transcript is self-describing (forge version, model ladder, cwd, mode).
         # EphemeralSession.log is a no-op, so internal agents never pollute a file.
         self.session.log("meta", v=TRACE_V, forge=__version__, model=self.backend.name,
                          ladder=[b.name for b in self.ladder], cwd=self.session.cwd,
-                         mode=self.mode,
+                         mode=self.mode, contract=self.contract.to_dict(),
                          briefing=hashlib.md5(workspace.encode()).hexdigest()[:12] if workspace else None)
 
     def set_ladder(self, ladder):
