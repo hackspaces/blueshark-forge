@@ -248,6 +248,7 @@ class AuthorityDecision:
     code: str
     reason: str
     action: str
+    effects: str = ""          # H06: the declared effects the required authority gates
 
     def to_dict(self) -> Dict[str, Any]:
         result = asdict(self)
@@ -265,7 +266,10 @@ class AuthorityPolicy:
 
     def required_for(self, action: Mapping[str, Any]) -> AuthorityLevel:
         kind = str(action.get("action", ""))
-        required = ACTION_AUTHORITY.get(kind, AuthorityLevel.ADMIN)
+        # H06: the floor comes from the tool's DECLARED effects (unknown tools fail
+        # closed to admin via spec_for), not a bare name lookup.
+        from . import effects as _effects
+        required = _effects.spec_for(kind).min_authority
         if kind == "fleet_send":
             target = str(action.get("target", "")).strip().lower()
             if not action.get("message") or target in ("", "list", "sessions"):
@@ -278,14 +282,16 @@ class AuthorityPolicy:
         kind = str(action.get("action", ""))
         required = self.required_for(action)
         allowed = self.level >= required
+        from . import effects as _effects
+        eff = _effects.describe(_effects.spec_for(kind).effects)
         if allowed:
             return AuthorityDecision(
                 True, self.level, required, "authority_granted",
-                f"{self.level.name.lower()} authority permits {kind}", kind)
+                f"{self.level.name.lower()} authority permits {kind}", kind, eff)
         return AuthorityDecision(
             False, self.level, required, "authority_denied",
-            f"{kind} requires {required.name.lower()} authority; "
-            f"this session has {self.level.name.lower()}", kind)
+            f"{kind} requires {required.name.lower()} authority to {eff}; "
+            f"this session has {self.level.name.lower()}", kind, eff)
 
     def legal_actions(self):
         """Action kinds grammatically available at this authority level.
