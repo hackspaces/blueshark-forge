@@ -39,7 +39,7 @@ stages — if any stage fails, nothing downstream runs and nothing is published:
 
 | Stage | What it proves |
 |---|---|
-| `tests` | the full Python 3.10–3.13 suite is green (the same `test.yml` every commit runs) |
+| `tests` | the full Python 3.10–3.13 suite is green (the same `test.yml` that runs on every push to `main` and every PR) |
 | `guard` | the tag equals `forge.__version__`, and the built wheel installs into a clean venv and starts the CLI (`forge --version` / `--help`) |
 | `pypi` | the **vetted** wheel/sdist is published via PyPI trusted publishing (OIDC — no token to manage) |
 | `github-release` | the GitHub Release is created, titled and noted from the `release:` commit body |
@@ -69,4 +69,7 @@ Read the failed stage in the Actions run:
 
 - `guard` tag mismatch → fix `forge/__init__.py`, delete and re-push the tag.
 - `tests` red → the release is correctly blocked; fix on `main`, re-tag.
-- `pypi` duplicate version → that version already shipped; bump and tag again.
+- `github-release` fails *after* `pypi` already published → just re-push the same
+  tag. The publish step is idempotent (`skip-existing`), so the re-run skips the
+  already-uploaded artifact and completes the GitHub Release.
+- `pypi` genuinely rejects (not a duplicate) → read the error; fix, bump, re-tag.
