@@ -84,5 +84,39 @@ class TestCleanInterrupt(unittest.TestCase):
             setupmod.run, sys.argv, sys.stderr = orig, orig_argv, orig_stderr
 
 
+class TestEntrypoint(unittest.TestCase):
+    """The console-script surface the release pipeline smoke-tests (forge --version /
+    --help) and the version coherence its tag-gate depends on."""
+
+    def _run_flag(self, flag):
+        orig_argv, orig_out = sys.argv, sys.stdout
+        sys.argv = ["forge", flag]
+        out = io.StringIO()
+        sys.stdout = out
+        try:
+            with self.assertRaises(SystemExit) as cm:
+                M.main()
+            return cm.exception.code, out.getvalue()
+        finally:
+            sys.argv, sys.stdout = orig_argv, orig_out
+
+    def test_version_flag_prints_version_and_exits_zero(self):
+        import forge
+        code, text = self._run_flag("--version")
+        self.assertEqual(code, 0)
+        self.assertIn(forge.__version__, text)
+
+    def test_help_flag_exits_zero(self):
+        code, text = self._run_flag("--help")
+        self.assertEqual(code, 0)
+        self.assertIn("usage: forge", text)
+
+    def test_version_is_semver(self):
+        # the publish tag-gate compares this to the release tag — it must be a clean
+        # X.Y.Z so a malformed version can never ship.
+        import forge
+        self.assertRegex(forge.__version__, r"^\d+\.\d+\.\d+$")
+
+
 if __name__ == "__main__":
     unittest.main()
