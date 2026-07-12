@@ -1,19 +1,23 @@
 name: publish
 
+# Tag-triggered auto-release. Push a vX.Y.Z tag and this does everything:
+# run the full test matrix, prove the tag matches the code version, build and
+# smoke-test the wheel, publish to PyPI, and create the GitHub Release from the
+# `release:` commit body. No manual `gh release create` step.
 on:
-  release:
-    types: [published]
+  push:
+    tags: ["v*"]
 
 permissions:
   contents: read
 
 concurrency:
   group: publish-${{ github.ref }}
-  cancel-in-progress: false   # never interrupt an in-flight publish
+  cancel-in-progress: false   # never interrupt an in-flight release
 
 jobs:
   # 1. Gate the release on the SAME 3.10–3.13 matrix every commit runs. No green
-  #    tests → no publish.
+  #    tests → no publish, no release.
   tests:
     uses: ./.github/workflows/test.yml
 
@@ -37,7 +41,7 @@ jobs:
           tag="${GITHUB_REF_NAME#v}"
           echo "forge.__version__ = $version  ·  release tag = ${GITHUB_REF_NAME}"
           if [ "$version" != "$tag" ]; then
-            echo "::error::release tag ${GITHUB_REF_NAME} does not match forge.__version__ ($version) — refusing to publish"
+            echo "::error::release tag ${GITHUB_REF_NAME} does not match forge.__version__ ($version) — refusing to release"
             exit 1
           fi
 
@@ -77,3 +81,30 @@ jobs:
           name: dist
           path: dist
       - uses: pypa/gh-action-pypi-publish@6733eb7d741f0b11ec6a39b58540dab7590f9b7d  # v1.14.0
+
+  # 4. Publish is live → create the GitHub Release, titled and noted from the
+  #    `release: vX.Y.Z — …` commit (the same notes we'd write by hand). A Release
+  #    existing therefore means the version is on PyPI.
+  github-release:
+    needs: pypi
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write   # create the GitHub Release
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+      - name: Create the GitHub Release from the release commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          subject=$(git log -1 --format=%s HEAD)
+          title="${subject#release: }"
+          git log -1 --format=%b HEAD | grep -v '^Co-Authored-By:' > release-notes.md || true
+          if ! [ -s release-notes.md ]; then
+            echo "See the release commit for details." > release-notes.md
+          fi
+          gh release create "${GITHUB_REF_NAME}" \
+            --title "$title" \
+            --notes-file release-notes.md \
+            --latest \
+            --verify-tag
