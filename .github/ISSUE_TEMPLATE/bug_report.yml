@@ -1,0 +1,77 @@
+name: Bug report
+description: Report something that isn't working as expected
+title: "[bug]: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to file a bug. Please **do not** report security
+        vulnerabilities here — use [private reporting](https://github.com/hackspaces/blueshark-forge/security/advisories/new) instead.
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: A clear description of the bug, and what you expected instead.
+      placeholder: When I run `forge ...`, it ...
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      description: The exact commands and, if possible, a minimal example.
+      placeholder: |
+        1. `forge setup ...`
+        2. `forge run "..."`
+        3. ...
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: forge version
+      description: Output of `forge --version`.
+      placeholder: forge 0.8.3
+    validations:
+      required: true
+  - type: dropdown
+    id: engine
+    attributes:
+      label: Inference engine
+      options:
+        - Ollama
+        - vLLM
+        - llama.cpp
+        - MLX
+        - LM Studio
+        - TGI
+        - SGLang
+        - OpenAI-compatible / cloud
+        - Other
+    validations:
+      required: true
+  - type: input
+    id: model
+    attributes:
+      label: Model(s)
+      description: The model or ladder you ran (e.g. `qwen3-coder:30b`).
+    validations:
+      required: false
+  - type: input
+    id: os
+    attributes:
+      label: OS / platform
+      placeholder: macOS 15 (Apple Silicon) · Ubuntu 24.04 · ...
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant output / trace
+      description: |
+        Paste any error output. A `forge trace <sid>` of the affected session is very
+        helpful. This will be automatically formatted as code — no backticks needed.
+      render: shell
+    validations:
+      required: false
