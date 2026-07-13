@@ -1,0 +1,34 @@
+# Dependabot version updates.
+# https://docs.github.com/en/code-security/concepts/supply-chain-security/about-dependabot-version-updates
+version: 2
+updates:
+  # Keep the SHA-pinned GitHub Actions current. Dependabot bumps the commit SHA and
+  # its version comment together, so the pins stay both immutable and up to date.
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    groups:
+      github-actions:
+        patterns: ["*"]
+    labels: ["dependencies", "github-actions"]
+    commit-message:
+      prefix: "ci"
+    open-pull-requests-limit: 5
+
+  # Python packaging / tooling dependencies. The runtime is standard-library only
+  # (zero third-party runtime deps), so this mainly tracks the build backend and any
+  # dev/test tooling declared in pyproject.toml — low churn by design.
+  - package-ecosystem: "pip"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    groups:
+      python:
+        patterns: ["*"]
+    labels: ["dependencies", "python"]
+    commit-message:
+      prefix: "chore"
+    open-pull-requests-limit: 5
