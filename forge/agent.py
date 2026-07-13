@@ -366,6 +366,7 @@ class Agent:
         self.ledger = Ledger()
         self._mutated = set()    # P2.1 done-gate: paths mutated THIS turn
         self._verified = False   # a test run this turn already passed
+        self._verified_workspace = None   # H04: the workspace digest that test judged
         self._bounced = False    # the done-gate already bounced/nudged once this turn
         self._narrated = False   # the 'act, don't narrate' guard already bounced once this turn
         self.evidence = EvidenceCollector(self.session.cwd)  # harness-owned completion provenance
@@ -1377,6 +1378,41 @@ class Agent:
         """H03: persist a completed action lifecycle (identity + terminal) to the transcript."""
         self.session.log("action_lifecycle", **lc.to_dict())
 
+    def _mark_verified(self):
+        """H04: a check just passed — pin BOTH the flag and the exact workspace digest it
+        judged, so a later change can be detected deterministically, not just heuristically."""
+        from . import receipt as _receipt
+        self._verified = True
+        self._verified_workspace = _receipt.workspace_digest(self.session.cwd)
+
+    def _workspace_stale(self):
+        """H04: the workspace changed since the verification that produced _verified — the
+        receipt no longer describes the current state. Deterministic (content digest)."""
+        if not self._verified_workspace:
+            return False
+        from . import receipt as _receipt
+        return _receipt.workspace_digest(self.session.cwd) != self._verified_workspace
+
+    def _emit_receipt(self, claim):
+        """H04: a v2 evidence receipt for the completion claim — what changed, what checked
+        it, and the exact workspace state judged. Opaque bash mutations are flagged, never
+        dressed up as a measured file list. Bulletproof: never breaks the done-gate."""
+        try:
+            from . import receipt as _receipt
+            c = self.evidence.contract(claim)
+            measured = [{"path": p} for p in c.changed_files if p != "<bash>"]
+            checks = [_receipt.Check(v.command, v.command, v.exit_code, v.artifact_digest, time.time())
+                      for v in c.verification]
+            r = _receipt.EvidenceReceipt(
+                claim=claim,
+                contract_id=_receipt.digest_text(json.dumps(self.contract.to_dict(), sort_keys=True)),
+                verified_workspace=(self._verified_workspace if self._verified else None),
+                changed_paths=measured, opaque_changes=("<bash>" in c.changed_files),
+                checks=checks, unverified_assumptions=list(c.unverified_assumptions))
+            self.session.log("evidence_receipt", **r.to_dict())
+        except Exception:
+            pass
+
     def _done_gate(self, claim=""):
         """Evaluate completion evidence under the configured harness policy.
 
@@ -1384,11 +1420,19 @@ class Agent:
         mode preserves Forge's historical second-claim escape hatch, but records it as
         an explicit policy override; strict mode never accepts unverified mutations.
         H02: the reducer records the authoritative completion transition alongside.
+        H04: a verification whose workspace has since changed is deterministically stale.
         """
+        # H04: if the workspace changed since the check that set _verified, the receipt no
+        # longer describes the current state — invalidate deterministically (content digest),
+        # not just via the mutation flags. Then the reducer + policy treat it as unverified.
+        if self._verified and self._workspace_stale():
+            self._verified = False
+            self.session.log("verification_stale", reason="workspace changed since verification")
         if not self._mutated:
             self._reduce_and_log(RuntimeEvent.COMPLETION_CLAIMED)   # INVESTIGATE → COMPLETE (legal)
             self._completion_decision = self.completion_policy.evaluate(
                 self.evidence.contract(claim), attempt=1)
+            self._emit_receipt(claim)                              # H04
             return None
 
         from . import fleet, tools
@@ -1410,7 +1454,7 @@ class Agent:
                 else:
                     self.evidence.record_verification(cmd, ok2, obs2)
                     if ok2:
-                        self._verified = True
+                        self._mark_verified()
                         self.session.log("verified", cmd=cmd, ok=True)
                         self.on_event("done_check", cmd=cmd, ok=True)
                         self.messages.append({"role": "user", "content":
@@ -1437,6 +1481,7 @@ class Agent:
         self.session.log("completion_policy", mode=self.completion_policy.mode,
                          attempt=attempt, decision=decision.to_dict(),
                          evidence=contract.to_dict())
+        self._emit_receipt(claim)                                  # H04
         if decision.allowed:
             return None
 
@@ -1686,13 +1731,13 @@ class Agent:
         if kind == "run_tests":
             self.evidence.record_verification("run_tests", ok, obs)
             if ok:
-                self._verified = True         # P6.3: a passing run_tests satisfies the done-gate
+                self._mark_verified()         # P6.3: a passing run_tests satisfies the done-gate
         if ok and kind == "bash":
             _cmd = act.get("command", "")
             from . import fleet as _fleet
             if _is_test_cmd(_cmd, self.session.cwd):
                 self.evidence.record_verification(_cmd, True, obs)
-                self._verified = True         # the model ran the suite itself
+                self._mark_verified()         # the model ran the suite itself
             elif _fleet.bash_mutates(_cmd):
                 self._mutated.add("<bash>")   # a file-touching bash still gates `say`
                 self.evidence.record_change("<bash>")
@@ -1872,6 +1917,7 @@ class Agent:
                 self.messages.append({"role": "user", "content": note})
         self._mutated = set()
         self._verified = False
+        self._verified_workspace = None        # H04
         self._turn_no += 1                     # H03: stable per-turn id for action lifecycles
         self._turn_id = f"t{self._turn_no}"
         self._bounced = False
