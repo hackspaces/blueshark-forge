@@ -167,7 +167,11 @@ def load(sid):
       plan (the last logged plan items), tail_msgs (replayed recent turns),
       read_ts ({relpath: latest read/write/edit timestamp} for ledger seeding).
     """
-    recs = fleet._records(sid, tail_bytes=10 ** 9)     # whole file
+    # H09: read only COMMITTED records — a torn tail from a crash mid-append is
+    # quarantined (not silently trusted), and we resume from the last committed state.
+    from . import checkpoint as _ckpt
+    report = _ckpt.read_committed(os.path.join(sessmod.SESSIONS, f"{sid}.jsonl"))
+    recs = report.records
     if not recs:
         return None
     meta = next((r for r in recs if r.get("type") == "meta"), None)
@@ -192,7 +196,14 @@ def load(sid):
                         "content": "[Earlier progress, summarized to save context:]\n" + summary}
 
     return {"sid": sid, "meta": meta, "summary_note": summary_note,
-            "plan": list(plan), "tail_msgs": _tail_messages(recs), "read_ts": read_ts}
+            "plan": list(plan), "tail_msgs": _tail_messages(recs), "read_ts": read_ts,
+            # H09: crash-recovery metadata — a corrupt tail was dropped, and whether the
+            # last action MAY have executed (indeterminate) so resume must reconcile, not
+            # blindly retry it.
+            "recovery": {"corrupt_tail": report.corrupt_tail,
+                         "quarantined": len(report.quarantined),
+                         "last_valid_offset": report.last_valid_offset,
+                         "reconcile_action": _ckpt.reconciliation_action(recs)}}
 
 
 def _seed_ledger(agent, read_ts):
@@ -240,9 +251,21 @@ def apply(agent, data):
 
     seeded = _seed_ledger(agent, data.get("read_ts") or {})
 
+    # H09: if the crash interrupted an action that MAY have executed, tell the resumed
+    # agent to reconcile (verify the effect) before retrying — never blindly repeat it.
+    recovery = data.get("recovery") or {}
+    reconcile = recovery.get("reconcile_action")
+    if reconcile:
+        agent.messages.append({"role": "user", "content":
+            f"[resume] the previous run was interrupted while running `{reconcile}` whose result is "
+            "unknown (it may or may not have completed). Before retrying, CHECK the current state — "
+            "read the affected files or re-run verification — and only act if it is actually needed."})
+
     note = (f"resumed {data.get('sid', '?')[:8]} · {len(tail)} msg(s) replayed · "
             f"plan {len(plan)} item(s) · summary "
             f"{'restored' if data.get('summary_note') else 'none'} · "
-            f"{len(seeded)} file(s) still in context")
+            f"{len(seeded)} file(s) still in context"
+            + (f" · ⚠ reconcile `{reconcile}`" if reconcile else "")
+            + (" · ⚠ corrupt tail dropped" if recovery.get("corrupt_tail") else ""))
     agent._resume_info = note
     return note
