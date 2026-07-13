@@ -388,6 +388,30 @@ def cmd_corpus(args):
               f"Add --out corpus.jsonl to write them.")
 
 
+def cmd_export(args):
+    """H13 — export a session's event log as process-mining data (CSV / JSON / OCEL 2.0),
+    with secrets deterministically redacted. `sid` defaults to 'last'."""
+    import glob
+    from . import export as exportmod, fleet
+    sid = args.sid
+    if sid == "last":
+        files = glob.glob(os.path.join(sessmod.SESSIONS, "*.jsonl"))
+        if not files:
+            print("no sessions found."); return
+        sid = os.path.basename(max(files, key=os.path.getmtime))[:-len(".jsonl")]
+    recs = fleet._records(sid, tail_bytes=10 ** 9)
+    if not recs:
+        print(f"no records for session {sid}."); return
+    out = exportmod.export(recs, args.format)
+    n = len(exportmod.to_events(recs))
+    if args.out:
+        with open(args.out, "w") as f:
+            f.write(out)
+        print(f"exported {n} event(s) as {args.format} → {args.out}")
+    else:
+        print(out)
+
+
 def cmd_replay(args):
     """P3.3 — re-drive a recorded session through the harness with NO model.
     `sid` defaults to 'last'. With --to-fixture, snapshot the session's raws into
@@ -528,6 +552,11 @@ def main():
     p_co.add_argument("--out", metavar="FILE", help="write JSONL to FILE (default: just print the counts)")
     p_co.add_argument("--no-system", dest="no_system", action="store_true", help="omit the forge system prompt from each example's context")
 
+    p_ex = sub.add_parser("export", help="export a session's event log as process-mining data (CSV/JSON/OCEL), secrets redacted")
+    p_ex.add_argument("sid", nargs="?", default="last", help="session id (or 'last', the default)")
+    p_ex.add_argument("--format", choices=["csv", "json", "ocel"], default="json", help="output format (default: json)")
+    p_ex.add_argument("--out", metavar="FILE", help="write to FILE (default: print to stdout)")
+
     p_rp = sub.add_parser("replay", help="re-drive a recorded session through the harness with NO model")
     p_rp.add_argument("sid", nargs="?", default="last", help="session id (or 'last', the default)")
     p_rp.add_argument("--strict", action="store_true", help="assert each recorded prompt digest matches (trips on any prompt change)")
@@ -560,7 +589,7 @@ def main():
     args = ap.parse_args()
     dispatch = {"run": cmd_run, "status": cmd_status, "send": cmd_send, "up": cmd_up,
                 "down": cmd_down, "receipts": cmd_receipts, "learnings": cmd_learnings,
-                "forget": cmd_forget, "trace": cmd_trace, "corpus": cmd_corpus, "bench": cmd_bench, "replay": cmd_replay,
+                "forget": cmd_forget, "trace": cmd_trace, "corpus": cmd_corpus, "export": cmd_export, "bench": cmd_bench, "replay": cmd_replay,
                 "passport": cmd_passport}
     try:
         if args.cmd == "setup":
