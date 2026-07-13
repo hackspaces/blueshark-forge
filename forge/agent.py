@@ -26,6 +26,7 @@ from . import profiles
 from .authority import AuthorityPolicy
 from .execution import (CompletionPolicy, CompletionDecision, PolicyOutcome,
                         EvidenceCollector, ExecutionState, RuntimeEvent)
+from .lifecycle import LifecycleTracker, outcome_for, Stage
 from .ledger import Ledger
 from .tools import (ACTION_SCHEMA, ACTION_VARIANTS, ALL_ACTIONS, TOOL_HELP,
                     build_schema, required_fields, execute, dry_run, shape, error_hint)
@@ -320,6 +321,9 @@ class Agent:
         self.session = session
         self.max_steps = max_steps
         self.goal = goal or ""          # H01: the run's task, recorded in the task contract
+        self._lifecycle = LifecycleTracker(getattr(session, "sid", "run"), clock=time.time)  # H03
+        self._turn_no = 0
+        self._turn_id = "t0"            # set per-turn in _begin_turn; a default keeps _gate usable pre-turn
         self.on_event = on_event or (lambda *a, **k: None)
         self.allowed = allowed
         self.authority = AuthorityPolicy()
@@ -1292,6 +1296,8 @@ class Agent:
         checked first; model capability, ladder tier, and auto mode never expand it."""
         decision = self.authority.evaluate(act)
         if not decision.allowed:
+            lc = self._lifecycle.deny(self._lifecycle.request(self._turn_id, kind), decision.reason)  # H03
+            self._log_lifecycle(lc)
             self.session.log("authority_denied", decision=decision.to_dict())
             return decision.reason
         if kind not in self.MUTATING or self.mode == "auto":
@@ -1366,6 +1372,10 @@ class Agent:
         t = _reducer.reduce(self._exec_state(), event, self.contract, action=action)
         self.session.log("execution_transition", **t.to_dict())
         return t
+
+    def _log_lifecycle(self, lc):
+        """H03: persist a completed action lifecycle (identity + terminal) to the transcript."""
+        self.session.log("action_lifecycle", **lc.to_dict())
 
     def _done_gate(self, claim=""):
         """Evaluate completion evidence under the configured harness policy.
@@ -1613,6 +1623,7 @@ class Agent:
         self.on_event("action", action="fleet_send", detail=target, thought=act.get("thought", ""))
         self.on_event("observation", text=obs, ok=ok)
         self.messages.append({"role": "user", "content": f"Observation:\n{obs}"})
+        return ok
 
     def _execute_and_record(self, kind, act, raw, step, trace):
         """Run the action and RECORD everything about it (straight-line, no loop exits).
@@ -1861,6 +1872,8 @@ class Agent:
                 self.messages.append({"role": "user", "content": note})
         self._mutated = set()
         self._verified = False
+        self._turn_no += 1                     # H03: stable per-turn id for action lifecycles
+        self._turn_id = f"t{self._turn_no}"
         self._bounced = False
         self._narrated = False
         self.evidence.reset()
@@ -2013,7 +2026,16 @@ class Agent:
                         continue
 
                     if kind == "fleet_send":
-                        self._do_fleet_send(act, trace)
+                        # H03: fleet_send is a real outbound effect — give it a lifecycle too,
+                        # symmetric with its denied variant (a blocked send already logs one).
+                        _fs = self._lifecycle.request(self._turn_id, kind)
+                        self._lifecycle.start(self._lifecycle.authorize(_fs))
+                        try:
+                            _fs_ok = self._do_fleet_send(act, trace)
+                        except BaseException:
+                            self._log_lifecycle(self._lifecycle.finish(_fs, Stage.INDETERMINATE, "fleet_send raised"))
+                            raise
+                        self._log_lifecycle(self._lifecycle.finish(_fs, outcome_for(bool(_fs_ok))))
                         continue
 
                     # include offset so paging one big file (same path, new range) isn't seen as a loop.
@@ -2112,7 +2134,25 @@ class Agent:
                             act, kind = self._resample(act, kind, pin, step, score, trace)
 
                     self._reduce_and_log(RuntimeEvent.ACTION_STARTED, action=kind)   # H02: ask the reducer before executing
-                    obs, ok, budget, recorded_fp = self._execute_and_record(kind, act, raw, step, trace)
+                    # H03: a complete action lifecycle — one stable identity, exactly one terminal.
+                    _lc = self._lifecycle.request(self._turn_id, kind)
+                    self._lifecycle.start(self._lifecycle.authorize(_lc))
+                    try:
+                        obs, ok, budget, recorded_fp = self._execute_and_record(kind, act, raw, step, trace)
+                    except BaseException:                       # a raise mid-execution still terminates the lifecycle
+                        self._log_lifecycle(self._lifecycle.finish(_lc, Stage.INDETERMINATE, "execution raised"))
+                        raise
+                    # The terminal is derived from REAL signals, not free-text: a timeout/cancel
+                    # always returns ok=False (so a success whose output merely mentions the phrase
+                    # is not misclassified), and a background LAUNCH is indeterminate only when it
+                    # started ok (an instant crash falls through to failed).
+                    self._lifecycle.finish(_lc, outcome_for(
+                        ok,
+                        cancelled=self.stop.is_set() or (not ok and (obs or "").strip() == "(stopped by user)"),
+                        timed_out=(not ok and "timed out after" in (obs or "")),
+                        indeterminate=(kind == "bash" and bool(act.get("background")) and ok)),
+                        detail=(obs or "")[:200])
+                    self._log_lifecycle(_lc)
 
                     tag = ""
                     borrow_now = False
