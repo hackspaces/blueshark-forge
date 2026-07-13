@@ -373,6 +373,13 @@ def run(backend, session, verbose=False, workspace=None, resume=None):
 
     gate = ApprovalGate()
     agent.approve = lambda desc: gate.request(desc, agent.stop)
+    # H05: the interactive human escape hatch for a FAILED verification — accept the
+    # completion as UNVERIFIED. Fail-closed (any non-yes answer, or Esc, declines).
+    # Only wired here, so autonomous/one-shot runs keep the declining default and can
+    # never convert failed verification into success by repeating the claim.
+    agent.approve_unverified = lambda reason: gate.request(
+        f"⚠ verification FAILED — accept completion as UNVERIFIED anyway? {reason}",
+        agent.stop) in ("yes", "always")
 
     def status_line():
         try:

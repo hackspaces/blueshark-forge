@@ -322,17 +322,17 @@ class TestDoneGate(unittest.TestCase):
         # the gate must NOT masquerade as a failed observation
         self.assertFalse(any(k == "observation" and kw.get("ok") is False for k, kw in events))
 
-    def test_failing_test_bounces_once_then_second_say_passes(self):
+    def test_failing_test_is_not_escaped_by_repeating_the_claim(self):
+        # H05: a repeated `say` cannot convert a failed verification into success — the
+        # historical second-claim escape is gone (an override now needs a recorded approval).
         result, events, sess, _ = self._run_turn([self._WRITE, self._SAY], test_cmd="false")
-        self.assertEqual(result, "all done")                     # the SECOND say gets through
+        self.assertNotEqual(result, "all done")                  # the repeated say does NOT get through
         checks = [kw for k, kw in events if k == "done_check"]
-        self.assertEqual(len(checks), 1)                         # bounced exactly once, no livelock
+        self.assertEqual(len(checks), 1)                         # verified exactly once, no livelock
         self.assertFalse(checks[0]["ok"])
         self.assertFalse(any(k == "verified" for k, f in sess.logs))  # never grounded
         # CRITICAL: the bounce is NOT an observation-ok=False event
         self.assertFalse(any(k == "observation" and kw.get("ok") is False for k, kw in events))
-        # it left a plain user-visible done-check note in the transcript context
-        self.assertTrue(any(k == "say" for k, kw in events))
 
     def test_no_mutation_turn_is_never_gated(self):
         _write(os.path.join(tempfile.mkdtemp(), "z"), "z")       # unrelated
@@ -385,8 +385,8 @@ class TestDoneGate(unittest.TestCase):
 
     def test_bash_write_gates_say(self):
         # a file mutation made via BASH (echo > f, sed -i) must still gate `say` —
-        # it used to bypass the gate entirely because only write_file/edit_file
-        # were tracked. Failing suite -> bounce exactly once, second say passes.
+        # it used to bypass the gate entirely because only write_file/edit_file were
+        # tracked. H05: a failing suite bounces and a REPEATED say does not pass.
         d = tempfile.mkdtemp()
         self.fleet.detect_test_cmd = lambda cwd: "false"
         actions = [
@@ -397,7 +397,7 @@ class TestDoneGate(unittest.TestCase):
         a = Agent(ScriptBackend(actions), _RecSession(d), max_steps=8,
                   on_event=lambda k, **kw: events.append((k, kw)))
         result = a.send("do it")
-        self.assertEqual(result, "all done")                     # second say passes
+        self.assertNotEqual(result, "all done")                  # gate held — repetition does not pass
         checks = [kw for k, kw in events if k == "done_check"]
         self.assertEqual(len(checks), 1)                         # gate DID run, bounced once
         self.assertFalse(checks[0]["ok"])

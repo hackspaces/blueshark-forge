@@ -92,6 +92,7 @@ class EvidenceReceipt:
     artifacts: List[str] = field(default_factory=list)
     unverified_assumptions: List[str] = field(default_factory=list)
     authority: Dict[str, Any] = field(default_factory=dict)
+    approved: bool = False    # H05: a recorded approval accepted this as unverified
     version: int = RECEIPT_VERSION
 
     @property

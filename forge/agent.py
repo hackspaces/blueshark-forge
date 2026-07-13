@@ -375,6 +375,11 @@ class Agent:
         self.stop = threading.Event()  # set from the UI (Esc) to interrupt mid-run
         self.mode = "auto"             # auto | plan | manual (set by the UI)
         self.approve = lambda desc: "yes"   # manual-mode hook: 'yes' | 'always' | 'no'
+        # H05: the ONLY way a failed verification is accepted (as unverified) — a recorded
+        # human approval. Default declines, so an autonomous run can never convert failed
+        # verification into success by repeating the claim. The REPL sets a real prompt.
+        self.approve_unverified = lambda reason: False
+        self._approved_unverified = False
         self._compacted = False        # P3.1: transient — set by _compact, read+cleared by the step trace
         # P4.2 structural compaction: a parallel, index-aligned metadata list — NOT a
         # key inside the message dicts (prompt = self.messages + [pin] is sent to the
@@ -1408,7 +1413,8 @@ class Agent:
                 contract_id=_receipt.digest_text(json.dumps(self.contract.to_dict(), sort_keys=True)),
                 verified_workspace=(self._verified_workspace if self._verified else None),
                 changed_paths=measured, opaque_changes=("<bash>" in c.changed_files),
-                checks=checks, unverified_assumptions=list(c.unverified_assumptions))
+                checks=checks, unverified_assumptions=list(c.unverified_assumptions),
+                approved=self._approved_unverified)
             self.session.log("evidence_receipt", **r.to_dict())
         except Exception:
             pass
@@ -1467,7 +1473,16 @@ class Agent:
         t = self._reduce_and_log(RuntimeEvent.COMPLETION_CLAIMED)
         contract = self.evidence.contract(claim)
         attempt = 2 if self._bounced else 1
-        decision = self.completion_policy.evaluate(contract, attempt=attempt)
+        decision = self.completion_policy.evaluate(contract, attempt=attempt,
+                                                   approved=self._approved_unverified)
+        # H05: a balanced failed-verification rejection is overridable ONLY by a recorded
+        # approval, never by a repeated claim. Ask the human (autonomous declines by
+        # default); a granted approval is logged (survives pause/resume) and re-evaluated.
+        if (decision.code == "verification_failed" and self.completion_policy.mode == "balanced"
+                and not self._approved_unverified and self.approve_unverified(decision.reason)):
+            self._approved_unverified = True
+            self.session.log("completion_approval", claim=claim, reason=decision.reason)
+            decision = self.completion_policy.evaluate(contract, attempt=attempt, approved=True)
         # H02 co-authorization: the reducer VETOES a full verified ACCEPT over a state it
         # still holds as unverified — closing the stale-verification hole where an
         # EvidenceContract keeps a pre-mutation test PASS. The deliberate escape hatches
@@ -1918,6 +1933,7 @@ class Agent:
         self._mutated = set()
         self._verified = False
         self._verified_workspace = None        # H04
+        self._approved_unverified = False      # H05: reset the failed-verification approval per turn
         self._turn_no += 1                     # H03: stable per-turn id for action lifecycles
         self._turn_id = f"t{self._turn_no}"
         self._bounced = False
