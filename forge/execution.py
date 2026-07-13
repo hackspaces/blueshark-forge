@@ -129,6 +129,12 @@ class EvidenceCollector:
 
     def record_verification(self, command: str, ok: bool, artifact: str = "") -> None:
         digest = hashlib.sha256((artifact or "").encode("utf-8", "replace")).hexdigest()[:16]
+        if ok:
+            # A passing check of the CURRENT workspace supersedes prior FAILED checks —
+            # they judged a now-fixed state. Without this, a single early failure would
+            # poison the whole turn: the common fix → re-run → pass loop could never
+            # complete (the stale failure keeps contract.verified False forever).
+            self.verification = [v for v in self.verification if v.exit_code == 0]
         self.verification.append(VerificationEvidence(command, 0 if ok else 1, digest))
 
     def record_assumption(self, assumption: str) -> None:
@@ -176,10 +182,12 @@ class CompletionPolicy:
 
     Modes:
       audit     never blocks, but labels unsupported completion;
-      balanced  rejects a failed check once, then permits the existing single-bounce
-                escape hatch as an explicit override; accepts missing-runner cases as
-                visibly unverified;
-      strict    rejects every changed workspace without passing evidence.
+      balanced  rejects a failed check; a failed-verification override requires a
+                RECORDED APPROVAL (human or explicit contract policy) — never model
+                repetition — and yields accepted_unverified, never verified; accepts
+                missing-runner cases as visibly unverified;
+      strict    rejects every changed workspace without passing evidence, and is never
+                overridable.
     """
 
     MODES = frozenset(("audit", "balanced", "strict"))
@@ -188,7 +196,8 @@ class CompletionPolicy:
         selected = (mode or os.environ.get("FORGE_COMPLETION_POLICY", "balanced")).lower()
         self.mode = selected if selected in self.MODES else "balanced"
 
-    def evaluate(self, contract: EvidenceContract, attempt: int = 1) -> CompletionDecision:
+    def evaluate(self, contract: EvidenceContract, attempt: int = 1,
+                 approved: bool = False) -> CompletionDecision:
         if not contract.changed_files:
             return CompletionDecision(PolicyOutcome.ACCEPT, "no_changes",
                                       "completion did not change the workspace")
@@ -202,10 +211,13 @@ class CompletionPolicy:
                                       "policy is audit-only; unsupported completion was recorded")
 
         if failed:
-            if self.mode == "balanced" and attempt > 1:
+            # H05: a failed verification is overridable ONLY by a recorded approval —
+            # never by a repeated model claim — and the result is accepted_unverified,
+            # not verified. strict is never overridable.
+            if self.mode == "balanced" and approved:
                 return CompletionDecision(
-                    PolicyOutcome.ACCEPT_UNVERIFIED, "single_bounce_override",
-                    "verification failed, but the balanced policy permits the existing second-claim escape hatch",
+                    PolicyOutcome.ACCEPT_UNVERIFIED, "approved_override",
+                    "verification failed, but a recorded approval accepts it as unverified",
                     override_used=True)
             return CompletionDecision(PolicyOutcome.REJECT, "verification_failed",
                                       "one or more verification commands failed",

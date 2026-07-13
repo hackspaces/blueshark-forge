@@ -138,6 +138,13 @@ def cmd_run(args):
         reply = agent.send(args.task)
         if not state["said"]:
             print(f"\n{reply}")
+        # H05: a non-interactive run that ended with the harness REJECTING the completion
+        # (e.g. strict mode with proof missing, or a failed verification never approved)
+        # exits non-zero — CI must not read an unverified stop as success.
+        decision = getattr(agent, "_completion_decision", None)
+        if decision is not None and not decision.allowed:
+            print(f"\n✗ completion not accepted: {decision.reason}", file=sys.stderr)
+            s.deregister(); sys.exit(1)
     except ForgeError as e:
         print(f"\n✗ {e}", file=sys.stderr); s.deregister(); sys.exit(1)
     finally:
