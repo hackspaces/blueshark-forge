@@ -24,7 +24,8 @@ from . import exemplars
 from . import profile
 from . import profiles
 from .authority import AuthorityPolicy
-from .execution import CompletionPolicy, EvidenceCollector
+from .execution import (CompletionPolicy, CompletionDecision, PolicyOutcome,
+                        EvidenceCollector, ExecutionState, RuntimeEvent)
 from .ledger import Ledger
 from .tools import (ACTION_SCHEMA, ACTION_VARIANTS, ALL_ACTIONS, TOOL_HELP,
                     build_schema, required_fields, execute, dry_run, shape, error_hint)
@@ -1347,14 +1348,35 @@ class Agent:
                 "files changed this turn. Do the work NOW: make the edits/writes and run the "
                 "check, THEN report the outcome. Don't stop just to narrate your plan.")
 
+    def _exec_state(self):
+        """H02: the controller's execution state, derived from harness-owned flags —
+        an unverified mutation is MUTATE, a passing verification is VERIFY, nothing
+        pending is INVESTIGATE. Persistent flags (not a naive per-action state) so a
+        read after a mutation can't lose the pending-verification obligation."""
+        if not self._mutated:
+            return ExecutionState.INVESTIGATE
+        return ExecutionState.VERIFY if self._verified else ExecutionState.MUTATE
+
+    def _reduce_and_log(self, event, action=""):
+        """H02: ask the authoritative reducer for the transition and record it. The
+        reducer is the state-machine law; the completion policy remains the evidence
+        authority, and the two agree on the completion invariant (a mutation may not
+        jump to verified completion)."""
+        from . import reducer as _reducer
+        t = _reducer.reduce(self._exec_state(), event, self.contract, action=action)
+        self.session.log("execution_transition", **t.to_dict())
+        return t
+
     def _done_gate(self, claim=""):
         """Evaluate completion evidence under the configured harness policy.
 
         The first unsupported claim is rejected with a structured contract. Balanced
         mode preserves Forge's historical second-claim escape hatch, but records it as
         an explicit policy override; strict mode never accepts unverified mutations.
+        H02: the reducer records the authoritative completion transition alongside.
         """
         if not self._mutated:
+            self._reduce_and_log(RuntimeEvent.COMPLETION_CLAIMED)   # INVESTIGATE → COMPLETE (legal)
             self._completion_decision = self.completion_policy.evaluate(
                 self.evidence.contract(claim), attempt=1)
             return None
@@ -1386,9 +1408,21 @@ class Agent:
                     else:
                         self.on_event("done_check", cmd=cmd, ok=False)
 
+        # H02: the reducer's authoritative completion transition, now that the done-gate's
+        # own verification attempt has settled `_verified`.
+        t = self._reduce_and_log(RuntimeEvent.COMPLETION_CLAIMED)
         contract = self.evidence.contract(claim)
         attempt = 2 if self._bounced else 1
         decision = self.completion_policy.evaluate(contract, attempt=attempt)
+        # H02 co-authorization: the reducer VETOES a full verified ACCEPT over a state it
+        # still holds as unverified — closing the stale-verification hole where an
+        # EvidenceContract keeps a pre-mutation test PASS. The deliberate escape hatches
+        # (ACCEPT_UNVERIFIED: verifier-unavailable, single-bounce override, audit) have
+        # outcome != ACCEPT and pass through untouched, so nothing regresses.
+        if decision.outcome is PolicyOutcome.ACCEPT and not t.allowed:
+            decision = CompletionDecision(
+                PolicyOutcome.REJECT, "reducer_veto", t.reason,
+                t.recovery_state or ExecutionState.VERIFY)
         self._completion_decision = decision
         self.session.log("completion_policy", mode=self.completion_policy.mode,
                          attempt=attempt, decision=decision.to_dict(),
@@ -2077,6 +2111,7 @@ class Agent:
                         if score == 0.0:
                             act, kind = self._resample(act, kind, pin, step, score, trace)
 
+                    self._reduce_and_log(RuntimeEvent.ACTION_STARTED, action=kind)   # H02: ask the reducer before executing
                     obs, ok, budget, recorded_fp = self._execute_and_record(kind, act, raw, step, trace)
 
                     tag = ""
