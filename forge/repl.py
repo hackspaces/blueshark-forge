@@ -23,13 +23,20 @@ ICON = {"bash": "⚡", "read_file": "▸", "write_file": "✎", "edit_file": "�
 
 
 class Spinner:
-    """Animated spinner that shows elapsed time (and optional live suffix)."""
+    """Animated spinner that shows elapsed time (and optional live suffix).
+
+    Only animates on a real terminal. When stdout is a pipe or file (`forge run …
+    > log`, `| tee`, CI), it stays silent — no `\\r`, no color, no `\033[K` spam
+    in the captured output; the actual results still print normally."""
     def __init__(self, label="thinking"):
         self.label = label; self._stop = False; self._t = None; self._suffix = ""
         self._start = None
+        self._tty = sys.stdout.isatty()
     def suffix(self, s):
         self._suffix = s
     def __enter__(self):
+        if not self._tty:
+            return self                       # piped/redirected → no animation, no escape codes
         self._start = time.monotonic()
         def spin():
             for c in itertools.cycle("⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"):

@@ -48,6 +48,26 @@ class TestColour(unittest.TestCase):
         self.assertEqual(render.paint("hi"), "hi")
 
 
+class TestSpinner(unittest.TestCase):
+    """The 'thinking'/'loading model' spinner must not leak escape codes into a
+    pipe or file. On a non-TTY stdout it stays fully silent — no `\\r`, no ANSI,
+    no animation thread — so `forge run … > log` / `| tee` captures clean output."""
+
+    def test_silent_and_no_thread_on_non_tty(self):
+        import io
+        from forge.repl import Spinner
+        orig = sys.stdout
+        buf = io.StringIO()          # StringIO.isatty() is False
+        sys.stdout = buf
+        try:
+            with Spinner("loading model") as sp:
+                self.assertIsNone(sp._t)          # no animation thread spawned
+            self.assertFalse(sp._tty)
+        finally:
+            sys.stdout = orig
+        self.assertEqual(buf.getvalue(), "")      # nothing written to the pipe
+
+
 class TestTilde(unittest.TestCase):
     def test_home_prefix_collapses(self):
         home = os.path.expanduser("~")
