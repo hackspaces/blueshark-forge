@@ -12,6 +12,7 @@ kill it), and the config's context matched to the server. Bespoke runtimes forge
 can't provision yet fall back to the honest runbook.
 """
 import glob
+import json
 import os
 import shutil
 import signal
@@ -24,6 +25,50 @@ from . import registry
 from .render import paint, fit, term_width
 
 SERVERS = os.path.expanduser("~/.forge/servers")   # pidfiles + logs for forge-launched servers
+
+
+def bench_lift(entry, path=None):
+    """The harness lift for a catalog model — base (bare) vs full pass-rate delta in
+    percentage points, read from ~/.forge/bench/results.jsonl. None if it hasn't been
+    benched. This is the 'weak weights + strong harness' number the catalog exists to show."""
+    from . import bench
+    path = path or bench.RESULTS
+    ids = [entry["name"]]
+    if entry.get("ollama_tag"):
+        ids.append(entry["ollama_tag"])            # a bench run may address it by its ollama tag
+    rows = []
+    try:
+        with open(path) as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    r = json.loads(line)
+                except ValueError:
+                    continue
+                if any(i in str(r.get("model", "")) for i in ids):
+                    rows.append(r)
+    except OSError:
+        return None
+    if not rows:
+        return None
+    bare = bench._rate([r for r in rows if bench.config_label(r.get("levers", [])) == "bare"])
+    full = bench._rate([r for r in rows if bench.config_label(r.get("levers", [])) == "full"])
+    if bare is None or full is None:
+        return None
+    return round(100 * (full[2] - bare[2]))
+
+
+def _lift(entry):
+    """(display string, color) for an entry's lift — live bench, else stored, else pending."""
+    lift = bench_lift(entry)
+    if lift is None:
+        lift = entry.get("lift_pts")
+    if not isinstance(lift, (int, float)):
+        return "pending", "dim"
+    return (f"+{lift}pts" if lift >= 0 else f"{lift}pts",
+            "green" if lift > 0 else "yellow" if lift == 0 else "red")
 
 
 def _machine():
@@ -41,22 +86,25 @@ def _list(hw):
     print(paint("forge models — curated recipes (hand-verified, not scraped)", "bold"))
     print(paint(f"  this machine: {hw.get('chip') or hw.get('arch') or '?'} · {ram or '?'}GB RAM", "dim"))
     print()
-    head = f"  {'NAME':<18} {'ENGINE':<12} {'SIZE':<8} {'RAM~':<6} {'FIT?':<6} {'STATUS':<10} NOTES"
+    head = (f"  {'NAME':<18} {'ENGINE':<11} {'SIZE':<8} {'RAM~':<6} "
+            f"{'FIT?':<5} {'LIFT':<8} {'STATUS':<10} NOTES")
     print(paint(head, "dim"))
     for m in registry.MODELS:
         size = m.get("weights", {}).get("size_gb")
         fit_ok = registry.fits(m, ram)
         status = m.get("status", "?")
         # pad the PLAIN text first, then paint — ANSI codes must not count as width
-        fitcell = paint(f"{'✓' if fit_ok else '✗':<6}", "green" if fit_ok else "red")
+        fitcell = paint(f"{'✓' if fit_ok else '✗':<5}", "green" if fit_ok else "red")
+        lift_s, lift_style = _lift(m)
+        liftcell = paint(f"{lift_s:<8}", lift_style)
         stcell = paint(f"{status:<10}", "green" if status == "verified" else "yellow")
-        row = (f"  {m['name']:<18} {m['engine']:<12} "
+        row = (f"  {m['name']:<18} {m['engine']:<11} "
                f"{(f'{size}GB' if size else '?'):<8} {str(m.get('ram_gb_needed', '?')) + 'GB':<6} ")
-        note = fit(m.get("notes", ""), max(10, W - 66))
-        print(row + fitcell + " " + stcell + " " + paint(note, "dim"))
+        note = fit(m.get("notes", ""), max(10, W - 76))
+        print(row + fitcell + " " + liftcell + " " + stcell + " " + paint(note, "dim"))
     print()
-    print(paint("  RAM~ is an estimate (other apps shrink real headroom). "
-                "`forge models show <name>` prints the runbook.", "dim"))
+    print(paint("  RAM~/LIFT are estimates — LIFT is base→full harness gain from `forge bench` "
+                "('pending' = not benched yet). `forge models show <name>` prints the runbook.", "dim"))
 
 
 def _show(hw, name):
@@ -70,6 +118,12 @@ def _show(hw, name):
     style = "green" if registry.fits(m, ram) else "red"
     print(f"  needs ~{m.get('ram_gb_needed', '?')}GB · this machine has {ram or '?'}GB → "
           + paint(verdict, style) + paint("  (estimate)", "dim"))
+    lift_s, lift_style = _lift(m)
+    if lift_s == "pending":
+        print(paint("  harness lift: pending — run `forge bench` and the base→full gain appears here", "dim"))
+    else:
+        print("  harness lift: " + paint(lift_s.replace("pts", " pts"), lift_style)
+              + paint("  base→full (forge bench)", "dim"))
     if m.get("notes"):
         print(paint(f"  {m['notes']}", "dim"))
     if m.get("report"):

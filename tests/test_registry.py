@@ -148,6 +148,53 @@ class TestModelsUse(unittest.TestCase):
         self.assertEqual(self._use("nope"), 1)
 
 
+class TestBenchLift(unittest.TestCase):
+    """The catalog's base→full harness-lift column, read from bench results."""
+
+    def _results(self, rows):
+        import json as _j
+        import tempfile
+        p = os.path.join(tempfile.mkdtemp(), "results.jsonl")
+        with open(p, "w") as f:
+            for r in rows:
+                f.write(_j.dumps(r) + "\n")
+        return p
+
+    def test_lift_is_full_minus_bare_points(self):
+        from forge import models_cmd as MC, registry as REG
+        # bare 1/2 = 50%, full 2/2 = 100% → +50 pts
+        rows = [
+            {"model": "openai:sarvam-30b@x", "levers": [], "task": "a", "pass": True},
+            {"model": "openai:sarvam-30b@x", "levers": [], "task": "b", "pass": False},
+            {"model": "openai:sarvam-30b@x", "levers": sorted(list(_all_levers())), "task": "a", "pass": True},
+            {"model": "openai:sarvam-30b@x", "levers": sorted(list(_all_levers())), "task": "b", "pass": True},
+        ]
+        self.assertEqual(MC.bench_lift(REG.get("sarvam-30b"), self._results(rows)), 50)
+
+    def test_matches_by_ollama_tag(self):
+        from forge import models_cmd as MC, registry as REG
+        rows = [
+            {"model": "phi", "levers": [], "task": "a", "pass": False},
+            {"model": "phi", "levers": sorted(list(_all_levers())), "task": "a", "pass": True},
+        ]
+        # phi-2's ollama_tag is "phi" — a bench run addressed by tag still matches.
+        self.assertEqual(MC.bench_lift(REG.get("phi-2"), self._results(rows)), 100)
+
+    def test_no_data_is_none_then_pending(self):
+        from forge import models_cmd as MC, registry as REG
+        self.assertIsNone(MC.bench_lift(REG.get("sarvam-30b"), self._results([])))
+        self.assertEqual(MC._lift(REG.get("sarvam-30b"))[0], "pending")   # no live data, no stored
+
+    def test_missing_file_is_none(self):
+        from forge import models_cmd as MC, registry as REG
+        self.assertIsNone(MC.bench_lift(REG.get("sarvam-30b"), "/no/such/results.jsonl"))
+
+
+def _all_levers():
+    from forge.agent import ALL_LEVERS
+    return ALL_LEVERS
+
+
 class TestModelsUseLlamacpp(unittest.TestCase):
     """`forge models use` — llama.cpp turnkey path, fully mocked (no server, no power)."""
 
