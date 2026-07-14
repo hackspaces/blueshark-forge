@@ -18,6 +18,7 @@ import os
 import shutil
 import signal
 import subprocess
+import sys
 import time
 import urllib.request
 
@@ -150,14 +151,17 @@ def _scan(hw, refresh=False):
     vram = hw.get("vram_gb", 0)
     print(paint("forge models — scanning the downloadable catalog …", "bold"))
 
+    tty = sys.stdout.isatty()
     def prog(src, d, t):
-        print(paint(f"  … {src} {d}/{t}", "dim") + "        ", end="\r", flush=True)
+        if tty:                                # in-place progress only on a terminal; pipes/logs stay clean
+            print(paint(f"  … {src} {d}/{t}", "dim") + "        ", end="\r", flush=True)
     try:
         entries, cached = catalog.load_catalog(hw, refresh=refresh, on_progress=prog)
     except Exception as e:
         print(paint(f"  ✗ couldn't reach the catalog ({e}). Try again, or use `forge models`.", "red"))
         return 1
-    print(" " * 48, end="\r")
+    if tty:
+        print(" " * 48, end="\r")
     srcs = sorted({e.get("source") for e in entries if e.get("source")})
     print(paint(f"  {_hw_desc(hw, accel)}   ·   sources: {', '.join(srcs) or '—'}"
                 + ("   (cached)" if cached else ""), "dim"))
