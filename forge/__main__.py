@@ -585,7 +585,7 @@ def main():
 
     p_setup = sub.add_parser("setup", help="detect hardware, choose an engine, pull/point at models, write config")
     p_setup.add_argument("--auto", action="store_true", help="no prompts (Ollama, RAM-sized ladder)")
-    p_setup.add_argument("--engine", help="ollama | vllm | llamacpp | mlx | lmstudio | tgi | sglang | openai")
+    p_setup.add_argument("--engine", help="ollama | vllm | llamacpp | mlx | lmstudio | tgi | sglang | openai | anthropic")
     p_setup.add_argument("--url", help="base URL for an OpenAI-compatible engine")
     p_setup.add_argument("--api-key", dest="api_key", help="API key for the engine (if needed)")
     p_setup.add_argument("--models", help="comma-separated model names, cheap→strong (for non-ollama engines)")
