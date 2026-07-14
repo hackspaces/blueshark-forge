@@ -130,13 +130,24 @@ def fits(entry, ram_gb):
     return bool(ram_gb) and ram_gb >= need
 
 
-def runs(entry, ram_gb, accelerated):
-    """How this model would run on this machine: (verdict, style). Factors RAM fit AND
-    speed — a big model on a CPU-only machine 'fits' but crawls (decode is memory-
-    bandwidth-bound). accelerated = Apple Silicon (Metal) or a real GPU."""
-    if not fits(entry, ram_gb):
-        return "won't fit", "faint"
+def runs(entry, ram_gb, accelerated, vram_gb=0):
+    """How this model would run on this machine: (verdict, style). Chooses the right
+    memory pool per hardware:
+      · discrete GPU(s) — the weights must fit VRAM to run fast; beyond that they spill
+        into system RAM (slower); beyond RAM+VRAM they don't fit. (Handles a small-VRAM
+        laptop GPU AND a multi-GPU / datacenter node with hundreds of GB of VRAM.)
+      · Apple Silicon (unified memory) / CPU-only — system RAM is the pool; on CPU a big
+        model 'fits' but crawls (decode is memory-bandwidth-bound)."""
     p = entry.get("params_b") or 0
+    if vram_gb:                                          # discrete GPU: VRAM is the fast pool
+        size = (entry.get("weights") or {}).get("size_gb") or (p * 0.6)
+        if vram_gb >= size * 1.2:                        # +~20% for KV / overhead
+            return "runs well", "good"
+        if (vram_gb + (ram_gb or 0)) >= (entry.get("ram_gb_needed") or 0):
+            return "usable · slower", "warn"             # spills into system RAM
+        return "won't fit", "faint"
+    if not fits(entry, ram_gb):                          # unified / CPU: system RAM is the pool
+        return "won't fit", "faint"
     if accelerated or p <= 3.5:
         return "runs well", "good"
     if p <= 9:
@@ -144,10 +155,11 @@ def runs(entry, ram_gb, accelerated):
     return "fits · slow on CPU", "warn"
 
 
-def ceiling(ram_gb, accelerated):
+def ceiling(ram_gb, accelerated, vram_gb=0, models=None):
     """The biggest model (by params) this machine can run WELL, for the headline.
-    Returns (params_b, name) or (0, None) if nothing runs well."""
-    ok = [m for m in MODELS if runs(m, ram_gb, accelerated)[0] == "runs well"]
+    Over `models` (default the curated set). Returns (params_b, name) or (0, None)."""
+    ms = MODELS if models is None else models
+    ok = [m for m in ms if runs(m, ram_gb, accelerated, vram_gb)[0] == "runs well"]
     if not ok:
         return 0, None
     best = max(ok, key=lambda m: m.get("params_b") or 0)

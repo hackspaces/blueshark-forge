@@ -90,6 +90,26 @@ class TestRunsAndCeiling(unittest.TestCase):
         self.assertGreaterEqual(params[-1], 30)                # something big
         self.assertGreater(len(REG.MODELS), 10)                # a real spread, not 3
 
+    def test_gpu_uses_vram_not_system_ram(self):
+        big = REG.get("llama3.1:70b")      # ~40GB weights, ram_gb_needed 48
+        mid = REG.get("gemma2:9b")         # ~5.4GB weights
+        # small GPU (8GB VRAM) even with lots of RAM: 70B does NOT fit VRAM → not "runs well"
+        self.assertNotEqual(REG.runs(big, 64, True, vram_gb=8)[0], "runs well")
+        self.assertEqual(REG.runs(mid, 64, True, vram_gb=8)[0], "runs well")      # 9B fits 8GB
+        # datacenter (640GB VRAM): 70B runs well
+        self.assertEqual(REG.runs(big, 512, True, vram_gb=640)[0], "runs well")
+
+    def test_gpu_spill_then_wont_fit(self):
+        big = REG.get("llama3.1:70b")      # ram_gb_needed 48
+        self.assertEqual(REG.runs(big, 64, True, vram_gb=8)[0], "usable · slower")  # 8+64 ≥ 48 → spills
+        self.assertEqual(REG.runs(big, 16, True, vram_gb=8)[0], "won't fit")        # 8+16 < 48 → no
+
+    def test_ceiling_respects_vram(self):
+        cap_small, _ = REG.ceiling(64, True, vram_gb=8)        # tiny GPU, big RAM → VRAM-bound
+        self.assertLessEqual(cap_small, 13)
+        cap_dc, _ = REG.ceiling(512, True, vram_gb=640)        # datacenter → up to catalog max
+        self.assertGreaterEqual(cap_dc, 30)
+
 
 class TestRunbook(unittest.TestCase):
     def test_sarvam_runbook_reproduces_the_verified_recipe(self):

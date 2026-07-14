@@ -50,6 +50,30 @@ class TestCpuOnlyTiers(unittest.TestCase):
         with mock.patch("shutil.which", return_value=None):
             self.assertFalse(S._is_accelerated(WINTEL))
 
+    def test_detected_vram_counts_as_accelerated(self):
+        self.assertTrue(S._is_accelerated({"os": "Linux", "arch": "x86_64", "vram_gb": 80}))
+
+
+class TestGpuDetection(unittest.TestCase):
+    def test_detect_machine_reads_nvidia_gpus_and_vram(self):
+        import subprocess
+        real = subprocess.check_output
+
+        def fake(cmd, *a, **k):
+            if cmd and cmd[0] == "nvidia-smi":                 # a multi-GPU node
+                return b"81920, NVIDIA A100-SXM4-80GB\n81920, NVIDIA A100-SXM4-80GB\n"
+            return real(cmd, *a, **k)                          # real RAM/chip detection
+        with mock.patch("subprocess.check_output", side_effect=fake):
+            hw = S.detect_machine()
+        self.assertEqual(hw["gpus"], 2)
+        self.assertEqual(hw["vram_gb"], 160)                   # 2 × 80GB
+        self.assertIn("A100", hw["gpu_name"])
+
+    def test_no_nvidia_smi_leaves_zero_gpus(self):
+        hw = S.detect_machine()                                # this machine has no nvidia-smi
+        self.assertEqual(hw.get("gpus"), 0)
+        self.assertEqual(hw.get("vram_gb"), 0)
+
     def test_recommend_without_hw_keeps_old_behavior(self):
         # back-compat: callers that pass no hw get the original table untouched.
         self.assertEqual(S.recommend(8), S.recommend(8, APPLE))

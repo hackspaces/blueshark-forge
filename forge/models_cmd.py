@@ -93,18 +93,29 @@ def _accelerated(hw):
         return False
 
 
+def _hw_desc(hw, accel):
+    """One-line hardware summary — names the memory pool that actually gates fit:
+    VRAM on a GPU/multi-GPU/datacenter node, unified memory on Apple Silicon, else RAM."""
+    ram = hw.get("ram_gb") or "?"
+    gpus, vram = hw.get("gpus", 0), hw.get("vram_gb", 0)
+    if gpus and vram:
+        n = f"{gpus}× " if gpus > 1 else ""
+        return f"{n}{hw.get('gpu_name') or 'GPU'} · {vram}GB VRAM · {ram}GB RAM"
+    base = f"{hw.get('chip') or hw.get('arch') or '?'} · {ram}GB RAM"
+    return base + (" · GPU / Metal (fast)" if accel else " · CPU-only")
+
+
 _RUN_STYLE = {"good": "green", "warn": "yellow", "faint": "dim"}
 
 
 def _list(hw):
     ram = hw.get("ram_gb") or 0
     accel = _accelerated(hw)
+    vram = hw.get("vram_gb", 0)
     W = term_width()
-    chip = hw.get("chip") or hw.get("arch") or "?"
-    hwkind = "GPU / Metal (fast)" if accel else "CPU-only"
     print(paint("forge models — what this machine can run", "bold"))
-    print(paint(f"  {chip} · {ram or '?'}GB RAM · {hwkind}", "dim"))
-    cap_p, cap_name = registry.ceiling(ram, accel)
+    print(paint(f"  {_hw_desc(hw, accel)}", "dim"))
+    cap_p, cap_name = registry.ceiling(ram, accel, vram)
     if cap_name:
         print(paint(f"  → runs well up to ~{_pnum(cap_p)}B    e.g. {cap_name}", "green"))
         if not accel and any((m.get("params_b") or 0) > 3.5 and registry.fits(m, ram)
@@ -118,7 +129,7 @@ def _list(hw):
     print(paint(head, "dim"))
     for m in sorted(registry.MODELS, key=lambda x: x.get("params_b") or 0):
         size = m.get("weights", {}).get("size_gb")
-        verdict, style = registry.runs(m, ram, accel)
+        verdict, style = registry.runs(m, ram, accel, vram)
         runs_cell = paint(f"{verdict:<18}", _RUN_STYLE.get(style, "dim"))
         star = paint(" ★", "green") if m.get("status") == "verified" else "  "
         note = fit(m.get("notes", ""), max(8, W - 82))
@@ -136,8 +147,7 @@ def _scan(hw, refresh=False):
     from . import catalog
     ram = hw.get("ram_gb") or 0
     accel = _accelerated(hw)
-    chip = hw.get("chip") or hw.get("arch") or "?"
-    hwkind = "GPU / Metal (fast)" if accel else "CPU-only"
+    vram = hw.get("vram_gb", 0)
     print(paint("forge models — scanning the downloadable catalog …", "bold"))
 
     def prog(src, d, t):
@@ -149,9 +159,9 @@ def _scan(hw, refresh=False):
         return 1
     print(" " * 48, end="\r")
     srcs = sorted({e.get("source") for e in entries if e.get("source")})
-    print(paint(f"  {chip} · {ram or '?'}GB RAM · {hwkind}   ·   sources: {', '.join(srcs) or '—'}"
+    print(paint(f"  {_hw_desc(hw, accel)}   ·   sources: {', '.join(srcs) or '—'}"
                 + ("   (cached)" if cached else ""), "dim"))
-    graded = [(e, registry.runs(e, ram, accel)) for e in entries]
+    graded = [(e, registry.runs(e, ram, accel, vram)) for e in entries]
     fitting = [(e, v) for e, v in graded if v[0] != "won't fit"]
     well = [e for e, v in graded if v[0] == "runs well"]
     if well:
@@ -180,10 +190,11 @@ def _show(hw, name):
         return 1
     ram = hw.get("ram_gb") or 0
     accel = _accelerated(hw)
+    vram = hw.get("vram_gb", 0)
     params = m.get("params_b")
     print(paint(f"{m['name']}", "bold")
           + paint(f"  ·  {f'{_pnum(params)}B · ' if params else ''}{m['repo']}  ·  {m['arch']}", "dim"))
-    verdict, style = registry.runs(m, ram, accel)
+    verdict, style = registry.runs(m, ram, accel, vram)
     print(f"  needs ~{m.get('ram_gb_needed', '?')}GB · this machine has {ram or '?'}GB → "
           + paint(verdict, _RUN_STYLE.get(style, "dim")) + paint("  (estimate)", "dim"))
     lift_s, lift_style = _lift(m)

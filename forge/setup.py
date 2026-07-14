@@ -39,6 +39,23 @@ def detect_machine():
             info["chip"] = platform.processor()
     except (OSError, subprocess.SubprocessError, ValueError, AttributeError):
         pass
+    # Discrete GPU(s) — the memory that actually matters for fast inference on a
+    # workstation / multi-GPU rig / datacenter node. Apple Silicon has no separate
+    # VRAM (unified memory = RAM). Best-effort: no nvidia-smi → gpus 0.
+    info["gpus"] = 0
+    info["vram_gb"] = 0
+    info["gpu_name"] = ""
+    try:
+        out = subprocess.check_output(
+            ["nvidia-smi", "--query-gpu=memory.total,name", "--format=csv,noheader,nounits"],
+            stderr=subprocess.DEVNULL, timeout=6).decode("utf-8", "replace")
+        rows = [r for r in out.splitlines() if r.strip()]
+        if rows:
+            info["gpus"] = len(rows)
+            info["vram_gb"] = round(sum(int(r.split(",")[0]) for r in rows) / 1024)  # MiB → GB
+            info["gpu_name"] = rows[0].split(",")[1].strip()
+    except (OSError, subprocess.SubprocessError, ValueError, IndexError):
+        pass
     return info
 
 
@@ -48,9 +65,11 @@ def _is_accelerated(hw):
     else — Intel/AMD laptops with integrated graphics — decodes CPU-only over shared
     DDR (~26-51 GB/s), where big models crawl (9B ≈ 4 tok/s) and can swap-thrash."""
     if hw.get("os") == "Darwin" and hw.get("arch") == "arm64":
-        return True
+        return True                                      # unified memory + Metal
+    if hw.get("vram_gb"):
+        return True                                      # a real discrete GPU was detected
     import shutil as _sh
-    return _sh.which("nvidia-smi") is not None          # a real dGPU, not an iGPU
+    return _sh.which("nvidia-smi") is not None           # fallback when vram wasn't populated
 
 
 # RAM-tiered local ladders (cheapest → strongest), from the 2026 Apple-Silicon /
