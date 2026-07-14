@@ -25,6 +25,47 @@ def _default_model():
     return os.environ.get("FORGE_MODEL") or ",".join(cfgmod.get("ladder", ["gemma2:9b"]))
 
 
+def _resolve_model(args):
+    """The model spec to use: an explicit --model / FORGE_MODEL, else the configured ladder."""
+    return getattr(args, "model", None) or _default_model()
+
+
+def _first_run(args):
+    """A fresh install — no config written and no model explicitly chosen. Guide the user
+    instead of spinning up a chat on the placeholder default (which they don't have)."""
+    return (getattr(args, "model", None) is None
+            and not os.environ.get("FORGE_MODEL") and not cfgmod.exists())
+
+
+def _first_run_welcome():
+    """Shown when a fresh install runs bare `forge`: what this machine can run, and the two
+    commands to get going — not a chat pointed at a model that isn't installed."""
+    from . import setup as setupmod
+    from . import registry
+    from .models_cmd import _accelerated, _pnum, _hw_desc
+    from .render import paint as P
+    hw = setupmod.detect_machine()
+    accel = _accelerated(hw)
+    cap_p, cap_name = registry.ceiling(hw.get("ram_gb") or 0, accel, hw.get("vram_gb", 0))
+
+    def line(cmd, desc):
+        print("  " + P(f"{cmd:<24}", "cyan") + desc)
+
+    print()
+    print("  " + P("✦ forge", "magenta", "bold") + P("  ·  run any model your machine can handle", "dim"))
+    print()
+    print("  Nothing set up yet — but " + P(_hw_desc(hw, accel), "bold"))
+    if cap_name:
+        print("  can run models " + P(f"up to ~{_pnum(cap_p)}B", "green") + " right here.")
+    print()
+    line("forge models", "see everything it can run")
+    line("forge models use phi-2", "a quick starter — pulled + ready in ~2 min")
+    line('forge run "…"', "then put it to work")
+    print()
+    print(P("  (or  forge setup  to pick a model ladder yourself)", "dim"))
+    print()
+
+
 def _new_session(model, cwd, name=None):
     sid = uuid.uuid4().hex[:12]
     s = sessmod.Session(sid, cwd, model, name=name)
@@ -72,8 +113,11 @@ def _make_ladder(spec):
 
 
 def cmd_chat(args):
+    if _first_run(args):
+        _first_run_welcome()
+        return
     from .repl import run
-    ladder = _make_ladder(args.model)
+    ladder = _make_ladder(_resolve_model(args))
     cwd = os.path.abspath(args.dir)
     resume_data = None
     if getattr(args, "resume", None):
@@ -98,8 +142,13 @@ def cmd_chat(args):
 
 
 def cmd_run(args):
+    if _first_run(args):
+        print("✗ no model set up yet.\n  See what this machine can run:  forge models\n"
+              "  then pick one:                  forge models use <name>   (or: forge setup)",
+              file=sys.stderr)
+        sys.exit(1)
     from .agent import Agent
-    ladder = _make_ladder(args.model)
+    ladder = _make_ladder(_resolve_model(args))
     s = _new_session(ladder[0].name, os.path.abspath(args.dir))
     state = {"streamed": False, "said": False}
     def on_event(kind, **k):
@@ -131,7 +180,7 @@ def cmd_run(args):
             print(_paint(f"  ↓ recovered — back to {k['model']}", "green"))
         elif kind == "inbox":
             print(_paint(f"  ✉ {k['sender']}: {_fit(k['text'], W - len(k['sender']) - 6)}", "magenta"))
-    agent = Agent(_make_ladder(args.model), s, on_event=on_event, max_steps=args.max_steps, autonomous=True,
+    agent = Agent(_make_ladder(_resolve_model(args)), s, on_event=on_event, max_steps=args.max_steps, autonomous=True,
                   goal=args.task,
                   workspace=_workspace_ctx(os.path.abspath(args.dir), _ctx_budget(ladder[0])))
     try:
@@ -236,13 +285,14 @@ def cmd_up(args):
     import subprocess
     if _daemon_running():
         print(f"autopilot already up (pid {_daemon_running()})"); return
+    model = _resolve_model(args)
     os.makedirs(os.path.expanduser("~/.forge/state"), exist_ok=True)
     with open(os.path.expanduser("~/.forge/forged.log"), "a") as log:
-        p = subprocess.Popen([sys.executable, "-m", "forge.daemon", args.model, str(args.interval)],
+        p = subprocess.Popen([sys.executable, "-m", "forge.daemon", model, str(args.interval)],
                              stdout=log, stderr=log, start_new_session=True)  # own process group
     dump(os.path.expanduser("~/.forge/state/forged.pid"), str(p.pid))
     time.sleep(1)
-    print(f"forge autopilot up (pid {p.pid}) — TRUST + COORDINATE + LEARN, checker model {args.model}")
+    print(f"forge autopilot up (pid {p.pid}) — TRUST + COORDINATE + LEARN, checker model {model}")
 
 
 def cmd_down(args):
@@ -452,15 +502,16 @@ def cmd_bench(args):
     if not tasks:
         print("no bench tasks found (looked in bench/)."); return
     configs = bench.configs_for(args)
+    model = _resolve_model(args)
     rows = []
     for task in tasks:
         task_dir = os.path.join(bench.bench_dir(), task)
         for label, levers in configs:
-            ladder = _make_ladder(args.model)
-            print(f"· {task}  [{label}]  {args.model} …", flush=True)
+            ladder = _make_ladder(model)
+            print(f"· {task}  [{label}]  {model} …", flush=True)
             try:
                 row = bench.run_task(task_dir, ladder, levers,
-                                     max_steps=args.max_steps, model=args.model)
+                                     max_steps=args.max_steps, model=model)
             except ForgeError as e:
                 print(f"  ✗ {e}", file=sys.stderr); continue
             verdict = {True: "PASS", False: "FAIL", None: "no-verdict"}[row["pass"]]
@@ -511,7 +562,7 @@ def cmd_passport(args):
 def main():
     ap = argparse.ArgumentParser(prog="forge")
     # default LOCAL LADDER comes from ~/.forge/config.json (written by `forge setup`)
-    ap.add_argument("--model", default=_default_model())
+    ap.add_argument("--model", default=None)   # None → resolve to config ladder; lets first-run detect "unconfigured"
     ap.add_argument("--dir", default=os.getcwd())
     ap.add_argument("--name", default=None)
     ap.add_argument("--verbose", action="store_true")
