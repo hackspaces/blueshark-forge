@@ -127,7 +127,50 @@ def _list(hw):
               + runs_cell + " " + paint(note, "dim") + star)
     print()
     print(paint("  ★ forge has run it   ·   run any of these:  forge models use <name>   ·   "
-                "RAM/RUNS are estimates.", "dim"))
+                "RAM/RUNS are estimates.   Scan the FULL catalog:  forge models --all", "dim"))
+
+
+def _scan(hw, refresh=False):
+    """`forge models --all` — run the fit-math on the whole downloadable catalog
+    (Ollama library + HuggingFace GGUF + MLX), not just the curated spread."""
+    from . import catalog
+    ram = hw.get("ram_gb") or 0
+    accel = _accelerated(hw)
+    chip = hw.get("chip") or hw.get("arch") or "?"
+    hwkind = "GPU / Metal (fast)" if accel else "CPU-only"
+    print(paint("forge models — scanning the downloadable catalog …", "bold"))
+
+    def prog(src, d, t):
+        print(paint(f"  … {src} {d}/{t}", "dim") + "        ", end="\r", flush=True)
+    try:
+        entries, cached = catalog.load_catalog(hw, refresh=refresh, on_progress=prog)
+    except Exception as e:
+        print(paint(f"  ✗ couldn't reach the catalog ({e}). Try again, or use `forge models`.", "red"))
+        return 1
+    print(" " * 48, end="\r")
+    srcs = sorted({e.get("source") for e in entries if e.get("source")})
+    print(paint(f"  {chip} · {ram or '?'}GB RAM · {hwkind}   ·   sources: {', '.join(srcs) or '—'}"
+                + ("   (cached)" if cached else ""), "dim"))
+    graded = [(e, registry.runs(e, ram, accel)) for e in entries]
+    fitting = [(e, v) for e, v in graded if v[0] != "won't fit"]
+    well = [e for e, v in graded if v[0] == "runs well"]
+    if well:
+        best = max(well, key=lambda e: e.get("params_b") or 0)
+        print(paint(f"  → runs well up to ~{_pnum(best.get('params_b') or 0)}B    e.g. {best['name']}", "green"))
+    print(paint(f"  → {len(fitting)} of {len(entries)} models fit this machine", "green" if fitting else "yellow"))
+    print()
+    print(paint(f"  {'MODEL':<46} {'PARAMS':>7}  {'ENGINE':<9} {'RUNS':<16} SOURCE", "dim"))
+    fitting.sort(key=lambda ev: -(ev[0].get("params_b") or 0))          # biggest-you-can-run first
+    CAP = 30
+    for e, (verdict, style) in fitting[:CAP]:
+        print(f"  {e['name'][:46]:<46} {_pnum(e.get('params_b') or 0) + 'B':>7}  {e['engine']:<9} "
+              + paint(f"{verdict:<16}", _RUN_STYLE.get(style, "dim")) + " " + paint(e.get("source", ""), "dim"))
+    if len(fitting) > CAP:
+        print(paint(f"  …and {len(fitting) - CAP} more that fit.", "dim"))
+    print()
+    print(paint("  Ollama models are one command:  forge models use <name>   ·   "
+                "sizes/runs are estimates.   Refresh:  forge models --all --refresh", "dim"))
+    return 0
 
 
 def _show(hw, name):
@@ -390,6 +433,8 @@ def cmd_models(args):
     hw = _machine()
     action = getattr(args, "action", None) or "list"
     if action == "list":
+        if getattr(args, "all", False):
+            return _scan(hw, refresh=getattr(args, "refresh", False))
         _list(hw)
         return 0
     name = getattr(args, "name", None)

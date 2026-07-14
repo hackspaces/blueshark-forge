@@ -582,6 +582,8 @@ def main():
     p_md = sub.add_parser("models", help="curated model catalog: recipes forge has actually run, checked against this machine")
     p_md.add_argument("action", nargs="?", default="list", choices=["list", "show", "use", "stop"])
     p_md.add_argument("name", nargs="?", help="entry name (for `show` / `use` / `stop`)")
+    p_md.add_argument("--all", action="store_true", help="scan the FULL downloadable catalog (Ollama + HF GGUF + MLX), not just the curated spread")
+    p_md.add_argument("--refresh", action="store_true", help="re-fetch the catalog cache (with --all)")
 
     p_setup = sub.add_parser("setup", help="detect hardware, choose an engine, pull/point at models, write config")
     p_setup.add_argument("--auto", action="store_true", help="no prompts (Ollama, RAM-sized ladder)")
