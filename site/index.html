@@ -3,167 +3,161 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>forge — run any model, locally</title>
-<meta name="description" content="A model-agnostic agentic runtime. Run any model locally, or a frontier model with your own key. The intelligence lives in the harness, not the weights.">
-<meta property="og:title" content="forge — run any model, locally">
-<meta property="og:description" content="A model-agnostic agentic runtime. The intelligence lives in the harness, not the weights.">
+<title>forge — run any model your machine can handle</title>
+<meta name="description" content="A model-agnostic agentic runtime. See what your machine can run and run it in one command — local, or a frontier model with your own key.">
+<meta property="og:title" content="forge — run any model your machine can handle">
+<meta property="og:description" content="See what your machine can run, and run it in one command.">
 <meta property="og:type" content="website">
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' fill='%23111'/%3E%3Ctext x='16' y='23' font-family='monospace' font-size='20' fill='%23fff' text-anchor='middle'%3Ef%3C/text%3E%3C/svg%3E">
 <style>
   :root{
     --bg:#ffffff; --ink:#111111; --muted:#666666; --faint:#8a8a8a; --line:#e2e2e2; --inline:#f4f4f4;
-    --inv-bg:#111111; --inv-ink:#f4f4f4; --inv-muted:#9a9a9a;
+    --inv-bg:#111111; --inv-ink:#f4f4f4; --inv-muted:#9a9a9a; --ok:#3c7a45;
   }
   @media (prefers-color-scheme:dark){
     :root{
       --bg:#0c0c0c; --ink:#ededed; --muted:#9a9a9a; --faint:#6d6d6d; --line:#242424; --inline:#181818;
-      --inv-bg:#ededed; --inv-ink:#0c0c0c; --inv-muted:#555555;
+      --inv-bg:#ededed; --inv-ink:#0c0c0c; --inv-muted:#555555; --ok:#5fb07e;
     }
   }
   *{box-sizing:border-box}
-  html{-webkit-text-size-adjust:100%}
+  html,body{height:100%; margin:0}
   body{
-    margin:0; background:var(--bg); color:var(--ink);
+    background:var(--bg); color:var(--ink); overflow:hidden;
     font-family:ui-monospace,"SF Mono","JetBrains Mono",Menlo,Consolas,"Liberation Mono",monospace;
-    font-size:15px; line-height:1.7; -webkit-font-smoothing:antialiased;
+    font-size:14px; line-height:1.6; -webkit-font-smoothing:antialiased;
+    display:flex; flex-direction:column;
   }
-  .wrap{max-width:74ch; margin:0 auto; padding:0 1.5rem}
-  a{color:inherit; text-decoration:underline; text-underline-offset:2px; text-decoration-thickness:1px}
+  a{color:inherit; text-decoration:underline; text-underline-offset:2px}
   a:hover{background:var(--ink); color:var(--bg); text-decoration:none}
-  hr{border:0; border-top:1px solid var(--line); margin:2.6rem 0}
   ::selection{background:var(--ink); color:var(--bg)}
   :focus-visible{outline:2px solid var(--ink); outline-offset:2px}
 
-  header{padding:4rem 0 0}
-  .logo{font-size:2.1rem; font-weight:700; letter-spacing:-.03em; line-height:1}
-  .logo b{background:var(--ink); color:var(--bg); padding:0 .18em}
-  .tag{color:var(--muted); margin:1rem 0 0; max-width:56ch}
+  /* top bar */
+  .top{display:flex; align-items:center; gap:1rem; padding:1rem 1.6rem; border-bottom:1px solid var(--line); flex-shrink:0}
+  .top .logo{font-weight:700; font-size:1.05rem; letter-spacing:-.02em}
+  .top .logo b{background:var(--ink); color:var(--bg); padding:0 .18em}
+  .top .sp{flex:1}
+  .top a{margin-left:1.3rem; color:var(--faint); font-size:.85rem}
+  .top a:hover{color:var(--bg)}
+
+  /* the one screen: a centered two-column split that fills the viewport */
+  main{flex:1; min-height:0; display:grid; place-items:center; padding:1.4rem 1.6rem}
+  .grid{width:100%; max-width:1040px; display:grid; grid-template-columns:1fr 1fr; gap:2.6rem; align-items:center}
+
+  h1{font-size:clamp(1.7rem,3.4vw,2.5rem); font-weight:700; line-height:1.08; letter-spacing:-.03em; margin:0}
+  h1 em{font-style:normal; text-decoration:underline; text-decoration-thickness:2px; text-underline-offset:3px}
+  .tag{color:var(--muted); margin:.9rem 0 0; max-width:44ch}
   .tag b{color:var(--ink); font-weight:700}
-  .links{margin:1.4rem 0 0; color:var(--faint)}
-  .links a{margin-right:1.4rem}
 
-  /* the install command — the one inverted block */
-  .install{margin:2.4rem 0 0}
-  .install .lbl{color:var(--faint); font-size:.82rem; margin:0 0 .5rem}
-  .cmd{display:flex; align-items:center; gap:1rem; background:var(--inv-bg); color:var(--inv-ink);
-    padding:.95rem 1.1rem; overflow-x:auto; border:1px solid var(--ink)}
-  .cmd code{white-space:nowrap; font-size:.95rem}
-  .cmd code .d{color:var(--inv-muted)} .cmd code .u{color:var(--inv-muted)}
-  .cmd button{margin-left:auto; flex-shrink:0; background:none; border:1px solid var(--inv-muted); color:var(--inv-muted);
-    font:inherit; font-size:.78rem; padding:.25rem .6rem; cursor:pointer}
-  .cmd button:hover{color:var(--inv-bg); background:var(--inv-ink); border-color:var(--inv-ink)}
-  .install .note{color:var(--faint); font-size:.82rem; margin:.6rem 0 0}
-  .install .note code{background:var(--inline); padding:.05em .35em}
+  .cmd{margin:1.5rem 0 0}
+  .cmd .lbl{color:var(--faint); font-size:.78rem; margin:0 0 .45rem}
+  .cmd .box{display:flex; align-items:center; gap:.9rem; background:var(--inv-bg); color:var(--inv-ink); padding:.85rem 1rem; overflow-x:auto}
+  .cmd code{white-space:nowrap; font-size:.9rem} .cmd code .u{color:var(--inv-muted)}
+  .cmd button{margin-left:auto; flex-shrink:0; background:none; border:1px solid var(--inv-muted); color:var(--inv-muted); font:inherit; font-size:.74rem; padding:.22rem .55rem; cursor:pointer}
+  .cmd button:hover{background:var(--inv-ink); color:var(--inv-bg)}
+  .cmd .note{color:var(--faint); font-size:.78rem; margin:.5rem 0 0}
+  .cmd .note code{background:var(--inline); padding:.05em .3em}
 
-  h2{font-size:1rem; font-weight:700; margin:0 0 1rem; letter-spacing:0}
-  h2::before{content:"## "; color:var(--faint)}
-  p{margin:0 0 1rem; color:var(--muted)} p.body{color:var(--ink)}
-  code.inl{background:var(--inline); padding:.05em .35em}
-  b{color:var(--ink)}
-
-  ul{list-style:none; margin:0; padding:0}
-  ul li{padding-left:1.6rem; position:relative; margin-bottom:1rem; color:var(--muted)}
+  ul{list-style:none; margin:1.5rem 0 0; padding:0}
+  ul li{padding-left:1.5rem; position:relative; margin-bottom:.55rem; color:var(--muted); font-size:.9rem}
   ul li::before{content:"—"; position:absolute; left:0; color:var(--faint)}
   ul li b{color:var(--ink)}
 
-  /* catalog as a monospace table */
-  .table{margin-top:.3rem; overflow-x:auto}
-  table{border-collapse:collapse; width:100%; font-size:.9rem; white-space:nowrap}
-  th,td{text-align:left; padding:.45rem 1.4rem .45rem 0; border-bottom:1px solid var(--line)}
-  th{color:var(--faint); font-weight:400; border-bottom:1px solid var(--ink)}
-  td b{color:var(--ink)} td.tag{color:var(--muted)}
+  /* right: a terminal window showing `forge models` — the killer feature, live-looking */
+  .term{border:1px solid var(--ink); display:flex; flex-direction:column; min-width:0}
+  .term .bar{display:flex; align-items:center; gap:.4rem; padding:.55rem .75rem; border-bottom:1px solid var(--line)}
+  .term .bar .d{width:.6rem; height:.6rem; border-radius:50%; border:1px solid var(--faint)}
+  .term .bar .t{margin-left:.5rem; font-size:.72rem; color:var(--faint)}
+  .term .body{padding:.85rem 1rem; font-size:.8rem; line-height:1.75; overflow-x:auto}
+  .term .p{color:var(--faint)} .term .p::before{content:"$ "; color:var(--ink)}
+  .term .meta{color:var(--muted)}
+  .term .cap{color:var(--ok)}
+  .term table{border-collapse:collapse; width:100%; margin:.5rem 0; white-space:nowrap}
+  .term td{padding:.05rem 1.1rem .05rem 0}
+  .term td.m{color:var(--ink)} .term td.n{color:var(--faint)} .term td.r{color:var(--ok)}
+  .term .star{color:var(--ink)}
+  .term .more{color:var(--faint)}
 
-  ol{counter-reset:s; list-style:none; margin:.5rem 0 0; padding:0}
-  ol li{counter-increment:s; margin-bottom:1.1rem; color:var(--muted)}
-  ol li::before{content:counter(s,decimal-leading-zero) "  "; color:var(--faint)}
-  ol li b{color:var(--ink)}
-  ol li code{display:inline-block; background:var(--inline); padding:.05em .4em; margin-top:.15rem}
+  footer{flex-shrink:0; padding:.85rem 1.6rem; border-top:1px solid var(--line); color:var(--faint); font-size:.78rem;
+    display:flex; align-items:center; gap:1rem}
+  footer .sp{flex:1}
 
-  footer{padding:2rem 0 3.5rem; color:var(--faint); font-size:.85rem}
-  footer a{margin-right:1.4rem}
-  footer .note{margin-top:1rem}
+  /* if the screen is short or narrow, let it breathe / stack (fits the everyday desktop as one view) */
+  @media (max-width:820px), (max-height:600px){
+    body{overflow:auto}
+    .grid{grid-template-columns:1fr; gap:1.8rem}
+  }
 </style>
 </head>
 <body>
-<div class="wrap">
 
-  <header>
-    <div class="logo"><b>forge</b></div>
-    <p class="tag">A model-agnostic agentic runtime. Run any model — a local one on your own machine, or a frontier model with your own key. <b>The intelligence lives in the harness, not the weights.</b></p>
-    <p class="links">
-      <a href="https://github.com/hackspaces/blueshark-forge">github</a>
-      <a href="https://pypi.org/project/blueshark-forge/">pypi</a>
-      <a href="https://github.com/hackspaces/blueshark-forge/tree/main/docs/models">model reports</a>
-    </p>
-
-    <div class="install">
-      <p class="lbl"># install (macOS / Linux)</p>
-      <div class="cmd">
-        <code id="cmd"><span class="d">$</span> curl -fsSL <span class="u">https://forge.yourdomain.com/install.sh</span> | sh</code>
-        <button type="button" id="copy">copy</button>
-      </div>
-      <p class="note">Checks your setup, installs the <code>forge</code> CLI. Windows: <code>pip install blueshark-forge</code>.</p>
-    </div>
-  </header>
-
-  <hr>
-
-  <section>
-    <h2>what it is</h2>
-    <p class="body">forge drives a coding agent on whatever weights you point it at. The same agent, memory, verification, and tools work across any model — you swap the weights, not the harness. It's plain Python, stdlib-only, zero runtime dependencies.</p>
-    <ul>
-      <li><b>Model-agnostic.</b> Local models via Ollama or llama.cpp, or frontier models (OpenAI, Anthropic) with your own key.</li>
-      <li><b>Harness-lift.</b> Memory, verification, escalation, and constrained output make a small model genuinely useful — and forge measures the base-vs-harness gain, so it's evidence, not a claim.</li>
-      <li><b>Local &amp; private.</b> Runs on your machine. Your files never leave it. No account, no server, works offline.</li>
-    </ul>
-  </section>
-
-  <hr>
-
-  <section>
-    <h2>the catalog</h2>
-    <p>Pick a model — <code class="inl">forge models</code> checks each recipe against your machine; <code class="inl">forge models use &lt;name&gt;</code> provisions it end to end.</p>
-    <div class="table">
-      <table>
-        <thead><tr><th>model</th><th>arch</th><th>engine</th><th>runs</th></tr></thead>
-        <tbody>
-          <tr><td><b>sarvam-30b</b></td><td>sarvam_moe</td><td>llama.cpp</td><td class="tag">local</td></tr>
-          <tr><td><b>phi-2</b></td><td>2.7B dense</td><td>ollama</td><td class="tag">local</td></tr>
-          <tr><td><b>bitnet-b1.58</b></td><td>1-bit</td><td>bitnet.cpp</td><td class="tag">local</td></tr>
-          <tr><td><b>gpt-class</b></td><td>frontier</td><td>openai</td><td class="tag">your key</td></tr>
-          <tr><td><b>claude-class</b></td><td>frontier</td><td>anthropic</td><td class="tag">your key</td></tr>
-        </tbody>
-      </table>
-    </div>
-  </section>
-
-  <hr>
-
-  <section>
-    <h2>from nothing to an agent</h2>
-    <ol>
-      <li><b>Install.</b>  <code>curl -fsSL …/install.sh | sh</code></li>
-      <li><b>Pick a model.</b>  <code>forge models use phi-2</code></li>
-      <li><b>Run.</b>  <code>forge run "fix the failing test"</code></li>
-    </ol>
-  </section>
-
-  <hr>
-
-  <footer>
+  <div class="top">
+    <span class="logo"><b>forge</b></span>
+    <span class="sp"></span>
     <a href="https://github.com/hackspaces/blueshark-forge">github</a>
     <a href="https://pypi.org/project/blueshark-forge/">pypi</a>
-    <a href="https://github.com/hackspaces/blueshark-forge/tree/main/docs/models">model reports</a>
-    <p class="note">model-agnostic agentic runtime · stdlib-only, zero runtime deps · MIT</p>
-  </footer>
+    <a href="https://github.com/hackspaces/blueshark-forge/tree/main/docs/models">reports</a>
+  </div>
 
-</div>
+  <main>
+    <div class="grid">
+
+      <section>
+        <h1>Run any model your machine can <em>handle</em>.</h1>
+        <p class="tag">A model-agnostic agentic runtime. See what your computer can actually run — and run it in one command. Local, or a frontier model with your own key. <b>The intelligence is in the harness, not the weights.</b></p>
+
+        <div class="cmd">
+          <p class="lbl"># install · macOS / Linux</p>
+          <div class="box">
+            <code id="cmd">curl -fsSL <span class="u">https://forge.yourdomain.com/install.sh</span> | sh</code>
+            <button type="button" id="copy">copy</button>
+          </div>
+          <p class="note">Windows: <code>pip install blueshark-forge</code></p>
+        </div>
+
+        <ul>
+          <li><b>Model-agnostic</b> — Ollama, llama.cpp, MLX, or OpenAI / Anthropic with your key.</li>
+          <li><b>Fits your hardware</b> — laptop, Apple Silicon, or a multi-GPU datacenter.</li>
+          <li><b>Local &amp; private</b> — runs on your machine, files never leave. stdlib-only.</li>
+        </ul>
+      </section>
+
+      <section>
+        <div class="term">
+          <div class="bar"><span class="d"></span><span class="d"></span><span class="d"></span><span class="t">forge — what can I run?</span></div>
+          <div class="body">
+            <div class="p">forge models</div>
+            <div class="meta">Apple M-series · 48GB · GPU / Metal</div>
+            <div class="cap">→ runs well up to ~30B</div>
+            <table>
+              <tr><td class="m">phi-2</td><td class="n">2.7B</td><td class="r">runs well</td></tr>
+              <tr><td class="m">qwen2.5-coder</td><td class="n">7B</td><td class="r">runs well</td></tr>
+              <tr><td class="m">llama3.1</td><td class="n">8B</td><td class="r">runs well</td></tr>
+              <tr><td class="m">gemma2</td><td class="n">27B</td><td class="r">runs well</td></tr>
+              <tr><td class="m">sarvam-30b <span class="star">★</span></td><td class="n">30B</td><td class="r">runs well</td></tr>
+            </table>
+            <div class="more"># …466 more via `forge models --all`</div>
+            <div class="p" style="margin-top:.5rem">forge models use phi-2</div>
+            <div class="meta">ready → forge run &quot;fix the failing test&quot;</div>
+          </div>
+        </div>
+      </section>
+
+    </div>
+  </main>
+
+  <footer>
+    <span>model-agnostic agentic runtime · stdlib-only, zero runtime deps · MIT</span>
+    <span class="sp"></span>
+    <span>★ forge has run it end-to-end</span>
+  </footer>
 
 <script>
   (function(){
     var b=document.getElementById('copy'), c=document.getElementById('cmd');
     if(b&&c) b.addEventListener('click',function(){
-      var t=c.innerText.replace(/^\$\s*/,'').trim();
+      var t=c.innerText.trim();
       if(navigator.clipboard) navigator.clipboard.writeText(t).then(function(){ b.textContent='copied'; setTimeout(function(){b.textContent='copy';},1400); });
     });
   })();
