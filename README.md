@@ -13,16 +13,24 @@ Not tied to any vendor. Runs on your machine, on your models.
 
 ## Install
 
-**Requirements:** Python 3.10+ and an inference engine (Ollama is the easy default).
+**One line** (macOS / Linux) — checks your environment and installs the `forge` CLI:
 
 ```bash
-# 1. install forge
-pipx install blueshark-forge          # recommended (isolated); or: pip install blueshark-forge
-
-# 2. install an engine to run models locally — Ollama is the simplest
-#    macOS/Linux:  https://ollama.com  (download, then it runs in the background)
-#    check it's up:  ollama --version
+curl -fsSL https://raw.githubusercontent.com/hackspaces/blueshark-forge/main/site/install.sh | sh
 ```
+
+<sub>Prefer to see it first? Append `FORGE_INSTALL_DRY_RUN=1` before `sh` to check your setup without installing. Once the [landing site](site/) is on a domain, this becomes the cleaner `curl -fsSL forge.<domain>/install.sh | sh`.</sub>
+
+**Or by hand** — requires Python 3.10+:
+
+```bash
+pipx install blueshark-forge          # recommended (isolated); or: pip install blueshark-forge
+```
+
+**An engine is optional** — only local models need one. Install [Ollama](https://ollama.com) for the
+simplest local setup, or bring a frontier model with your own key (OpenAI / Anthropic). forge drives any of them.
+
+<sub>Windows: `pip install blueshark-forge` (a native installer is on the roadmap).</sub>
 
 ## Set up (once per machine)
 
