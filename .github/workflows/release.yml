@@ -1,0 +1,83 @@
+name: release
+
+# One-click release. Run this from the Actions tab (or:
+#   gh workflow run release.yml -f bump=minor -f summary="..."
+# ) and it does the manual half of a release for you: compute + bump the version,
+# keep SECURITY.md's supported-versions table in sync, write the release notes from
+# the commits since the last tag, then commit + tag + push. The tag push triggers
+# publish.yml, which runs the tests, proves the tag matches the code, builds, and
+# publishes to PyPI + creates the GitHub Release.
+#
+# ONE-TIME SETUP: add a repo secret RELEASE_PAT (a fine-grained PAT with
+# contents:write). GitHub deliberately does NOT let a workflow's default token
+# trigger another workflow, so without the PAT the tag lands but publish.yml won't
+# fire (push the tag yourself, or re-push it, to ship). See RELEASING.md.
+
+on:
+  workflow_dispatch:
+    inputs:
+      bump:
+        description: "Version bump (auto = infer from commits: feat→minor, fix→patch, breaking→major)"
+        type: choice
+        options: [auto, patch, minor, major]
+        default: auto
+      summary:
+        description: "One-line release summary (optional; becomes the release title suffix)"
+        type: string
+        default: ""
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          fetch-depth: 0        # full history + tags — notes come from commits since the last tag
+          # the PAT (if set) makes the tag push trigger publish.yml; falls back to the
+          # default token so the bump/tag still land even before the secret is configured.
+          token: ${{ secrets.RELEASE_PAT || github.token }}
+
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1  # v6.3.0
+        with:
+          python-version: "3.12"
+
+      - name: Refuse to release a dirty or non-advancing tree
+        run: |
+          # main must be clean and the computed tag must not already exist.
+          git diff --quiet || { echo "::error::working tree not clean"; exit 1; }
+
+      - name: Prepare the release (bump version, sync SECURITY.md, write notes)
+        id: prep
+        run: |
+          version=$(python .github/scripts/prep_release.py "${{ inputs.bump }}" "${{ inputs.summary }}")
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "Prepared v$version"
+          if git rev-parse "v$version" >/dev/null 2>&1; then
+            echo "::error::tag v$version already exists — bump differently"; exit 1
+          fi
+
+      - name: Commit, tag, and push
+        env:
+          VERSION: ${{ steps.prep.outputs.version }}
+        run: |
+          git config user.name  "forge-release[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add forge/__init__.py SECURITY.md
+          # the release notes file is a build artifact of prep — not committed
+          git commit --file .github/RELEASE_NOTES.md
+          git tag "v${VERSION}"
+          git push origin HEAD:main "v${VERSION}"
+
+      - name: Summary
+        run: |
+          echo "### Released v${{ steps.prep.outputs.version }} :rocket:" >> "$GITHUB_STEP_SUMMARY"
+          echo "Tag pushed. If RELEASE_PAT is set, publish.yml is now shipping it to PyPI + GitHub Releases." >> "$GITHUB_STEP_SUMMARY"
+          echo "If not, push the tag manually to trigger publish: \`git push origin v${{ steps.prep.outputs.version }} --force\`" >> "$GITHUB_STEP_SUMMARY"

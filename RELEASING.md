@@ -1,10 +1,40 @@
 # Releasing forge
 
-Releasing is **one push of a version tag**. Everything else — tests, coherence
-checks, the PyPI upload, and the GitHub Release — is automated by
-`.github/workflows/publish.yml`, which triggers on any `v*` tag.
+There are two ways to release, both fully automated after the trigger:
 
-## Cut a release
+- **One click** (recommended) — run the `release` workflow. It does the manual
+  half for you: computes + bumps the version, keeps `SECURITY.md` in sync, writes
+  the notes from the commits since the last tag, then commits + tags + pushes.
+- **By hand** — bump `__version__`, write the `release:` commit, push the tag.
+
+Either way the `v*` tag triggers `publish.yml`, which runs the tests, proves the
+tag matches the code, builds, and publishes to PyPI + creates the GitHub Release.
+
+## One-click release (the `release` workflow)
+
+From the **Actions → release → Run workflow** button (or `gh workflow run
+release.yml -f bump=minor -f summary="..."`):
+
+1. Pick a `bump`: `auto` (infer from commits — `feat` → minor, `fix` → patch,
+   a breaking change → major), or force `patch` / `minor` / `major`.
+2. Optionally give a one-line `summary` (becomes the release title suffix).
+
+`.github/scripts/prep_release.py` then bumps `forge/__init__.py`, advances the
+`SECURITY.md` supported-versions table to the new minor line, and renders the
+`release:` commit notes from `git log <last-tag>..HEAD` (grouped by
+`feat`/`fix`/`docs`). The workflow commits, tags, and pushes — and the tag
+triggers `publish.yml`.
+
+> **One-time setup:** add a repo secret **`RELEASE_PAT`** — a fine-grained PAT
+> with **contents: write**. GitHub deliberately does not let a workflow's default
+> token trigger another workflow, so without the PAT the release commit + tag are
+> pushed but `publish.yml` won't fire. Push the tag yourself to ship
+> (`git push origin vX.Y.Z --force`), or add the secret so it's fully hands-off.
+
+The prep logic is unit-tested in `tests/test_prep_release.py` (version math, bump
+inference, `SECURITY.md` sync, notes rendering) — no need to trust the YAML.
+
+## Cut a release by hand
 
 1. Bump the version in `forge/__init__.py`:
 
