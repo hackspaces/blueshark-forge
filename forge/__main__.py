@@ -579,6 +579,10 @@ def main():
     p_pp.add_argument("model", nargs="?", help="a single model name (default: every model in the configured ladder)")
     p_pp.add_argument("--probe", action="store_true", help="run the active probe now and (re)write the passport(s)")
 
+    p_md = sub.add_parser("models", help="curated model catalog: recipes forge has actually run, checked against this machine")
+    p_md.add_argument("action", nargs="?", default="list", choices=["list", "show"])
+    p_md.add_argument("name", nargs="?", help="entry name (for `show`)")
+
     p_setup = sub.add_parser("setup", help="detect hardware, choose an engine, pull/point at models, write config")
     p_setup.add_argument("--auto", action="store_true", help="no prompts (Ollama, RAM-sized ladder)")
     p_setup.add_argument("--engine", help="ollama | vllm | llamacpp | mlx | lmstudio | tgi | sglang | openai")
@@ -587,10 +591,11 @@ def main():
     p_setup.add_argument("--models", help="comma-separated model names, cheap→strong (for non-ollama engines)")
 
     args = ap.parse_args()
+    from .models_cmd import cmd_models
     dispatch = {"run": cmd_run, "status": cmd_status, "send": cmd_send, "up": cmd_up,
                 "down": cmd_down, "receipts": cmd_receipts, "learnings": cmd_learnings,
                 "forget": cmd_forget, "trace": cmd_trace, "corpus": cmd_corpus, "export": cmd_export, "bench": cmd_bench, "replay": cmd_replay,
-                "passport": cmd_passport}
+                "passport": cmd_passport, "models": cmd_models}
     try:
         if args.cmd == "setup":
             from . import setup as setupmod
