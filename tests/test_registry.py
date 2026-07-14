@@ -56,6 +56,41 @@ class TestFit(unittest.TestCase):
         self.assertTrue(REG.fits(REG.get("bitnet-b1.58-2b"), 8))
 
 
+class TestRunsAndCeiling(unittest.TestCase):
+    """The 'what can this machine run' logic: fit + speed by hardware class."""
+
+    def test_runs_verdicts(self):
+        big = REG.get("llama3.1:70b")          # 70B, needs 48GB
+        mid = REG.get("qwen2.5-coder:7b")      # 7B, needs 8GB
+        small = REG.get("llama3.2:3b")         # 3B, needs 5GB
+        # won't fit — RAM too small (regardless of hardware)
+        self.assertEqual(REG.runs(big, 8, True)[0], "won't fit")
+        # fits + accelerated → runs well even for big
+        self.assertEqual(REG.runs(big, 48, True)[0], "runs well")
+        # fits + CPU-only + 7B → usable but slow
+        self.assertEqual(REG.runs(mid, 8, False)[0], "usable · slower")
+        # fits + CPU-only + small → runs well
+        self.assertEqual(REG.runs(small, 8, False)[0], "runs well")
+        # fits + GPU/Metal + 7B → runs well (accel beats the CPU speed cap)
+        self.assertEqual(REG.runs(mid, 16, True)[0], "runs well")
+
+    def test_ceiling_scales_with_machine(self):
+        cap_p, cap_name = REG.ceiling(48, True)                # 48GB Apple Silicon
+        self.assertGreaterEqual(cap_p, 30)                     # can run big models
+        # 8GB CPU-only: ceiling is a small model (~3B), not a 7B that would crawl
+        cap_p8, cap_name8 = REG.ceiling(8, False)
+        self.assertLessEqual(cap_p8, 3.5)
+        self.assertIsNotNone(cap_name8)
+        # 1GB: essentially nothing runs well
+        self.assertEqual(REG.ceiling(1, False), (0, None))
+
+    def test_catalog_spans_a_real_range(self):
+        params = sorted(m.get("params_b") or 0 for m in REG.MODELS)
+        self.assertLessEqual(params[0], 1)                     # something tiny
+        self.assertGreaterEqual(params[-1], 30)                # something big
+        self.assertGreater(len(REG.MODELS), 10)                # a real spread, not 3
+
+
 class TestRunbook(unittest.TestCase):
     def test_sarvam_runbook_reproduces_the_verified_recipe(self):
         text = "\n".join(REG.runbook(REG.get("sarvam-30b")))
