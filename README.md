@@ -16,10 +16,10 @@ Not tied to any vendor. Runs on your machine, on your models.
 **One line** (macOS / Linux) — checks your environment and installs the `forge` CLI:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/hackspaces/blueshark-forge/main/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/hackspaces/blueshark-forge/main/site/install.sh | sh
 ```
 
-<sub>Prefer to see it first? `curl -fsSL …/install.sh | FORGE_INSTALL_DRY_RUN=1 sh` checks your setup without installing.</sub>
+<sub>Prefer to see it first? Append `FORGE_INSTALL_DRY_RUN=1` before `sh` to check your setup without installing. Once the [landing site](site/) is on a domain, this becomes the cleaner `curl -fsSL forge.<domain>/install.sh | sh`.</sub>
 
 **Or by hand** — requires Python 3.10+:
 
