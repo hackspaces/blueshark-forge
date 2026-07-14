@@ -3,220 +3,168 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<meta name="description" content="forge — a model-agnostic agentic runtime. Run any model locally, or a frontier model with your own key.">
+<title>forge — run any model, locally</title>
+<meta name="description" content="A model-agnostic agentic runtime. Run any model locally, or a frontier model with your own key. The intelligence lives in the harness, not the weights.">
 <meta property="og:title" content="forge — run any model, locally">
 <meta property="og:description" content="A model-agnostic agentic runtime. The intelligence lives in the harness, not the weights.">
 <meta property="og:type" content="website">
-<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Ccircle cx='16' cy='16' r='13' fill='%23C8901C'/%3E%3C/svg%3E">
-<title>forge — run any model, locally</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' fill='%23111'/%3E%3Ctext x='16' y='23' font-family='monospace' font-size='20' fill='%23fff' text-anchor='middle'%3Ef%3C/text%3E%3C/svg%3E">
 <style>
   :root{
-    --bg:#FFFFFF; --inset:#F6F7F8; --panel:#FBFAF7;
-    --ink:#1F2227; --body:#43474D; --muted:#82878E; --label:#9AA0A8; --faint:#AEB3B9;
-    --line:#E4E6E9; --line-soft:#EEF0F1;
-    --gold:#C8901C; --gold-deep:#B07C12; --gold-wash:#FBF4E6;
-    --good:#3E8E63;
-    --term:#17140E; --term-ink:#ECE4D6; --term-soft:#9A927F;
-    --sans:"Geist",-apple-system,"SF Pro Text",system-ui,"Segoe UI",Roboto,sans-serif;
-    --mono:"Geist Mono",ui-monospace,"SF Mono","Menlo",monospace;
-    --shadow:0 1px 2px rgba(31,34,39,.05), 0 22px 60px rgba(31,34,39,.10);
+    --bg:#ffffff; --ink:#111111; --muted:#666666; --faint:#8a8a8a; --line:#e2e2e2; --inline:#f4f4f4;
+    --inv-bg:#111111; --inv-ink:#f4f4f4; --inv-muted:#9a9a9a;
   }
   @media (prefers-color-scheme:dark){
     :root{
-      --bg:#141210; --inset:#1D1B17; --panel:#1A1814;
-      --ink:#F1EEE7; --body:#C7C3B9; --muted:#8C877B; --label:#736E63; --faint:#5C584F;
-      --line:#2A2720; --line-soft:#221F19;
-      --gold:#E0A93B; --gold-deep:#C8901C; --gold-wash:rgba(224,169,59,.10); --good:#5FB07E;
-      --term:#0E0C08; --term-ink:#ECE4D6; --term-soft:#8E8674;
-      --shadow:0 1px 2px rgba(0,0,0,.4), 0 22px 60px rgba(0,0,0,.44);
+      --bg:#0c0c0c; --ink:#ededed; --muted:#9a9a9a; --faint:#6d6d6d; --line:#242424; --inline:#181818;
+      --inv-bg:#ededed; --inv-ink:#0c0c0c; --inv-muted:#555555;
     }
   }
-  :root[data-theme="light"]{
-    --bg:#FFFFFF; --inset:#F6F7F8; --panel:#FBFAF7;
-    --ink:#1F2227; --body:#43474D; --muted:#82878E; --label:#9AA0A8; --faint:#AEB3B9;
-    --line:#E4E6E9; --line-soft:#EEF0F1; --gold:#C8901C; --gold-deep:#B07C12; --gold-wash:#FBF4E6; --good:#3E8E63;
-    --term:#17140E; --term-ink:#ECE4D6; --term-soft:#9A927F;
-    --shadow:0 1px 2px rgba(31,34,39,.05), 0 22px 60px rgba(31,34,39,.10);
-  }
-  :root[data-theme="dark"]{
-    --bg:#141210; --inset:#1D1B17; --panel:#1A1814;
-    --ink:#F1EEE7; --body:#C7C3B9; --muted:#8C877B; --label:#736E63; --faint:#5C584F;
-    --line:#2A2720; --line-soft:#221F19; --gold:#E0A93B; --gold-deep:#C8901C; --gold-wash:rgba(224,169,59,.10); --good:#5FB07E;
-    --term:#0E0C08; --term-ink:#ECE4D6; --term-soft:#8E8674;
-    --shadow:0 1px 2px rgba(0,0,0,.4), 0 22px 60px rgba(0,0,0,.44);
-  }
-
   *{box-sizing:border-box}
-  body{margin:0; background:var(--bg); color:var(--body); font-family:var(--sans);
-    font-size:16px; line-height:1.6; -webkit-font-smoothing:antialiased; text-rendering:optimizeLegibility}
-  a{color:var(--gold-deep); text-decoration:none} a:hover{color:var(--gold)}
-  .mono{font-family:var(--mono)}
-  :focus-visible{outline:2px solid var(--gold); outline-offset:3px; border-radius:5px}
-  .wrap{max-width:960px; margin:0 auto; padding:0 1.5rem}
-  .eyebrow{font-family:var(--mono); font-size:.72rem; font-weight:600; letter-spacing:.16em; text-transform:uppercase; color:var(--gold)}
+  html{-webkit-text-size-adjust:100%}
+  body{
+    margin:0; background:var(--bg); color:var(--ink);
+    font-family:ui-monospace,"SF Mono","JetBrains Mono",Menlo,Consolas,"Liberation Mono",monospace;
+    font-size:15px; line-height:1.7; -webkit-font-smoothing:antialiased;
+  }
+  .wrap{max-width:74ch; margin:0 auto; padding:0 1.5rem}
+  a{color:inherit; text-decoration:underline; text-underline-offset:2px; text-decoration-thickness:1px}
+  a:hover{background:var(--ink); color:var(--bg); text-decoration:none}
+  hr{border:0; border-top:1px solid var(--line); margin:2.6rem 0}
+  ::selection{background:var(--ink); color:var(--bg)}
+  :focus-visible{outline:2px solid var(--ink); outline-offset:2px}
 
-  /* nav */
-  nav{border-bottom:1px solid var(--line-soft)}
-  nav .wrap{display:flex; align-items:center; gap:.9rem; padding-top:1.1rem; padding-bottom:1.1rem}
-  nav .mk{color:var(--gold); font-size:1.05rem}
-  nav .nm{font-weight:650; font-size:1.1rem; letter-spacing:-.02em; color:var(--ink)}
-  nav .sp{flex:1}
-  nav a.n{color:var(--muted); font-size:.9rem; font-weight:550} nav a.n:hover{color:var(--ink)}
+  header{padding:4rem 0 0}
+  .logo{font-size:2.1rem; font-weight:700; letter-spacing:-.03em; line-height:1}
+  .logo b{background:var(--ink); color:var(--bg); padding:0 .18em}
+  .tag{color:var(--muted); margin:1rem 0 0; max-width:56ch}
+  .tag b{color:var(--ink); font-weight:700}
+  .links{margin:1.4rem 0 0; color:var(--faint)}
+  .links a{margin-right:1.4rem}
 
-  /* hero */
-  header{padding:5rem 0 3.5rem; border-bottom:1px solid var(--line-soft)}
-  h1{font-size:clamp(2.5rem,7vw,4.4rem); font-weight:820; line-height:1.02; letter-spacing:-.04em;
-    color:var(--ink); margin:.6rem 0 0; text-wrap:balance; max-width:15ch}
-  h1 .g{background:linear-gradient(96deg,var(--gold-deep),var(--gold) 70%); -webkit-background-clip:text; background-clip:text; color:transparent}
-  .lede{font-size:clamp(1.1rem,2.3vw,1.32rem); line-height:1.5; color:var(--ink-soft,var(--body)); max-width:46ch; margin:1.4rem 0 0}
-  .lede b{color:var(--ink); font-weight:600}
+  /* the install command — the one inverted block */
+  .install{margin:2.4rem 0 0}
+  .install .lbl{color:var(--faint); font-size:.82rem; margin:0 0 .5rem}
+  .cmd{display:flex; align-items:center; gap:1rem; background:var(--inv-bg); color:var(--inv-ink);
+    padding:.95rem 1.1rem; overflow-x:auto; border:1px solid var(--ink)}
+  .cmd code{white-space:nowrap; font-size:.95rem}
+  .cmd code .d{color:var(--inv-muted)} .cmd code .u{color:var(--inv-muted)}
+  .cmd button{margin-left:auto; flex-shrink:0; background:none; border:1px solid var(--inv-muted); color:var(--inv-muted);
+    font:inherit; font-size:.78rem; padding:.25rem .6rem; cursor:pointer}
+  .cmd button:hover{color:var(--inv-bg); background:var(--inv-ink); border-color:var(--inv-ink)}
+  .install .note{color:var(--faint); font-size:.82rem; margin:.6rem 0 0}
+  .install .note code{background:var(--inline); padding:.05em .35em}
 
-  /* install command — the centerpiece */
-  .cmd{margin:2.2rem 0 0; max-width:640px}
-  .cmd .box{display:flex; align-items:center; gap:.75rem; background:var(--term); border-radius:13px;
-    padding:1rem 1.1rem; box-shadow:var(--shadow); overflow-x:auto}
-  .cmd .box .p{color:var(--gold); font-family:var(--mono); font-weight:700; flex-shrink:0}
-  .cmd .box code{font-family:var(--mono); font-size:.92rem; color:var(--term-ink); white-space:nowrap}
-  .cmd .box code .u{color:var(--term-soft)}
-  .cmd .box .copy{margin-left:auto; flex-shrink:0; border:1px solid rgba(255,255,255,.14); color:var(--term-soft);
-    background:none; border-radius:8px; padding:.35rem .6rem; font-size:.72rem; font-family:var(--mono); cursor:pointer}
-  .cmd .box .copy:hover{color:var(--term-ink); border-color:rgba(255,255,255,.3)}
-  .cmd .sub{margin:.7rem .2rem 0; font-size:.82rem; color:var(--muted)}
-  .cmd .sub .mono{color:var(--body)}
-  .cta{display:flex; gap:.6rem; flex-wrap:wrap; margin-top:1.5rem}
-  .btn{border-radius:10px; padding:.7rem 1.1rem; font-size:.9rem; font-weight:600}
-  .btn.primary{background:var(--ink); color:var(--bg)}
-  .btn.primary:hover{opacity:.9}
-  @media (prefers-color-scheme:dark){ .btn.primary{color:#141210} } :root[data-theme="dark"] .btn.primary{color:#141210}
-  .btn.ghost{border:1px solid var(--line); color:var(--ink)} .btn.ghost:hover{background:var(--inset); border-color:var(--faint)}
+  h2{font-size:1rem; font-weight:700; margin:0 0 1rem; letter-spacing:0}
+  h2::before{content:"## "; color:var(--faint)}
+  p{margin:0 0 1rem; color:var(--muted)} p.body{color:var(--ink)}
+  code.inl{background:var(--inline); padding:.05em .35em}
+  b{color:var(--ink)}
 
-  section{padding:3.4rem 0; border-bottom:1px solid var(--line-soft)}
-  h2{font-size:clamp(1.5rem,3.2vw,2rem); font-weight:750; letter-spacing:-.02em; color:var(--ink); margin:.6rem 0 0; text-wrap:balance}
-  .sub2{color:var(--muted); margin:.6rem 0 0; max-width:52ch}
+  ul{list-style:none; margin:0; padding:0}
+  ul li{padding-left:1.6rem; position:relative; margin-bottom:1rem; color:var(--muted)}
+  ul li::before{content:"—"; position:absolute; left:0; color:var(--faint)}
+  ul li b{color:var(--ink)}
 
-  /* three pillars */
-  .cols{display:grid; grid-template-columns:repeat(3,1fr); gap:1.6rem; margin-top:2rem}
-  @media (max-width:720px){ .cols{grid-template-columns:1fr; gap:1.3rem} }
-  .col h3{font-size:1.05rem; font-weight:700; color:var(--ink); margin:.2rem 0 .4rem; letter-spacing:-.01em}
-  .col h3 .d{display:inline-block; width:.5rem; height:.5rem; border-radius:2px; background:var(--gold); margin-right:.5rem; vertical-align:middle}
-  .col p{font-size:.95rem; color:var(--body); margin:0}
+  /* catalog as a monospace table */
+  .table{margin-top:.3rem; overflow-x:auto}
+  table{border-collapse:collapse; width:100%; font-size:.9rem; white-space:nowrap}
+  th,td{text-align:left; padding:.45rem 1.4rem .45rem 0; border-bottom:1px solid var(--line)}
+  th{color:var(--faint); font-weight:400; border-bottom:1px solid var(--ink)}
+  td b{color:var(--ink)} td.tag{color:var(--muted)}
 
-  /* run-any-model table */
-  .models{margin-top:1.8rem; border:1px solid var(--line); border-radius:12px; overflow:hidden}
-  .mrow{display:grid; grid-template-columns:1.3fr 1fr auto; gap:1rem; align-items:center; padding:.85rem 1.1rem; border-bottom:1px solid var(--line-soft); font-size:.92rem}
-  .mrow:last-child{border-bottom:0}
-  .mrow .nm{font-weight:600; color:var(--ink)} .mrow .nm .k{font-family:var(--mono); font-size:.72rem; color:var(--muted); font-weight:500; margin-left:.5rem}
-  .mrow .eng{font-family:var(--mono); font-size:.8rem; color:var(--muted)}
-  .mrow .tag{font-family:var(--mono); font-size:.68rem; letter-spacing:.04em; text-transform:uppercase; padding:.2rem .5rem; border-radius:999px; white-space:nowrap; justify-self:end}
-  .tag.local{color:var(--good); background:var(--gold-wash); background:rgba(62,142,99,.1)}
-  .tag.byo{color:var(--gold-deep); background:var(--gold-wash)}
+  ol{counter-reset:s; list-style:none; margin:.5rem 0 0; padding:0}
+  ol li{counter-increment:s; margin-bottom:1.1rem; color:var(--muted)}
+  ol li::before{content:counter(s,decimal-leading-zero) "  "; color:var(--faint)}
+  ol li b{color:var(--ink)}
+  ol li code{display:inline-block; background:var(--inline); padding:.05em .4em; margin-top:.15rem}
 
-  /* how it works */
-  .steps{display:grid; grid-template-columns:repeat(3,1fr); gap:1.4rem; margin-top:2rem; counter-reset:s}
-  @media (max-width:720px){ .steps{grid-template-columns:1fr} }
-  .step{padding-top:1rem; border-top:2px solid var(--gold)}
-  .step .n{counter-increment:s; font-family:var(--mono); font-size:.72rem; color:var(--gold); font-weight:600}
-  .step .n::before{content:"0" counter(s) " / "}
-  .step h4{font-size:1rem; color:var(--ink); margin:.3rem 0 .5rem; font-weight:650}
-  .step code{display:block; font-family:var(--mono); font-size:.82rem; color:var(--ink); background:var(--inset); border:1px solid var(--line-soft); border-radius:8px; padding:.55rem .7rem; overflow-x:auto}
-  .step p{font-size:.88rem; color:var(--muted); margin:.5rem 0 0}
-
-  footer{padding:2.6rem 0 3.4rem}
-  footer .wrap{display:flex; align-items:center; gap:1rem; flex-wrap:wrap}
-  footer .mk{color:var(--gold)} footer .nm{font-weight:650; color:var(--ink)}
-  footer .sp{flex:1}
-  footer a{color:var(--muted); font-size:.88rem; margin-left:1.1rem} footer a:hover{color:var(--ink)}
-  footer .note{width:100%; margin-top:1rem; font-size:.78rem; color:var(--faint)}
-
-  .proto{position:fixed; right:.7rem; bottom:.65rem; z-index:5; font-family:var(--mono); font-size:.62rem; color:var(--muted); background:var(--bg); border:1px solid var(--line); padding:.3rem .65rem; border-radius:999px}
-  @media (prefers-reduced-motion:reduce){ *{transition:none!important} }
+  footer{padding:2rem 0 3.5rem; color:var(--faint); font-size:.85rem}
+  footer a{margin-right:1.4rem}
+  footer .note{margin-top:1rem}
 </style>
 </head>
 <body>
-<nav><div class="wrap">
-  <span class="mk">✦</span><span class="nm">forge</span>
-  <span class="sp"></span>
-  <a class="n" href="https://github.com/hackspaces/blueshark-forge">GitHub</a>
-  <a class="n" href="https://pypi.org/project/blueshark-forge/">PyPI</a>
-</div></nav>
+<div class="wrap">
 
-<header><div class="wrap">
-  <p class="eyebrow">Model-agnostic agentic runtime</p>
-  <h1>Run <span class="g">any model</span>, locally.</h1>
-  <p class="lede">forge drives a coding agent on whatever weights you point it at — a local model on your own machine, or a frontier model with your own key. <b>The intelligence lives in the harness, not the weights.</b></p>
+  <header>
+    <div class="logo"><b>forge</b></div>
+    <p class="tag">A model-agnostic agentic runtime. Run any model — a local one on your own machine, or a frontier model with your own key. <b>The intelligence lives in the harness, not the weights.</b></p>
+    <p class="links">
+      <a href="https://github.com/hackspaces/blueshark-forge">github</a>
+      <a href="https://pypi.org/project/blueshark-forge/">pypi</a>
+      <a href="https://github.com/hackspaces/blueshark-forge/tree/main/docs/models">model reports</a>
+    </p>
 
-  <div class="cmd">
-    <div class="box">
-      <span class="p">$</span>
-      <code id="cmd">curl -fsSL <span class="u">https://forge.yourdomain.com/install.sh</span> | sh</code>
-      <button class="copy" type="button" id="copy">copy</button>
+    <div class="install">
+      <p class="lbl"># install (macOS / Linux)</p>
+      <div class="cmd">
+        <code id="cmd"><span class="d">$</span> curl -fsSL <span class="u">https://forge.yourdomain.com/install.sh</span> | sh</code>
+        <button type="button" id="copy">copy</button>
+      </div>
+      <p class="note">Checks your setup, installs the <code>forge</code> CLI. Windows: <code>pip install blueshark-forge</code>.</p>
     </div>
-    <p class="sub">macOS / Linux · one command, checks your setup, installs the <span class="mono">forge</span> CLI. Windows: <span class="mono">pip install blueshark-forge</span>.</p>
-  </div>
+  </header>
 
-  <div class="cta">
-    <a class="btn primary" href="https://github.com/hackspaces/blueshark-forge">Read the docs</a>
-    <a class="btn ghost" href="https://github.com/hackspaces/blueshark-forge/tree/main/docs/models">See the model reports</a>
-  </div>
-</div></header>
+  <hr>
 
-<section><div class="wrap">
-  <p class="eyebrow">Why forge</p>
-  <h2>One harness. Any model. Your machine.</h2>
-  <div class="cols">
-    <div class="col">
-      <h3><span class="d"></span>Model-agnostic</h3>
-      <p>Local models via Ollama or llama.cpp, or frontier models (OpenAI, Anthropic) with your own key. Same agent, same tools — swap the weights freely.</p>
+  <section>
+    <h2>what it is</h2>
+    <p class="body">forge drives a coding agent on whatever weights you point it at. The same agent, memory, verification, and tools work across any model — you swap the weights, not the harness. It's plain Python, stdlib-only, zero runtime dependencies.</p>
+    <ul>
+      <li><b>Model-agnostic.</b> Local models via Ollama or llama.cpp, or frontier models (OpenAI, Anthropic) with your own key.</li>
+      <li><b>Harness-lift.</b> Memory, verification, escalation, and constrained output make a small model genuinely useful — and forge measures the base-vs-harness gain, so it's evidence, not a claim.</li>
+      <li><b>Local &amp; private.</b> Runs on your machine. Your files never leave it. No account, no server, works offline.</li>
+    </ul>
+  </section>
+
+  <hr>
+
+  <section>
+    <h2>the catalog</h2>
+    <p>Pick a model — <code class="inl">forge models</code> checks each recipe against your machine; <code class="inl">forge models use &lt;name&gt;</code> provisions it end to end.</p>
+    <div class="table">
+      <table>
+        <thead><tr><th>model</th><th>arch</th><th>engine</th><th>runs</th></tr></thead>
+        <tbody>
+          <tr><td><b>sarvam-30b</b></td><td>sarvam_moe</td><td>llama.cpp</td><td class="tag">local</td></tr>
+          <tr><td><b>phi-2</b></td><td>2.7B dense</td><td>ollama</td><td class="tag">local</td></tr>
+          <tr><td><b>bitnet-b1.58</b></td><td>1-bit</td><td>bitnet.cpp</td><td class="tag">local</td></tr>
+          <tr><td><b>gpt-class</b></td><td>frontier</td><td>openai</td><td class="tag">your key</td></tr>
+          <tr><td><b>claude-class</b></td><td>frontier</td><td>anthropic</td><td class="tag">your key</td></tr>
+        </tbody>
+      </table>
     </div>
-    <div class="col">
-      <h3><span class="d"></span>Harness-lift</h3>
-      <p>Memory, verification, escalation, and constrained output make a small model genuinely useful. forge measures the base‑vs‑harness gain, so it's evidence, not a claim.</p>
-    </div>
-    <div class="col">
-      <h3><span class="d"></span>Local &amp; private</h3>
-      <p>Runs on your machine. Your files never leave it. No account, no server, works offline — and it's stdlib‑only, zero runtime dependencies.</p>
-    </div>
-  </div>
-</div></section>
+  </section>
 
-<section><div class="wrap">
-  <p class="eyebrow">The catalog</p>
-  <h2>Pick a model — forge figures out how to run it.</h2>
-  <p class="sub2"><span class="mono">forge models</span> checks each recipe against your machine; <span class="mono">forge models use &lt;name&gt;</span> provisions it end to end.</p>
-  <div class="models">
-    <div class="mrow"><span class="nm">sarvam-30b <span class="k">sarvam_moe MoE</span></span><span class="eng">llama.cpp</span><span class="tag local">local</span></div>
-    <div class="mrow"><span class="nm">phi-2 <span class="k">2.7B</span></span><span class="eng">ollama</span><span class="tag local">local</span></div>
-    <div class="mrow"><span class="nm">BitNet b1.58 <span class="k">1-bit</span></span><span class="eng">bitnet.cpp</span><span class="tag local">local</span></div>
-    <div class="mrow"><span class="nm">GPT-class <span class="k">frontier</span></span><span class="eng">openai</span><span class="tag byo">your key</span></div>
-    <div class="mrow"><span class="nm">Claude-class <span class="k">frontier</span></span><span class="eng">anthropic</span><span class="tag byo">your key</span></div>
-  </div>
-</div></section>
+  <hr>
 
-<section><div class="wrap">
-  <p class="eyebrow">In three steps</p>
-  <h2>From nothing to an agent.</h2>
-  <div class="steps">
-    <div class="step"><div class="n"></div><h4>Install</h4><code>curl -fsSL …/install.sh | sh</code><p>Finds Python, installs the CLI, checks your setup.</p></div>
-    <div class="step"><div class="n"></div><h4>Pick a model</h4><code>forge models use phi-2</code><p>Pulled, configured, smoke-tested — ready to run.</p></div>
-    <div class="step"><div class="n"></div><h4>Run</h4><code>forge run "fix the failing test"</code><p>The agent works in your directory, verified end to end.</p></div>
-  </div>
-</div></section>
+  <section>
+    <h2>from nothing to an agent</h2>
+    <ol>
+      <li><b>Install.</b>  <code>curl -fsSL …/install.sh | sh</code></li>
+      <li><b>Pick a model.</b>  <code>forge models use phi-2</code></li>
+      <li><b>Run.</b>  <code>forge run "fix the failing test"</code></li>
+    </ol>
+  </section>
 
-<footer><div class="wrap">
-  <span class="mk">✦</span><span class="nm">forge</span>
-  <span class="sp"></span>
-  <a href="https://github.com/hackspaces/blueshark-forge">GitHub</a>
-  <a href="https://pypi.org/project/blueshark-forge/">PyPI</a>
-  <a href="https://github.com/hackspaces/blueshark-forge/tree/main/docs/models">Model reports</a>
-  <p class="note">Model-agnostic agentic runtime · stdlib-only, zero runtime deps · MIT.</p>
-</div></footer>
+  <hr>
+
+  <footer>
+    <a href="https://github.com/hackspaces/blueshark-forge">github</a>
+    <a href="https://pypi.org/project/blueshark-forge/">pypi</a>
+    <a href="https://github.com/hackspaces/blueshark-forge/tree/main/docs/models">model reports</a>
+    <p class="note">model-agnostic agentic runtime · stdlib-only, zero runtime deps · MIT</p>
+  </footer>
+
+</div>
 
 <script>
   (function(){
     var b=document.getElementById('copy'), c=document.getElementById('cmd');
     if(b&&c) b.addEventListener('click',function(){
-      var t=c.innerText.trim();
-      if(navigator.clipboard){ navigator.clipboard.writeText(t).then(function(){ b.textContent='copied'; setTimeout(function(){b.textContent='copy';},1400); }); }
+      var t=c.innerText.replace(/^\$\s*/,'').trim();
+      if(navigator.clipboard) navigator.clipboard.writeText(t).then(function(){ b.textContent='copied'; setTimeout(function(){b.textContent='copy';},1400); });
     });
   })();
 </script>
