@@ -118,5 +118,64 @@ class TestEntrypoint(unittest.TestCase):
         self.assertRegex(forge.__version__, r"^\d+\.\d+\.\d+$")
 
 
+class TestFirstRun(unittest.TestCase):
+    """A fresh install (no config, no model chosen) must guide the user to
+    `forge models` instead of spinning up a chat/run against a model they never
+    installed. Stdlib, offline — no ladder is ever constructed on this path."""
+
+    def setUp(self):
+        # Neutralize the real ~/.forge and FORGE_MODEL for a clean fresh-install state.
+        self._exists, self._env = M.cfgmod.exists, os.environ.pop("FORGE_MODEL", None)
+        M.cfgmod.exists = lambda: False
+        # A tripwire: the first-run path must NOT build a ladder (that would hit a model).
+        self._ladder = M._make_ladder
+        M._make_ladder = lambda *a, **k: (_ for _ in ()).throw(
+            AssertionError("first-run must not construct a ladder"))
+
+    def tearDown(self):
+        M.cfgmod.exists, M._make_ladder = self._exists, self._ladder
+        if self._env is not None:
+            os.environ["FORGE_MODEL"] = self._env
+        else:
+            os.environ.pop("FORGE_MODEL", None)
+
+    def _ns(self, **kw):
+        import types
+        kw.setdefault("model", None)
+        return types.SimpleNamespace(**kw)
+
+    def test_truth_table(self):
+        self.assertTrue(M._first_run(self._ns()))                    # fresh install
+        self.assertFalse(M._first_run(self._ns(model="phi")))        # explicit --model
+        M.cfgmod.exists = lambda: True
+        self.assertFalse(M._first_run(self._ns()))                   # config written
+        M.cfgmod.exists = lambda: False
+        os.environ["FORGE_MODEL"] = "phi"
+        self.assertFalse(M._first_run(self._ns()))                   # env override
+
+    def test_run_exits_1_with_guidance(self):
+        err = io.StringIO()
+        orig = sys.stderr
+        sys.stderr = err
+        try:
+            with self.assertRaises(SystemExit) as cm:
+                M.cmd_run(self._ns(dir=".", max_steps=1))
+            self.assertEqual(cm.exception.code, 1)
+        finally:
+            sys.stderr = orig
+        self.assertIn("forge models", err.getvalue())
+
+    def test_bare_chat_shows_welcome_and_returns(self):
+        out = io.StringIO()
+        orig = sys.stdout
+        sys.stdout = out
+        try:
+            # returns cleanly (no ladder built, no REPL) — the tripwire would fire otherwise.
+            self.assertIsNone(M.cmd_chat(self._ns(name=None)))
+        finally:
+            sys.stdout = orig
+        self.assertIn("forge models", out.getvalue())
+
+
 if __name__ == "__main__":
     unittest.main()
