@@ -10,13 +10,16 @@ page and the one-line installer.
 2. **Root Directory** → `site`   ·   **Framework Preset** → *Other* (no build step).
 3. Deploy. Vercel then auto-redeploys on every push to `main` — the site is built
    from the repo, nothing to hand-upload.
-4. Add your domain under the project's **Domains**, then replace the install host in
-   `index.html` (`forge.yourdomain.com`) with it.
+4. Add your domain under the project's **Domains** (e.g. `topk1.com`).
 
-Once live, one origin does both jobs:
+`vercel.json` rewrites `/forge` and `/forge/*` back to the site root, so forge lives
+under a **path** and the domain root stays free for anything else:
 
-- `https://<your-domain>/` — the landing page
-- `curl -fsSL https://<your-domain>/install.sh | sh` — installs the `forge` CLI
+- `https://topk1.com/forge/` — the landing page
+- `curl -fsSL https://topk1.com/forge/install.sh | sh` — installs the `forge` CLI
+
+(The domain root `https://topk1.com/` and the bare `.vercel.app` URL still serve the
+page too — the rewrite only *adds* the `/forge` path.)
 
 ## Files
 

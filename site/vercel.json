@@ -1,0 +1,6 @@
+{
+  "rewrites": [
+    { "source": "/forge", "destination": "/index.html" },
+    { "source": "/forge/:path*", "destination": "/:path*" }
+  ]
+}
