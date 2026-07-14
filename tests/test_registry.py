@@ -137,14 +137,148 @@ class TestModelsUse(unittest.TestCase):
             self.assertEqual(self._use("phi-2"), 1)                  # honest failure, no config write
         self.assertFalse(os.path.exists(self.C.PATH))
 
-    def test_use_non_ollama_is_honest_not_faked(self):
-        # sarvam is llamacpp — turnkey not built yet; must hand over the runbook, rc=2, no config.
-        rc = self._use("sarvam-30b", hw={"ram_gb": 48, "arch": "arm64", "os": "Darwin"})
+    def test_use_bespoke_runtime_is_honest_not_faked(self):
+        # bitnet.cpp is a bespoke runtime forge can't auto-provision — it must hand
+        # over the runbook (rc=2) and write NO config, with zero side effects.
+        rc = self._use("bitnet-b1.58-2b", hw={"ram_gb": 16, "arch": "arm64", "os": "Darwin"})
         self.assertEqual(rc, 2)
         self.assertFalse(os.path.exists(self.C.PATH))
 
     def test_use_unknown_name(self):
         self.assertEqual(self._use("nope"), 1)
+
+
+class TestModelsUseLlamacpp(unittest.TestCase):
+    """`forge models use` — llama.cpp turnkey path, fully mocked (no server, no power)."""
+
+    def setUp(self):
+        import tempfile
+        from forge import config as C
+        self._orig_path = C.PATH
+        C.PATH = os.path.join(tempfile.mkdtemp(), "config.json")
+        self.C = C
+        self.hw = {"ram_gb": 48, "arch": "arm64", "os": "Darwin"}
+
+    def tearDown(self):
+        self.C.PATH = self._orig_path
+
+    def _use(self):
+        from forge import models_cmd as MC
+        return MC._use(self.hw, "sarvam-30b")
+
+    def test_happy_path_launches_and_writes_matched_ctx_config(self):
+        from forge import models_cmd as MC
+        with mock.patch.object(MC.shutil, "which", return_value="/usr/bin/llama-server"), \
+             mock.patch.object(MC, "_arch_missing", return_value=False), \
+             mock.patch.object(MC, "_ensure_gguf", return_value="/models/sarvam.gguf"), \
+             mock.patch.object(MC, "_launch_server", return_value=True), \
+             mock.patch.object(MC, "_wait_health", return_value=True):
+            rc = self._use()
+        self.assertEqual(rc, 0)
+        cfg = self.C.load()
+        self.assertEqual(cfg["engine"], "llamacpp")
+        self.assertEqual(cfg["base_url"], "http://127.0.0.1:8080/v1")
+        self.assertEqual(cfg["ladder"], ["sarvam-30b"])
+        self.assertEqual(cfg["remote_ctx"], 16384)          # ctx matched to the server
+
+    def test_missing_runtime_errors_without_config(self):
+        from forge import models_cmd as MC
+        with mock.patch.object(MC.shutil, "which", return_value=None):   # no llama-server, no brew
+            self.assertEqual(self._use(), 1)
+        self.assertFalse(os.path.exists(self.C.PATH))
+
+    def test_arch_absent_is_a_hard_stop(self):
+        from forge import models_cmd as MC
+        with mock.patch.object(MC.shutil, "which", return_value="/usr/bin/llama-server"), \
+             mock.patch.object(MC, "_arch_missing", return_value=True), \
+             mock.patch.object(MC, "_launch_server") as launch:
+            self.assertEqual(self._use(), 1)               # refuse — build lacks the arch
+            launch.assert_not_called()                     # never even tries to serve
+        self.assertFalse(os.path.exists(self.C.PATH))
+
+    def test_unhealthy_server_fails_before_config(self):
+        from forge import models_cmd as MC
+        with mock.patch.object(MC.shutil, "which", return_value="/usr/bin/llama-server"), \
+             mock.patch.object(MC, "_arch_missing", return_value=False), \
+             mock.patch.object(MC, "_ensure_gguf", return_value="/models/sarvam.gguf"), \
+             mock.patch.object(MC, "_launch_server", return_value=True), \
+             mock.patch.object(MC, "_wait_health", return_value=False):
+            self.assertEqual(self._use(), 1)
+        self.assertFalse(os.path.exists(self.C.PATH))
+
+    def test_arch_missing_verdicts(self):
+        from forge import models_cmd as MC
+        with mock.patch.object(MC, "_libllama_paths", return_value=[]):
+            self.assertIsNone(MC._arch_missing("sarvam-moe"))     # can't locate → None (warn)
+        with mock.patch.object(MC, "_libllama_paths", return_value=["/x/libllama.dylib"]), \
+             mock.patch.object(MC.subprocess, "run", return_value=mock.Mock(stdout="qwen2\nsarvam-moe\n")):
+            self.assertFalse(MC._arch_missing("sarvam-moe"))      # present
+        with mock.patch.object(MC, "_libllama_paths", return_value=["/x/libllama.dylib"]), \
+             mock.patch.object(MC.subprocess, "run", return_value=mock.Mock(stdout="qwen2\nllama\n")):
+            self.assertTrue(MC._arch_missing("sarvam-moe"))       # found libs, arch absent
+
+
+class TestModelsStop(unittest.TestCase):
+    def test_stop_kills_a_launched_server(self):
+        import tempfile
+        from forge import models_cmd as MC
+        srv = tempfile.mkdtemp()
+        with mock.patch.object(MC, "SERVERS", srv):
+            pidf, _ = MC._server_files("sarvam-30b")
+            with open(pidf, "w") as f:
+                f.write("4242")
+            with mock.patch.object(MC.os, "kill") as kill:
+                rc = MC._stop("sarvam-30b")
+        self.assertEqual(rc, 0)
+        kill.assert_called_once_with(4242, MC.signal.SIGTERM)
+        self.assertFalse(os.path.exists(pidf))               # pidfile cleaned up
+
+    def test_stop_ollama_is_a_noop(self):
+        from forge import models_cmd as MC
+        with mock.patch.object(MC.os, "kill") as kill:
+            self.assertEqual(MC._stop("phi-2"), 0)           # Ollama manages its own process
+            kill.assert_not_called()
+
+    def test_stop_with_no_server(self):
+        import tempfile
+        from forge import models_cmd as MC
+        with mock.patch.object(MC, "SERVERS", tempfile.mkdtemp()):
+            self.assertEqual(MC._stop("sarvam-30b"), 0)      # nothing to stop → clean no-op
+
+
+class TestRemoteCtxConfig(unittest.TestCase):
+    """The llama.cpp config is self-sufficient: context_window reads remote_ctx."""
+
+    def setUp(self):
+        import tempfile
+        from forge import config as C
+        self._orig = C.PATH
+        C.PATH = os.path.join(tempfile.mkdtemp(), "config.json")
+        self.C = C
+
+    def tearDown(self):
+        self.C.PATH = self._orig
+
+    def test_context_window_reads_config_remote_ctx(self):
+        from forge.backends import OpenAICompatBackend
+        self.C.save({"remote_ctx": 16384})
+        b = OpenAICompatBackend("m", "http://x/v1")
+        with mock.patch.dict(os.environ, {}, clear=True):     # no FORGE_REMOTE_CTX
+            self.assertEqual(b.context_window(), 16384)        # config value used
+
+    def test_env_still_overrides_config(self):
+        from forge.backends import OpenAICompatBackend
+        self.C.save({"remote_ctx": 16384})
+        b = OpenAICompatBackend("m", "http://x/v1")
+        with mock.patch.dict(os.environ, {"FORGE_REMOTE_CTX": "4096"}, clear=True):
+            self.assertEqual(b.context_window(), 4096)         # env wins
+
+    def test_default_when_unset(self):
+        from forge.backends import OpenAICompatBackend
+        self.C.save({"remote_ctx": 0})
+        b = OpenAICompatBackend("m", "http://x/v1")
+        with mock.patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(b.context_window(), 128000)       # large-window fallback
 
 
 if __name__ == "__main__":
