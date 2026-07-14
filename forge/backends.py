@@ -232,7 +232,20 @@ class OpenAICompatBackend:
         self._schema_dialect = d if d in self._SCHEMA_DIALECTS else None
 
     def context_window(self):
-        return int(os.environ.get("FORGE_REMOTE_CTX", "128000"))  # most modern APIs; override if needed
+        # env wins (explicit override); else the server ctx `forge models use` wrote to
+        # config (so a llama.cpp setup is self-sufficient — no manual FORGE_REMOTE_CTX);
+        # else assume a large modern-API window.
+        env = os.environ.get("FORGE_REMOTE_CTX")
+        if env:
+            return int(env)
+        try:
+            from . import config
+            rc = int(config.get("remote_ctx") or 0)
+            if rc > 0:
+                return rc
+        except Exception:
+            pass
+        return 128000
 
     def effective_ctx(self):
         return min(self.context_window(), ctx_cap() * 8)  # remote windows are large; cap generously

@@ -580,8 +580,8 @@ def main():
     p_pp.add_argument("--probe", action="store_true", help="run the active probe now and (re)write the passport(s)")
 
     p_md = sub.add_parser("models", help="curated model catalog: recipes forge has actually run, checked against this machine")
-    p_md.add_argument("action", nargs="?", default="list", choices=["list", "show", "use"])
-    p_md.add_argument("name", nargs="?", help="entry name (for `show` / `use`)")
+    p_md.add_argument("action", nargs="?", default="list", choices=["list", "show", "use", "stop"])
+    p_md.add_argument("name", nargs="?", help="entry name (for `show` / `use` / `stop`)")
 
     p_setup = sub.add_parser("setup", help="detect hardware, choose an engine, pull/point at models, write config")
     p_setup.add_argument("--auto", action="store_true", help="no prompts (Ollama, RAM-sized ladder)")

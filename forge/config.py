@@ -13,6 +13,7 @@ DEFAULTS = {
     "schema_dialect": "",   # P5.1 negotiated json_schema dialect for OpenAI-compat engines (auto-probed)
     "ladder": ["gemma2:9b", "qwen2.5-coder:7b"],   # overwritten by `forge setup`
     "num_ctx": 8192,
+    "remote_ctx": 0,        # OpenAI-compat server's real context window (set by `forge models use`); 0 = unset
     "keep_alive": "30m",
     "num_predict": 2048,
     "stuck_threshold": 7,          # P5.7 unified stuck-score escalation threshold
