@@ -8,8 +8,8 @@ release line receives security fixes.
 
 | Version | Supported          |
 | ------- | ------------------ |
-| 0.8.x   | :white_check_mark: |
-| < 0.8   | :x:                |
+| 0.10.x  | :white_check_mark: |
+| < 0.10  | :x:                |
 
 ## Reporting a vulnerability
 
