@@ -261,10 +261,30 @@ def load_fixture(path):
 
 def replay_fixture(path, strict=False):
     """Drive one tests/fixtures/*.jsonl fixture through the harness. Returns the
-    same dict as replay_records, with the fixture's meta attached."""
+    same dict as replay_records, with the fixture's meta attached. H11: if a companion
+    <name>.workspace.json exists, restore it into a THROWAWAY dir and replay against it
+    (never the original workspace), attaching any fidelity limitations."""
     meta, turns, window = load_fixture(path)
-    result = replay_records(meta, turns, strict=strict, window=window)
+    cwd, fidelity, restored = None, [], None
+    wpath = (path[:-len(".jsonl")] if path.endswith(".jsonl") else path) + ".workspace.json"
+    if os.path.exists(wpath):
+        import tempfile
+        from . import fixture as _fx
+        with open(wpath) as f:
+            wf = json.load(f)
+        restored = tempfile.mkdtemp(prefix="forge-wsfx-")
+        cwd = _fx.restore(wf, restored)
+        fidelity = _fx.fidelity_limitations(wf)
+    try:
+        result = replay_records(meta, turns, strict=strict, window=window, cwd=cwd)
+    finally:
+        # replay_records only cleans tempdirs IT created (cwd=None) — the restored
+        # workspace is ours to remove, or every fixture sweep leaks a full tree copy.
+        if restored:
+            import shutil
+            shutil.rmtree(restored, ignore_errors=True)
     result["meta"] = meta
+    result["fidelity_limitations"] = fidelity
     return result
 
 
@@ -302,6 +322,27 @@ def write_fixture(sid, name):
             f.write(json.dumps({"type": "user", "text": tn["user"]}) + "\n")
             for row in tn["model"]:
                 f.write(json.dumps({"type": "model", **row}) + "\n")
+    # H11: capture the WORKSPACE alongside the raws so replay can reproduce the
+    # environment half. Secrets/large files are excluded (recorded as fidelity limits);
+    # best-effort — a gone/unreadable cwd just yields no companion fixture.
+    wpath = path[:-len(".jsonl")] + ".workspace.json"
+    try:
+        os.remove(wpath)      # a stale companion from a PRIOR recording must never
+    except OSError:           # pair with freshly rewritten raws (wrong workspace)
+        pass
+    cwd = meta.get("cwd", "")
+    if cwd and os.path.isdir(cwd):
+        tmp = wpath + ".tmp"
+        try:
+            from . import fixture as _fx
+            with open(tmp, "w") as wf:
+                json.dump(_fx.capture(cwd), wf)
+            os.replace(tmp, wpath)   # atomic — a mid-write failure never leaves a truncated companion
+        except OSError:
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
     return path
 
 
