@@ -21,9 +21,36 @@ def detect_machine():
                     info["ram_gb"] = round(int(line.split()[1]) / (1024**2))
                     break
             info["chip"] = platform.processor()
-    except (OSError, subprocess.SubprocessError, ValueError):
+        elif info["os"] == "Windows":
+            # no sysctl / meminfo here — without this branch ram_gb stayed 0 and
+            # every Windows machine silently fell to the minimal tier.
+            import ctypes
+
+            class _MEMORYSTATUSEX(ctypes.Structure):
+                _fields_ = [("dwLength", ctypes.c_ulong), ("dwMemoryLoad", ctypes.c_ulong),
+                            ("ullTotalPhys", ctypes.c_ulonglong), ("ullAvailPhys", ctypes.c_ulonglong),
+                            ("ullTotalPageFile", ctypes.c_ulonglong), ("ullAvailPageFile", ctypes.c_ulonglong),
+                            ("ullTotalVirtual", ctypes.c_ulonglong), ("ullAvailVirtual", ctypes.c_ulonglong),
+                            ("ullAvailExtendedVirtual", ctypes.c_ulonglong)]
+            st = _MEMORYSTATUSEX()
+            st.dwLength = ctypes.sizeof(st)
+            if ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(st)):
+                info["ram_gb"] = round(st.ullTotalPhys / (1024**3))
+            info["chip"] = platform.processor()
+    except (OSError, subprocess.SubprocessError, ValueError, AttributeError):
         pass
     return info
+
+
+def _is_accelerated(hw):
+    """True when this machine has a FAST memory path for inference: Apple Silicon
+    (unified memory + Metal, ~120-800 GB/s) or a real NVIDIA dGPU (CUDA). Everything
+    else — Intel/AMD laptops with integrated graphics — decodes CPU-only over shared
+    DDR (~26-51 GB/s), where big models crawl (9B ≈ 4 tok/s) and can swap-thrash."""
+    if hw.get("os") == "Darwin" and hw.get("arch") == "arm64":
+        return True
+    import shutil as _sh
+    return _sh.which("nvidia-smi") is not None          # a real dGPU, not an iGPU
 
 
 # RAM-tiered local ladders (cheapest → strongest), from the 2026 Apple-Silicon /
@@ -37,12 +64,26 @@ TIERS = [
     (0, ["qwen2.5:3b"], "minimal"),
 ]
 
+# CPU-only ladders (no Apple Silicon, no dGPU): decode is memory-bandwidth-bound on
+# shared DDR, so the ceiling is ~3B for a usable default — a 9B rung is ~4 tok/s at
+# best and swap-thrashes an 8GB Windows laptop (the OS alone idles at 3-4GB). The 7B
+# top rung on roomier machines is escalation-only: slow but smarter when stuck.
+CPU_TIERS = [
+    (14, ["qwen2.5:3b", "qwen2.5-coder:7b"], "cpu · modest (≥16GB, 7b rung is slow)"),
+    (7, ["qwen2.5:1.5b", "qwen2.5:3b"], "cpu · light (≈8GB)"),
+    (0, ["qwen2.5:1.5b"], "cpu · minimal"),
+]
 
-def recommend(ram_gb):
-    for floor, ladder, label in TIERS:
+
+def recommend(ram_gb, hw=None):
+    """RAM-tiered ladder for this machine. With `hw` (a detect_machine dict), a
+    machine with no fast memory path gets the CPU-capped table — never a ladder
+    whose escalation rung would swap-thrash it."""
+    table = TIERS if (hw is None or _is_accelerated(hw)) else CPU_TIERS
+    for floor, ladder, label in table:
         if ram_gb >= floor:
             return ladder, label
-    return TIERS[-1][1], TIERS[-1][2]
+    return table[-1][1], table[-1][2]
 
 
 def num_ctx_for(ram_gb):
@@ -137,7 +178,7 @@ def _setup_ollama(hw, auto, keep_models):
     if not ok:
         print(f"  ✗ {msg}")
         return 1
-    ladder, label = recommend(hw["ram_gb"])
+    ladder, label = recommend(hw["ram_gb"], hw)
     if keep_models:
         ladder = keep_models
     print(f"  engine:  ollama (local)")
