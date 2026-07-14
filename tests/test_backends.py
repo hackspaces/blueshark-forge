@@ -8,6 +8,7 @@ import json
 import os
 import sys
 import unittest
+from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -416,6 +417,36 @@ class TestSchemaDialect(unittest.TestCase):
         b.chat([{"role": "user", "content": "hi"}])  # schema=None
         self.assertEqual(len(calls), 1)
         self.assertIsNone(b._schema_dialect)         # unresolved — nothing to probe
+
+
+class TestFrontierEngines(unittest.TestCase):
+    """Frontier models (OpenAI, Anthropic) via the OpenAI-compatible backend + BYO key."""
+
+    def test_anthropic_engine_points_at_the_compat_endpoint(self):
+        from forge.backends import make_backend, OpenAICompatBackend
+        b = make_backend("claude-sonnet-4", engine="anthropic", api_key="sk-ant-x")
+        self.assertIsInstance(b, OpenAICompatBackend)
+        self.assertEqual(b.url, "https://api.anthropic.com/v1")   # posts to /v1/chat/completions
+        self.assertEqual(b.key, "sk-ant-x")
+
+    def test_anthropic_falls_back_to_ANTHROPIC_API_KEY(self):
+        from forge.backends import make_backend
+        with mock.patch.dict(os.environ, {"ANTHROPIC_API_KEY": "sk-ant-env", "OPENAI_API_KEY": "sk-openai"}, clear=True):
+            b = make_backend("claude-x", engine="anthropic")     # no explicit key
+        self.assertEqual(b.key, "sk-ant-env")                    # the RIGHT provider's env, not OpenAI's
+
+    def test_openai_engine_still_works(self):
+        from forge.backends import make_backend
+        with mock.patch.dict(os.environ, {"OPENAI_API_KEY": "sk-openai"}, clear=True):
+            b = make_backend("gpt-4o", engine="openai")
+        self.assertEqual(b.url, "https://api.openai.com/v1")
+        self.assertEqual(b.key, "sk-openai")
+
+    def test_explicit_key_beats_env(self):
+        from forge.backends import make_backend
+        with mock.patch.dict(os.environ, {"ANTHROPIC_API_KEY": "sk-ant-env"}, clear=True):
+            b = make_backend("claude-x", engine="anthropic", api_key="explicit")
+        self.assertEqual(b.key, "explicit")
 
 
 if __name__ == "__main__":

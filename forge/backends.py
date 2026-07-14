@@ -363,6 +363,7 @@ ENGINE_URLS = {
     "localai": "http://localhost:8080/v1",
     "tgi": "http://localhost:8080/v1",
     "openai": "https://api.openai.com/v1",
+    "anthropic": "https://api.anthropic.com/v1",   # Anthropic's OpenAI-compatible endpoint
 }
 LOCAL_ENGINES = {"ollama"}  # engines forge can pull models for / that run on-box
 
@@ -383,6 +384,11 @@ def make_backend(spec, engine="ollama", base_url=None, api_key=None):
     if engine in (None, "ollama"):
         return OllamaBackend(spec)
     url = base_url or ENGINE_URLS.get(engine, "http://localhost:8000/v1")
+    # Anthropic speaks the OpenAI-compatible protocol at /v1/chat/completions with a
+    # Bearer key — so it needs no new backend, only its own key env (the OpenAICompat
+    # default is OPENAI_API_KEY, which would be the wrong provider here).
+    if engine == "anthropic" and not api_key:
+        api_key = os.environ.get("ANTHROPIC_API_KEY")
     return OpenAICompatBackend(spec, url, api_key)
 
 

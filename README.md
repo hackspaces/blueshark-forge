@@ -60,10 +60,14 @@ forge setup --engine vllm \
   --url http://your-server:8000/v1 \
   --models "Qwen/Qwen2.5-Coder-32B-Instruct"
 
-# a cloud API
-forge setup --engine openai --url https://api.openai.com/v1 \
-  --api-key sk-... --models "gpt-4o-mini,gpt-4o"
+# frontier models with your own key — OpenAI…
+forge setup --engine openai --api-key sk-... --models "gpt-4o-mini,gpt-4o"
+
+# …or Anthropic (its OpenAI-compatible endpoint; key also read from ANTHROPIC_API_KEY)
+forge setup --engine anthropic --api-key sk-ant-... --models "claude-sonnet-4,claude-opus-4"
 ```
+
+<sub>`openai` / `anthropic` default to the right URL, so `--url` is optional. Your key stays in `~/.forge/config.json` (or the `OPENAI_API_KEY` / `ANTHROPIC_API_KEY` env var) — forge itself hosts nothing; it just drives the API you point it at.</sub>
 
 Engines: `ollama` (default) · `vllm` · `llamacpp` · `mlx` · `lmstudio` · `tgi` ·
 `sglang` · `openai`. Set `OPENAI_API_KEY` in your env instead of `--api-key` if you prefer.

@@ -134,7 +134,7 @@ def _ask_engine():
 
 def _ask_server(url, models, api_key):
     from .backends import ENGINE_URLS
-    print("\n  Which server? (vllm / llamacpp / mlx / lmstudio / tgi / sglang / openai)")
+    print("\n  Which server? (vllm / llamacpp / mlx / lmstudio / tgi / sglang / openai / anthropic)")
     try:
         eng = (input("  engine [openai]: ").strip() or "openai").lower()
     except EOFError:
