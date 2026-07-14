@@ -1,7 +1,8 @@
-"""`forge models` — the curated catalog + turnkey provisioning.
+"""`forge models` — what THIS machine can run, and how to run it.
 
-    forge models              list the curated recipes + a RAM-fit estimate
-    forge models show <name>  print the copy-pasteable runbook for one entry
+    forge models              what this machine can run (a spread of open models,
+                              sized + speed-checked against your RAM + hardware)
+    forge models show <name>  the recipe + fit/speed for one model
     forge models use <name>   provision it and point forge's config at it
     forge models stop <name>  stop a server forge launched for it
 
@@ -80,31 +81,53 @@ def _machine():
     return hw
 
 
+def _pnum(p):
+    return f"{p:g}"                                   # 0.5→"0.5", 7.0→"7", 2.7→"2.7"
+
+
+def _accelerated(hw):
+    from . import setup as setupmod
+    try:
+        return bool(setupmod._is_accelerated(hw))
+    except Exception:
+        return False
+
+
+_RUN_STYLE = {"good": "green", "warn": "yellow", "faint": "dim"}
+
+
 def _list(hw):
     ram = hw.get("ram_gb") or 0
+    accel = _accelerated(hw)
     W = term_width()
-    print(paint("forge models — curated recipes (hand-verified, not scraped)", "bold"))
-    print(paint(f"  this machine: {hw.get('chip') or hw.get('arch') or '?'} · {ram or '?'}GB RAM", "dim"))
+    chip = hw.get("chip") or hw.get("arch") or "?"
+    hwkind = "GPU / Metal (fast)" if accel else "CPU-only"
+    print(paint("forge models — what this machine can run", "bold"))
+    print(paint(f"  {chip} · {ram or '?'}GB RAM · {hwkind}", "dim"))
+    cap_p, cap_name = registry.ceiling(ram, accel)
+    if cap_name:
+        print(paint(f"  → runs well up to ~{_pnum(cap_p)}B    e.g. {cap_name}", "green"))
+        if not accel and any((m.get("params_b") or 0) > 3.5 and registry.fits(m, ram)
+                             for m in registry.MODELS):
+            print(paint("    (bigger models fit but run slowly — no GPU/Metal here)", "dim"))
+    else:
+        print(paint("  → tight on RAM — only the smallest models fit.", "yellow"))
     print()
-    head = (f"  {'NAME':<18} {'ENGINE':<11} {'SIZE':<8} {'RAM~':<6} "
-            f"{'FIT?':<5} {'LIFT':<8} {'STATUS':<10} NOTES")
+    head = (f"  {'MODEL':<20} {'PARAMS':>7}  {'ENGINE':<11} {'SIZE':>7}  "
+            f"{'RAM~':>5}  {'RUNS':<18} NOTES")
     print(paint(head, "dim"))
-    for m in registry.MODELS:
+    for m in sorted(registry.MODELS, key=lambda x: x.get("params_b") or 0):
         size = m.get("weights", {}).get("size_gb")
-        fit_ok = registry.fits(m, ram)
-        status = m.get("status", "?")
-        # pad the PLAIN text first, then paint — ANSI codes must not count as width
-        fitcell = paint(f"{'✓' if fit_ok else '✗':<5}", "green" if fit_ok else "red")
-        lift_s, lift_style = _lift(m)
-        liftcell = paint(f"{lift_s:<8}", lift_style)
-        stcell = paint(f"{status:<10}", "green" if status == "verified" else "yellow")
-        row = (f"  {m['name']:<18} {m['engine']:<11} "
-               f"{(f'{size}GB' if size else '?'):<8} {str(m.get('ram_gb_needed', '?')) + 'GB':<6} ")
-        note = fit(m.get("notes", ""), max(10, W - 76))
-        print(row + fitcell + " " + liftcell + " " + stcell + " " + paint(note, "dim"))
+        verdict, style = registry.runs(m, ram, accel)
+        runs_cell = paint(f"{verdict:<18}", _RUN_STYLE.get(style, "dim"))
+        star = paint(" ★", "green") if m.get("status") == "verified" else "  "
+        note = fit(m.get("notes", ""), max(8, W - 82))
+        print(f"  {m['name']:<20} {_pnum(m.get('params_b') or 0) + 'B':>7}  {m['engine']:<11} "
+              f"{(f'{size}GB' if size else '?'):>7}  {str(m.get('ram_gb_needed', '?')) + 'GB':>5}  "
+              + runs_cell + " " + paint(note, "dim") + star)
     print()
-    print(paint("  RAM~/LIFT are estimates — LIFT is base→full harness gain from `forge bench` "
-                "('pending' = not benched yet). `forge models show <name>` prints the runbook.", "dim"))
+    print(paint("  ★ forge has run it   ·   run any of these:  forge models use <name>   ·   "
+                "RAM/RUNS are estimates.", "dim"))
 
 
 def _show(hw, name):
@@ -113,11 +136,13 @@ def _show(hw, name):
         print(f"✗ no curated entry named '{name}'. Known: {', '.join(registry.names())}")
         return 1
     ram = hw.get("ram_gb") or 0
-    print(paint(f"{m['name']}", "bold") + paint(f"  ·  {m['repo']}  ·  {m['arch']}", "dim"))
-    verdict = ("fits" if registry.fits(m, ram) else "does NOT fit")
-    style = "green" if registry.fits(m, ram) else "red"
+    accel = _accelerated(hw)
+    params = m.get("params_b")
+    print(paint(f"{m['name']}", "bold")
+          + paint(f"  ·  {f'{_pnum(params)}B · ' if params else ''}{m['repo']}  ·  {m['arch']}", "dim"))
+    verdict, style = registry.runs(m, ram, accel)
     print(f"  needs ~{m.get('ram_gb_needed', '?')}GB · this machine has {ram or '?'}GB → "
-          + paint(verdict, style) + paint("  (estimate)", "dim"))
+          + paint(verdict, _RUN_STYLE.get(style, "dim")) + paint("  (estimate)", "dim"))
     lift_s, lift_style = _lift(m)
     if lift_s == "pending":
         print(paint("  harness lift: pending — run `forge bench` and the base→full gain appears here", "dim"))
