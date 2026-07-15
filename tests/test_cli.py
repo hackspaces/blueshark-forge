@@ -118,6 +118,69 @@ class TestEntrypoint(unittest.TestCase):
         self.assertRegex(forge.__version__, r"^\d+\.\d+\.\d+$")
 
 
+class TestGroupedHelp(unittest.TestCase):
+    """`forge --help` is hand-grouped by what you're trying to do, which buys
+    readability at the cost of argparse's automatic command list. So the thing
+    worth pinning is that the hand-written groups can never drift from the
+    parser: every real subcommand documented, and nothing documented that isn't
+    real."""
+
+    def _help(self):
+        orig_argv, orig_out = sys.argv, sys.stdout
+        sys.argv = ["forge", "--help"]
+        out = io.StringIO()
+        sys.stdout = out
+        try:
+            with self.assertRaises(SystemExit) as cm:
+                M.main()
+            self.assertEqual(cm.exception.code, 0)
+            return out.getvalue()
+        finally:
+            sys.argv, sys.stdout = orig_argv, orig_out
+
+    def _real_subcommands(self):
+        """The names argparse itself knows — read back out of its own
+        invalid-choice error, so this can't drift from the parser."""
+        import re
+        orig_argv, orig_err = sys.argv, sys.stderr
+        sys.argv = ["forge", "__definitely_not_a_command__"]
+        err = io.StringIO()
+        sys.stderr = err
+        try:
+            with self.assertRaises(SystemExit):
+                M.main()
+        finally:
+            sys.argv, sys.stderr = orig_argv, orig_err
+        m = re.search(r"choose from (.+?)\)\s*$", err.getvalue().strip(), re.S)
+        self.assertIsNotNone(m, f"couldn't read choices from: {err.getvalue()!r}")
+        return {c.strip().strip("'\"") for c in m.group(1).split(",")}
+
+    def _documented(self):
+        return {n.strip()
+                for _, rows in M._COMMAND_GROUPS
+                for name, _ in rows
+                for n in name.split(",")}
+
+    def test_groups_cover_exactly_the_real_commands(self):
+        # Add a subcommand and forget to group it → this fails. Good.
+        self.assertEqual(self._documented(), self._real_subcommands())
+
+    def test_help_is_grouped_and_names_bare_forge(self):
+        text = self._help()
+        self.assertIn("usage: forge", text)            # the entrypoint smoke-test pins this too
+        for title, _ in M._COMMAND_GROUPS:
+            self.assertIn(title, text)
+        # bare `forge` is the most common invocation and argparse never mentioned it
+        self.assertIn("chat, oriented in the current directory", text)
+
+    def test_every_option_is_described(self):
+        # the old help listed --model/--dir/--name/--verbose with no help text at all
+        text = self._help()
+        for flag in ("--model", "--dir", "--name", "--resume", "--verbose", "--version"):
+            self.assertIn(flag, text)
+        self.assertNotIn("show this help message and exit", text)   # argparse's default phrasing
+
+
 class TestFirstRun(unittest.TestCase):
     """A fresh install (no config, no model chosen) must guide the user to
     `forge models` instead of spinning up a chat/run against a model they never
