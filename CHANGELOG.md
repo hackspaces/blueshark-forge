@@ -5,6 +5,30 @@ Every published release of `blueshark-forge`, newest first.
 Generated from the GitHub Releases by `tools/changelog.py` — the releases are
 what the tag-gated publish actually shipped, so this cannot drift. Don't hand-edit.
 
+## [v0.11.1](https://github.com/hackspaces/blueshark-forge/releases/tag/v0.11.1) — the syntax gate no longer fails open
+
+*2026-07-15 · `pip install blueshark-forge==0.11.1`*
+
+Two real bugs in the post-write syntax check (P1.1's gate), found chasing a CI
+flake rather than by reading code.
+
+A timeout made the gate fail OPEN. The check ran with timeout=3 and swallowed
+TimeoutExpired into "can't check", which the caller treats as permission to write.
+That is right when the checker isn't installed and a hazard when it merely timed
+out: node --check is ~0.02s warm but a cold start on a loaded machine is not, so
+the gate reported "fine" on a file it had never checked and let invalid JS land.
+Now 10s (FORGE_SYNTAX_TIMEOUT) plus one doubled retry; a genuine hang still reads
+as "cannot check", never as "fine".
+
+The error named a file that does not exist. The check runs on a temp copy, so its
+error cites the temp path, rewritten back to the real basename — but tempfile
+returns /var/folders/… while macOS reports /private/var/folders/…, so the replace
+matched only the suffix and stranded the prefix: '/privatea.js:1' instead of
+'a.js:1'. The model was being sent to fix the wrong file. Nothing covered it,
+which is how a user-facing message stayed wrong unnoticed.
+
+Both now pinned by tests. 725 tests, green on 3.10–3.13.
+
 ## [v0.11.0](https://github.com/hackspaces/blueshark-forge/releases/tag/v0.11.0) — the thesis phases are done, and the harness now catches itself
 
 *2026-07-15 · `pip install blueshark-forge==0.11.0`*

@@ -84,6 +84,31 @@
     tag-gated pipeline: full test matrix, tag&#8202;=&#8202;version assertion, wheel smoke-test,
     then PyPI.</p>
 
+      <article class="rel" id="v0.11.1">
+        <header>
+          <a class="tag" href="https://github.com/hackspaces/blueshark-forge/releases/tag/v0.11.1">v0.11.1</a>
+          <h2>the syntax gate no longer fails open</h2>
+          <p class="meta">2026-07-15 · <code>pip install blueshark-forge==0.11.1</code></p>
+        </header>
+        <div class="body">
+<p>Two real bugs in the post-write syntax check (P1.1&#x27;s gate), found chasing a CI</p>
+<p>flake rather than by reading code.</p>
+<p>A timeout made the gate fail OPEN. The check ran with timeout=3 and swallowed</p>
+<p>TimeoutExpired into &quot;can&#x27;t check&quot;, which the caller treats as permission to write.</p>
+<p>That is right when the checker isn&#x27;t installed and a hazard when it merely timed</p>
+<p>out: node --check is ~0.02s warm but a cold start on a loaded machine is not, so</p>
+<p>the gate reported &quot;fine&quot; on a file it had never checked and let invalid JS land.</p>
+<p>Now 10s (FORGE_SYNTAX_TIMEOUT) plus one doubled retry; a genuine hang still reads</p>
+<p>as &quot;cannot check&quot;, never as &quot;fine&quot;.</p>
+<p>The error named a file that does not exist. The check runs on a temp copy, so its</p>
+<p>error cites the temp path, rewritten back to the real basename — but tempfile</p>
+<p>returns /var/folders/… while macOS reports /private/var/folders/…, so the replace</p>
+<p>matched only the suffix and stranded the prefix: &#x27;/privatea.js:1&#x27; instead of</p>
+<p>&#x27;a.js:1&#x27;. The model was being sent to fix the wrong file. Nothing covered it,</p>
+<p>which is how a user-facing message stayed wrong unnoticed.</p>
+<p>Both now pinned by tests. 725 tests, green on 3.10–3.13.</p>
+        </div>
+      </article>
       <article class="rel" id="v0.11.0">
         <header>
           <a class="tag" href="https://github.com/hackspaces/blueshark-forge/releases/tag/v0.11.0">v0.11.0</a>
