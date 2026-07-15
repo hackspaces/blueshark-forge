@@ -559,17 +559,100 @@ def cmd_passport(args):
         print()
 
 
+# `forge --help`, grouped by what you're trying to DO. argparse's default is one
+# flat alphabetical list plus the 16-name brace blob printed twice — which tells a
+# newcomer nothing about where to start, and never mentions that bare `forge` is
+# the most common invocation of all. Order here is deliberate: first run first.
+_COMMAND_GROUPS = [
+    ("Start here", [
+        ("models", "what this machine can run — and provision one"),
+        ("setup", "detect hardware, pick an engine, write the config"),
+    ]),
+    ("Work", [
+        ("run", 'one task, start to finish  ·  forge run "fix the failing test"'),
+        ("bench", "harness-lift eval: the same model bare vs full harness"),
+    ]),
+    ("The fleet", [
+        ("up, down", "start / stop the autopilot"),
+        ("status", "autopilot state + live sessions"),
+        ("send", "message another session"),
+    ]),
+    ("What happened", [
+        ("trace", "pretty-print a session's step trace"),
+        ("receipts", "the trust audit trail"),
+        ("learnings, forget", "facts learned in a repo, and pruning them"),
+        ("passport", "each model's learned capability passport"),
+    ]),
+    ("Data out", [
+        ("export", "a session's event log as process-mining data (CSV/JSON/OCEL)"),
+        ("corpus", "transcripts → training data (SFT + preference pairs)"),
+        ("replay", "re-drive a recorded session with NO model"),
+    ]),
+]
+
+_OPTIONS = [
+    ("--model M[,M]", "a model, or a ladder cheap→strong; overrides the config"),
+    ("--dir PATH", "where to work (default: this directory)"),
+    ("--name NAME", "name this session — the fleet sees it"),
+    ("--resume SID|last", "resume a prior session from its transcript"),
+    ("--verbose", "show the full step trace"),
+    ("--version", "print the version"),
+    ("-h, --help", "this help"),
+]
+
+
+def _help_text():
+    """The grouped help. Colour is TTY-gated by render.paint, so piping
+    `forge --help` into a file or a pager stays plain text."""
+    from .render import paint as P
+    W = 20                                   # command column
+    out = []
+    add = out.append
+
+    add("")
+    add(P("forge", "bold") + " — a model-agnostic agentic runtime. Any model, frontier or a small")
+    add("local one, becomes a capable agent: the intelligence lives in the harness,")
+    add("not the weights.")
+    add("")
+    # The test suite pins "usage: forge" — and it's the line people actually scan for.
+    add(P("usage: forge", "bold") + " [options] <command> [args]")
+    add("")
+    add("  " + P(f"{'forge':<{W}}", "cyan") + "chat, oriented in the current directory")
+    add("  " + P(f"{'forge run \"<task>\"':<{W}}", "cyan") + "one task, start to finish")
+    add("  " + P(f"{'forge models':<{W}}", "cyan") + "what this machine can run")
+
+    for title, rows in _COMMAND_GROUPS:
+        add("")
+        add(P(title, "bold"))
+        for name, desc in rows:
+            add("  " + P(f"{name:<{W}}", "cyan") + desc)
+
+    add("")
+    add(P("Options", "bold"))
+    for flag, desc in _OPTIONS:
+        add("  " + P(f"{flag:<{W}}", "dim") + desc)
+
+    add("")
+    add(P("forge <command> --help", "dim") + P("  for any command in detail.", "dim"))
+    add("")
+    return "\n".join(out) + "\n"
+
+
 def main():
     ap = argparse.ArgumentParser(prog="forge")
+    ap.format_help = _help_text          # -h/--help routes through print_help → format_help
     # default LOCAL LADDER comes from ~/.forge/config.json (written by `forge setup`)
-    ap.add_argument("--model", default=None)   # None → resolve to config ladder; lets first-run detect "unconfigured"
-    ap.add_argument("--dir", default=os.getcwd())
-    ap.add_argument("--name", default=None)
-    ap.add_argument("--verbose", action="store_true")
+    ap.add_argument("--model", default=None,
+                    help="a model, or a comma-separated ladder cheap→strong; overrides the config")
+    ap.add_argument("--dir", default=os.getcwd(), help="where to work (default: this directory)")
+    ap.add_argument("--name", default=None, help="name this session — the fleet sees it")
+    ap.add_argument("--verbose", action="store_true", help="show the full step trace")
     ap.add_argument("--resume", metavar="SID|last", default=None,
                     help="resume a prior session from its transcript ('last' = newest for this dir)")
     ap.add_argument("--version", action="version", version=f"forge {__version__}")
-    sub = ap.add_subparsers(dest="cmd")
+    # metavar, or argparse spells all 16 command names into every usage line —
+    # including the one printed on an error, where it buries the actual message.
+    sub = ap.add_subparsers(dest="cmd", metavar="<command>")
 
     p_run = sub.add_parser("run", help="one-shot task")
     p_run.add_argument("task")
