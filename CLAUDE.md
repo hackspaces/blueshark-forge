@@ -58,10 +58,30 @@ curl -fsSL https://topk1.com/forge/install.sh | FORGE_INSTALL_DRY_RUN=1 sh
 pip install --no-cache-dir --upgrade "blueshark-forge==X.Y.Z" && forge --version
 ```
 
-**PyPI's index lags ~a minute behind the upload** — `pip index versions
-blueshark-forge` may still show the previous version while the file is already
-live, so an explicit `==X.Y.Z` install is the reliable check. Don't report a
-release as shipped until the install path serves it.
+**PyPI lags the upload, and lags itself.** The JSON API can report the new version
+while pip still resolves the old one — they propagate separately, and pip reads the
+*simple index*. `--no-cache-dir` does not help; only waiting does. So the check that
+counts is a real install in a clean venv with **no version pin**:
+
+```bash
+python3 -m venv /tmp/v && /tmp/v/bin/pip install --no-cache-dir blueshark-forge
+/tmp/v/bin/forge --version      # must equal the tag
+```
+
+Don't report a release as shipped until *that* serves it.
+
+### Then publish the changelog
+
+Once the release exists, regenerate it — it derives from the GitHub Releases, so it
+can only be built *after* the tag ships:
+
+```bash
+python3 tools/changelog.py      # writes CHANGELOG.md + site/changelog.html
+git commit -am 'docs: changelog for vX.Y.Z' && git push
+```
+
+`tools/changelog.py --check` fails if either file is stale. Never hand-edit them —
+the releases are the source of truth, which is the whole point.
 
 `https://topk1.com/forge/install.sh` is the **canonical install URL**. The repo
 path `main/site/install.sh` serves the same file as a mirror. If you change one,
