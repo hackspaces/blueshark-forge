@@ -95,6 +95,39 @@ class TestDigest(unittest.TestCase):
         self.assertNotIn("site-packages", dg)                  # stdlib/site-packages frame dropped
 
 
+class TestZeroCollected(unittest.TestCase):
+    def test_zero_collected_shapes(self):
+        for out in ("Ran 0 tests in 0.000s\n\nOK",              # unittest, exit 0 before 3.12
+                    "Ran 0 tests in 0.000s\n\nNO TESTS RAN",    # unittest 3.12+
+                    "===== no tests ran in 0.01s =====",        # pytest banner
+                    "no tests ran in 0.01s"):                   # pytest -q
+            self.assertTrue(testparse.zero_collected(out), out)
+
+    def test_real_runs_are_not_zero(self):
+        for out in ("Ran 3 tests in 0.1s\n\nOK",
+                    "Ran 725 tests in 15.7s\n\nFAILED (failures=1)",
+                    "collected 12 items\n... 12 passed in 0.2s",
+                    "5 passed in 0.2s", "1 failed, 4 passed in 0.3s", "", None):
+            self.assertFalse(testparse.zero_collected(out), repr(out))
+
+    def test_leaked_zero_lines_inside_a_passing_run_do_not_flip_it(self):
+        # a passing suite whose tests spawn a NESTED runner (meta-tests of a CLI
+        # wrapper) leaks 'Ran 0 tests' / 'no tests ran' into the outer output —
+        # only the FINAL summary decides, so the outer pass must stand.
+        for out in ("test_meta ... ok\nRan 0 tests in 0.000s\n\nOK\nRan 5 tests in 0.1s\n\nOK",
+                    "no tests ran in 0.01s\n...\n7 passed in 0.3s"):
+            self.assertFalse(testparse.zero_collected(out), out)
+
+    def test_collection_errors_are_breakage_not_zero(self):
+        # pytest's 'collected 0 items / 1 error' (rc 2) is positive evidence the
+        # change BROKE the suite — treating it as a zero run would let the claim
+        # through the verifier-unavailable escape.
+        for out in ("collected 0 items / 1 error\nE ImportError: boom\n"
+                    "=========== 1 error in 0.12s ===========",
+                    "!!!!! Interrupted: 1 error during collection !!!!!\n1 error in 0.05s"):
+            self.assertFalse(testparse.zero_collected(out), out)
+
+
 class TestRunTestsAction(unittest.TestCase):
     def test_run_tests_digests_a_failing_suite(self):
         d = tempfile.mkdtemp()
@@ -123,6 +156,26 @@ class TestRunTestsAction(unittest.TestCase):
         obs, ok = execute({"action": "run_tests"}, d)
         self.assertFalse(ok)
         self.assertIn("no test suite detected", obs)
+
+    def test_run_tests_zero_collected_is_never_a_pass(self):
+        # a unittest-style file with no TestCase in it: discovery runs, collects 0
+        # tests, and exits 0 before Python 3.12 — that must NOT read as a pass, and
+        # the observation must say WHY instead of a bare "Ran 0 tests".
+        d = tempfile.mkdtemp()
+        _w(d, "test_empty.py", "import unittest\n")
+        obs, ok = execute({"action": "run_tests"}, d)
+        self.assertFalse(ok)
+        self.assertIn("0 tests were collected", obs)
+
+    def test_run_tests_routes_pytest_style_files_to_pytest(self):
+        # module-level test functions never reach stdlib unittest (which would
+        # collect 0 of them) — the detected command is a pytest invocation.
+        d = tempfile.mkdtemp()
+        _w(d, "main.py", "def add(a, b):\n    return a + b\n")
+        _w(d, "test_main.py", "from main import add\n\ndef test_add():\n    assert add(1, 2) == 3\n")
+        obs, ok = execute({"action": "run_tests"}, d)
+        self.assertIn("pytest", obs.splitlines()[0])           # `$ pytest -q` or `$ python3 -m pytest -q`
+        self.assertNotIn("no test suite detected", obs)
 
 
 class _Backend:

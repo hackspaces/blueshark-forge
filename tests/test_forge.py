@@ -391,6 +391,57 @@ class TestDoneGate(unittest.TestCase):
         self.assertFalse(any(k == "done_check" for k, kw in events))
         self.assertFalse(any(k == "verified" for k, f in sess.logs))
 
+    def test_cmd_missing_knows_absent_runner_modules(self):
+        # `python3 -m pytest` where the module is absent is a missing RUNNER
+        # (verifier-unavailable), but a project module missing is a real failure.
+        from forge.agent import _cmd_missing
+        self.assertTrue(_cmd_missing("/bin/sh: pytest: command not found"))
+        self.assertTrue(_cmd_missing("/usr/bin/python3: No module named pytest"))
+        self.assertFalse(_cmd_missing("ModuleNotFoundError: No module named 'requests'"))
+        self.assertFalse(_cmd_missing("Ran 3 tests in 0.1s\n\nOK"))
+        self.assertFalse(_cmd_missing(""))
+
+    def test_zero_test_run_is_never_verified(self):
+        # a suite that collects 0 tests can exit 0 (unittest before 3.12) — that run
+        # verified NOTHING, so the gate must record an assumption, never 'verified'.
+        result, events, sess, _ = self._run_turn(
+            [self._WRITE, self._SAY], test_cmd='echo "Ran 0 tests in 0.000s"')
+        self.assertEqual(result, "all done")                     # verifier-unavailable path
+        self.assertFalse(any(k == "done_check" for k, kw in events))
+        self.assertFalse(any(k == "verified" for k, f in sess.logs))
+
+    def test_zero_test_run_tests_action_does_not_livelock(self):
+        # the run_tests ACTION on an empty suite must record an assumption, not a
+        # failed verification — a failed verification poisons the contract so
+        # accept-unverified is unreachable and the turn can never finish.
+        result, events, sess, _ = self._run_turn(
+            [self._WRITE, '{"thought":"t","action":"run_tests"}', self._SAY],
+            test_cmd='echo "Ran 0 tests in 0.000s"')
+        self.assertEqual(result, "all done")                     # verifier-unavailable path
+        self.assertFalse(any(k == "verified" for k, f in sess.logs))
+
+    def test_zero_test_self_run_does_not_satisfy_the_gate(self):
+        # the model runs `python3 -m unittest` itself in a dir with no collectable
+        # tests ("Ran 0 tests", exit 0 before 3.12 / 5 after): either way it must not
+        # credit verification, so the gate still runs the real command and bounces.
+        d = tempfile.mkdtemp()
+        self.fleet.detect_test_cmd = lambda cwd: "false"
+        actions = [
+            self._WRITE,
+            '{"thought":"t","action":"bash","command":"python3 -m unittest"}',
+            self._SAY,
+        ]
+        events = []
+        sess = _RecSession(d)
+        a = Agent(ScriptBackend(actions), sess, max_steps=8,
+                  on_event=lambda k, **kw: events.append((k, kw)))
+        result = a.send("do it")
+        self.assertNotEqual(result, "all done")                  # gate held
+        self.assertFalse(any(k == "verified" for k, f in sess.logs))
+        checks = [kw for k, kw in events if k == "done_check"]
+        self.assertEqual(len(checks), 1)                         # the gate DID run its own check
+        self.assertFalse(checks[0]["ok"])
+
     def test_is_test_cmd_recognizes_runners(self):
         from forge.agent import _is_test_cmd
         d = tempfile.mkdtemp()
@@ -2408,9 +2459,45 @@ class TestVerifierV2(unittest.TestCase):
         self.assertIsNone(fleet.detect_test_cmd(d))                 # nothing yet
         _write(os.path.join(d, "test_thing.py"), "import unittest\n")
         self.assertEqual(fleet.detect_test_cmd(d), "python3 -m unittest")   # bare test_*.py in root
+        # unittest discovery only matches test*.py, so *_test.py modules are named explicitly
         d2 = tempfile.mkdtemp()
         _write(os.path.join(d2, "thing_test.py"), "import unittest\n")
-        self.assertEqual(fleet.detect_test_cmd(d2), "python3 -m unittest")  # *_test.py too
+        self.assertEqual(fleet.detect_test_cmd(d2), "python3 -m unittest thing_test")
+        _write(os.path.join(d2, "test_other.py"), "import unittest\n")
+        self.assertEqual(fleet.detect_test_cmd(d2), "python3 -m unittest test_other thing_test")
+
+    def test_detect_test_cmd_pytest_style_root_file_needs_pytest(self):
+        # THE found-by-running-a-model bug: a root-level test_main.py with module-level
+        # test functions went to `python3 -m unittest`, which collects 0 tests from it —
+        # "no tests were found" made the task unwinnable for ANY model.
+        from forge import fleet
+        which, spec = fleet._which, fleet._find_spec
+        try:
+            d = tempfile.mkdtemp()
+            _write(os.path.join(d, "main.py"), "def add(a, b):\n    return a + b\n")
+            _write(os.path.join(d, "test_main.py"),
+                   "from main import add\n\ndef test_add():\n    assert add(1, 2) == 3\n")
+            fleet._which = lambda name: "/usr/bin/pytest"
+            self.assertEqual(fleet.detect_test_cmd(d), "pytest -q")
+            # console script missing but the module importable → run it through THIS
+            # interpreter (the probe and the executed command must agree)
+            import shlex as _shlex
+            import sys as _sys
+            fleet._which = lambda name: None
+            fleet._find_spec = lambda name: object()
+            self.assertEqual(fleet.detect_test_cmd(d),
+                             _shlex.quote(_sys.executable) + " -m pytest -q")
+            # pytest absent entirely → STILL pytest: fails as an honest 'command not
+            # found' (verifier-unavailable), never as a silent 0-test unittest run
+            fleet._find_spec = lambda name: None
+            self.assertEqual(fleet.detect_test_cmd(d), "pytest -q")
+            # a mixed dir needs pytest too (pytest also collects TestCase classes)
+            _write(os.path.join(d, "test_more.py"),
+                   "import unittest\nclass T(unittest.TestCase):\n    def test_x(self):\n        pass\n")
+            fleet._which = lambda name: "/usr/bin/pytest"
+            self.assertEqual(fleet.detect_test_cmd(d), "pytest -q")
+        finally:
+            fleet._which, fleet._find_spec = which, spec
 
     def test_detect_test_cmd_go_and_package_managers(self):
         from forge import fleet
@@ -2427,6 +2514,10 @@ class TestVerifierV2(unittest.TestCase):
 
     def test_detect_test_cmd_scopes_to_edited_files(self):
         from forge import fleet
+        # pin the runner probe so the expected command is hermetic across environments
+        which = fleet._which
+        fleet._which = lambda name: "/usr/bin/pytest"
+        self.addCleanup(lambda: setattr(fleet, "_which", which))
         d = tempfile.mkdtemp()
         os.makedirs(os.path.join(d, "tests"))
         os.makedirs(os.path.join(d, "pkg"))
@@ -2455,6 +2546,22 @@ class TestVerifierV2(unittest.TestCase):
         self.assertIsNone(fleet._deterministic_verdict("pytest -q tests/test_x.py", 5, "no tests ran"))
         # exit 5 from a non-pytest command is a genuine failure, not "no tests"
         self.assertEqual(fleet._deterministic_verdict("make test", 5, "boom")["verdict"], "REFUTED")
+        # a 0-test run is the model path from ANY runner in ANY invocation form:
+        # unittest exits 0 on `Ran 0 tests` before 3.12 → would falsely CONFIRM,
+        # and `python3 -m pytest` exit 5 has a non-pytest head → would falsely REFUTE
+        self.assertIsNone(fleet._deterministic_verdict("python3 -m unittest", 0,
+                                                       "Ran 0 tests in 0.000s\n\nOK"))
+        self.assertIsNone(fleet._deterministic_verdict("python3 -m pytest -q", 5,
+                                                       "no tests ran in 0.01s"))
+        # an ABSENT runner is not evidence about the claim either — never REFUTED
+        self.assertIsNone(fleet._deterministic_verdict("pytest -q", 127,
+                                                       "/bin/sh: pytest: command not found"))
+        self.assertIsNone(fleet._deterministic_verdict("python3 -m pytest -q", 1,
+                                                       "/usr/bin/python3: No module named pytest"))
+        # but a pytest collection ERROR is positive breakage evidence → REFUTED
+        self.assertEqual(fleet._deterministic_verdict(
+            "make test", 2,
+            "collected 0 items / 1 error\n=== 1 error in 0.12s ===")["verdict"], "REFUTED")
 
     # ---- self-consistency voting -------------------------------------------
     def test_majority_vote(self):

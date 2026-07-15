@@ -482,12 +482,19 @@ def _run_tests(cwd, stop=None):
                 "root test_*.py / go.mod / a package.json test script / Cargo.toml / Makefile "
                 "test). If you know the command, run it with bash.", False)
     obs, ok = _run(cmd, cwd, timeout=180, stop=stop)
+    hint = ""
+    if testparse.zero_collected(obs):
+        # unittest exits 0 on a 0-test run before 3.12 — that "pass" verified nothing
+        ok = False
+        hint = ("\n(0 tests were collected — this run verified NOTHING. If the tests are "
+                "pytest-style functions, they need pytest; stdlib unittest only collects "
+                "unittest.TestCase classes and only discovers test*.py files.)")
     d = testparse.digest(obs, cwd)
     if not d:                                    # unrecognized output shape → keep it whole
         preview, note = _maybe_offload(obs, "testrun", cwd)
-        return f"$ {cmd}\n{preview}{note}", ok
+        return f"$ {cmd}\n{preview}{hint}{note}", ok
     _, note = _maybe_offload(obs, "testrun", cwd)
-    return f"$ {cmd}\n{d}{note}", ok
+    return f"$ {cmd}\n{d}{hint}{note}", ok
 
 
 def _run(cmd, cwd, timeout=None, stop=None):

@@ -11,16 +11,25 @@ a native inbox on every session, fleet is not a bolt-on here — it is built in:
 
 All of it runs on whatever model you point it at. No vendor API.
 """
+import importlib.util
 import json
 import os
 import re
+import shlex
+import shutil
+import sys
 import time
 import urllib.request
 from collections import Counter
 
 from . import session as sessmod
+from . import testparse
 from .util import slurp
 from .backends import make_backend
+
+# env probes behind module-level names so tests can stub them deterministically
+_which = shutil.which
+_find_spec = importlib.util.find_spec
 
 FORGE = os.path.expanduser("~/.forge")
 STATE = os.path.join(FORGE, "state"); os.makedirs(STATE, exist_ok=True)
@@ -223,18 +232,69 @@ def detect_test_cmd(cwd, files=None):
         return "go test ./..."
     if os.path.exists(os.path.join(cwd, "pyproject.toml")) or os.path.isdir(os.path.join(cwd, "tests")):
         scope = _pytest_scope(cwd, files)
-        return ("pytest -q " + scope).rstrip() if scope else "pytest -q"
+        base = _pytest_runner()
+        return (base + " " + scope) if scope else base
     if os.path.exists(os.path.join(cwd, "Cargo.toml")):
         return "cargo test"
     # A bare root-level test_*.py / *_test.py (no pyproject, no tests/ dir) — the common
-    # layout for a small Python project. Discover with stdlib unittest (always present).
+    # layout for a small Python project. stdlib unittest only collects TestCase classes,
+    # so a pytest-style file (module-level test functions) must go to pytest: running it
+    # through unittest "passes" having collected 0 tests, which verifies nothing.
     try:
-        if any((f.startswith("test_") and f.endswith(".py")) or f.endswith("_test.py")
-               for f in os.listdir(cwd)):
-            return "python3 -m unittest"
+        names = sorted(f for f in os.listdir(cwd)
+                       if (f.startswith("test_") and f.endswith(".py")) or f.endswith("_test.py"))
     except OSError:
-        pass
+        names = []
+    if names:
+        for f in names:
+            try:
+                text = slurp(os.path.join(cwd, f))
+            except OSError:
+                continue
+            if _pytest_style(text):
+                return _pytest_runner()
+        if any(not f.startswith("test_") for f in names):
+            # unittest discovery only matches test*.py — name *_test.py modules explicitly
+            return "python3 -m unittest " + " ".join(f[:-3] for f in names)
+        return "python3 -m unittest"
     return None
+
+
+_TOPLEVEL_TEST_DEF_RE = re.compile(r"^(?:async\s+)?def\s+test", re.M)
+
+
+def _pytest_style(text):
+    """True when a test file only runs under pytest: module-level test functions (or a
+    pytest import/marker) and no unittest usage anywhere in the file."""
+    if re.search(r"\bunittest\b", text):
+        return False
+    return bool(_TOPLEVEL_TEST_DEF_RE.search(text) or re.search(r"\bpytest\b", text))
+
+
+def _pytest_runner():
+    """The pytest invocation this environment can actually run: the console script when
+    on PATH; else, when the module is importable, run it through THIS interpreter
+    (sys.executable — the probe and the executed command must agree: a bare `python3`
+    lets the shell resolve a different python without pytest). When neither exists
+    still return the bare script — it fails as an honest 'command not found' (which the
+    done-gate treats as verifier-unavailable), never as a silent 0-test run."""
+    if _which("pytest"):
+        return "pytest -q"
+    try:
+        if _find_spec("pytest") is not None:
+            return shlex.quote(sys.executable) + " -m pytest -q"
+    except (ImportError, ValueError):
+        pass
+    return "pytest -q"
+
+
+def runner_missing(out):
+    """The test RUNNER itself was absent — the shell's 'command not found' (exit 127)
+    or the interpreter lacking the runner module. Only the runner counts: a missing
+    PROJECT module is a real test failure, not an unavailable verifier."""
+    o = (out or "").lower()
+    return ("command not found" in o or ": not found" in o
+            or bool(re.search(r"no module named '?(pytest|unittest)\b", o)))
 
 
 def _pytest_scope(cwd, files):
@@ -431,9 +491,15 @@ def _deterministic_verdict(cmd, rc, out):
     """Turn a test-command result into a verdict dict — or None when we must defer
     to model reasoning instead of falsely REFUTING. pytest exit code 5 means "no
     tests were collected" (e.g. the claim's scope has no tests) — that is the model
-    path, NOT a refutation."""
+    path, NOT a refutation. The same for ANY runner whose output shows a 0-test run
+    (unittest exits 0 on `Ran 0 tests` before 3.12, which would falsely CONFIRM) and
+    for an ABSENT runner (pytest not installed): neither is evidence about the claim."""
     toks = cmd.split()
     if toks and toks[0] == "pytest" and rc == 5:
+        return None
+    if rc == 127 or runner_missing(out):
+        return None
+    if testparse.zero_collected(out):
         return None
     tail = " ".join(out.strip().splitlines()[-4:])[:220]
     ok = rc == 0

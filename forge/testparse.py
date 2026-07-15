@@ -40,6 +40,36 @@ _JEST_FAIL = re.compile(r"^\s*(?:✕|×|✗|●)\s+(.+?)\s*$")
 # a python traceback frame
 _FRAME = re.compile(r'File "([^"]+)", line (\d+)(?:, in (\S+))?')
 
+# a run that collected ZERO tests, decided from the FINAL summary line only (searched
+# from the END, like _summary): a nested runner leaking `Ran 0 tests` into a passing
+# suite's output must not flip it, and a pytest collection ERROR ("collected 0 items /
+# 1 error", terminal `N error in ...`) is positive evidence of breakage, NOT a zero run.
+_RAN_N_RE = re.compile(r"^Ran (\d+) tests?\b")
+_NO_TESTS_RAN_RE = re.compile(r"^=*\s*no tests ran\b", re.I)
+_PYTEST_COUNTS_RE = re.compile(
+    r"^(?:=+.*?)?\b\d+\s+(?:passed|failed|errors?|skipped|deselected|xfailed|xpassed|warnings?)\b")
+
+
+def zero_collected(output):
+    """True when the FINAL summary of runner output shows a run that collected/ran
+    ZERO tests. Such a run verifies nothing, so it must never satisfy a verification
+    gate — on Python < 3.12 unittest exits 0 on it, which reads as a passing suite
+    to any exit-code check."""
+    if not output:
+        return False
+    for ln in reversed(output.splitlines()):
+        s = ln.strip()
+        if not s:
+            continue
+        m = _RAN_N_RE.match(s)
+        if m:
+            return m.group(1) == "0"
+        if _NO_TESTS_RAN_RE.match(s):
+            return True
+        if _PYTEST_COUNTS_RE.match(s):
+            return False
+    return False
+
 
 def is_test_runner(command):
     """True if `command`'s head is a known test runner (opportunistic-digest hook)."""
