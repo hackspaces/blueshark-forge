@@ -2923,6 +2923,77 @@ class TestStepTrace(unittest.TestCase):
         Agent(ScriptBackend([]), sess2)
         self.assertIsNone([f for k, f in sess2.logs if k == "meta"][0]["briefing"])
 
+    def test_repeated_incomplete_action_enters_the_stuck_ledger(self):
+        # an incomplete action (missing/blank required fields) is a FAILED action and
+        # must enter the stuck ledger — the missing-fields branch used to `continue`
+        # BEFORE the sig accounting, so a model re-sending the same incomplete action
+        # was invisible to the loop breaker/borrow/escalation and ground to the step
+        # limit (observed live: 35 identical incomplete edit_file steps from a 7B,
+        # zero interventions).
+        d = tempfile.mkdtemp()
+        _write(os.path.join(d, "main.py"), "x = 1\n")
+        sess = _RecSession(d)
+        a = Agent(ScriptBackend(['{"thought":"e","action":"edit_file","path":"main.py","old":"","new":"y = 2\\n"}']),
+                  sess, max_steps=6, on_event=lambda k, **kw: None)
+        a.stuck_at = 99          # hermetic: a tuned FORGE_STUCK_THRESHOLD must not end the turn early
+        a.send("append to main.py")
+        self.assertTrue(any(c >= 3 for c in a.stuck["sig_fails"].values()))  # every repeat counted
+        self.assertTrue(any(f.get("cause") == "fail" for k, f in sess.logs if k == "loop"))
+
+    def test_empty_old_teaches_write_file_not_missing_field(self):
+        # `old: ""` is intent (append/insert), not an omission — the observation must
+        # teach the real moves, not claim a present field is missing (which invites
+        # re-sending the identical action). And the P5.1 resend is SKIPPED: the
+        # grammar can force `old` present but not non-empty, so a resend would just
+        # re-emit old:"" at the cost of a generation plus a contradictory hint.
+        d = tempfile.mkdtemp()
+        _write(os.path.join(d, "main.py"), "x = 1\n")
+        events = []
+        empty_old = '{"thought":"e","action":"edit_file","path":"main.py","old":"","new":"y = 2\\n"}'
+        sb = ScriptBackend([empty_old, '{"thought":"d","action":"say","message":"stuck"}'])
+        a = Agent(sb, _RecSession(d), max_steps=4,
+                  on_event=lambda k, **kw: events.append((k, kw)))
+        a.send("append to main.py")
+        obs = [kw.get("text", "") for k, kw in events if k == "observation"]
+        self.assertTrue(any("EMPTY" in t and "write_file" in t for t in obs), obs)
+        self.assertFalse(any("missing required field" in t for t in obs), obs)
+        self.assertEqual(sb.i, 2)                     # exactly one gen per step — no resend burned
+
+    def test_empty_old_with_other_fields_missing_gets_the_generic_nudge(self):
+        # the teach is only for missing == ["old"]: when path is ALSO absent the
+        # generic message must name every missing field, or the model "fixes" old
+        # and still fails on path.
+        d = tempfile.mkdtemp()
+        events = []
+        bad = '{"thought":"e","action":"edit_file","old":"","new":"y = 2\\n"}'
+        a = Agent(ScriptBackend([bad, bad, '{"thought":"d","action":"say","message":"stuck"}']),
+                  _RecSession(d), max_steps=4,
+                  on_event=lambda k, **kw: events.append((k, kw)))
+        a.send("edit something")
+        obs = [kw.get("text", "") for k, kw in events if k == "observation"]
+        self.assertTrue(any("missing required field" in t and "`path`" in t for t in obs), obs)
+
+    def test_batch_edits_with_placeholder_old_execute(self):
+        # P6.5 batch dialect: the grammar variant forces top-level old/new, so a
+        # legal {path, edits:[...]} action arrives with placeholder old:"" — it must
+        # EXECUTE (execute() dispatches edits[] first), not be flagged incomplete,
+        # taught at, or counted as a stuck-ledger failure.
+        d = tempfile.mkdtemp()
+        _write(os.path.join(d, "main.py"), "x = 1\n")
+        events = []
+        acts = [
+            '{"thought":"r","action":"read_file","path":"main.py"}',
+            '{"thought":"e","action":"edit_file","path":"main.py","old":"","new":"",'
+            '"edits":[{"old":"x = 1\\n","new":"x = 2\\n"}]}',
+            '{"thought":"d","action":"say","message":"edited"}',
+        ]
+        a = Agent(ScriptBackend(acts), _RecSession(d), max_steps=6,
+                  on_event=lambda k, **kw: events.append((k, kw)))
+        a.send("bump x")
+        self.assertEqual(open(os.path.join(d, "main.py")).read(), "x = 2\n")
+        self.assertFalse(any(kw.get("detail") == "(incomplete)" for k, kw in events if k == "action"))
+        self.assertEqual(a.stuck["sig_fails"], {})    # a legal batch edit is not a failure
+
     def test_one_step_per_iteration_with_flags(self):
         from forge.agent import TRACE_V
         d = tempfile.mkdtemp()
