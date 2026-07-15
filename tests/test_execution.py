@@ -4,6 +4,7 @@ import os
 import tempfile
 import unittest
 
+from tests import _hermetic  # noqa: E402,F401 — never touch the real ~/.forge
 from forge.execution import (EvidenceContract, ExecutionState, ExecutionTracker,
                              VerificationEvidence)
 from forge.session import Session

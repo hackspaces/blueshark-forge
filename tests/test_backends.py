@@ -12,6 +12,8 @@ from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from tests import _hermetic  # noqa: E402,F401 — never touch the real ~/.forge
+
 from forge import backends                                       # noqa: E402
 from forge.backends import (iter_sse, iter_ndjson, ctx_cap,      # noqa: E402
                             OllamaBackend, OpenAICompatBackend)

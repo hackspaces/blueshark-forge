@@ -6,6 +6,8 @@ from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from tests import _hermetic  # noqa: E402,F401 — never touch the real ~/.forge
+
 from forge import setup as S                                       # noqa: E402
 
 APPLE = {"os": "Darwin", "arch": "arm64", "ram_gb": 8, "chip": "Apple M2"}

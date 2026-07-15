@@ -15,6 +15,8 @@ import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from tests import _hermetic  # noqa: E402,F401 — never touch the real ~/.forge
+
 from forge.agent import Agent                                    # noqa: E402
 from forge.backends import RecordingBackend, record_digest       # noqa: E402
 from forge import replay as replaymod                            # noqa: E402

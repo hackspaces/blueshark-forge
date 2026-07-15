@@ -11,6 +11,8 @@ import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from tests import _hermetic  # noqa: E402,F401 — never touch the real ~/.forge
+
 from forge import __main__ as M          # noqa: E402
 
 

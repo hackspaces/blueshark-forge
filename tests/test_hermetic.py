@@ -8,15 +8,18 @@ runs, and head-layout assertions become machine-dependent (a test that passed
 in the full suite failed alone, because the P5.6 cold-start pin fired off real
 `~/.forge/exemplars` entries recorded under test backend names).
 
-Note: this file asserts the PACKAGE invocation forms (`discover -s tests` from
-the repo root, `tests.<module>`) — running a single module from inside tests/
-without the package import is exactly the unprotected shape it guards against.
+Every invocation shape is protected because every test module imports
+tests._hermetic itself (bare `discover -s tests` never runs the package
+__init__ — its top_level_dir defaults to the start dir, so modules import as
+top-level names).
 """
 import os
 import sys
 import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from tests import _hermetic  # noqa: E402,F401 — never touch the real ~/.forge
 
 from forge import config, exemplars, profile     # noqa: E402
 
