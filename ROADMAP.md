@@ -516,6 +516,26 @@ The heart of the thesis, deepened: the grammar gets stricter, bad actions are ca
 ## Phase 6 — Loop architecture & tools
 
 The loop becomes safe to be wrong in (checkpoints), able to decompose (subagents), and richer in deterministic feedback (structured tests, plan checks, atomic edits, web access).
+### P5.9 · Claim guard: break the repeat-a-rejected-completion loop
+
+**Status: done (PR#42) · Impact 4/5 · Effort S · Depends on: none**
+
+NOT from the 2026-07-07 audit — the 31 agents read every line and could not have found this,
+because it only exists when a real model runs a real task. Measured on qwen2.5-coder:7b: 5 real
+actions, then 33 byte-identical rejected completion claims until the step limit (63s, whole budget,
+a wall of one repeated sentence as the user's answer). `loop_detect` watches ACTIONS; nothing
+watched the completion path.
+
+Root cause is starvation, not stubbornness: the bounce names the failing COMMAND, but
+`EvidenceContract.record_verification` keeps only a DIGEST of its output — the model was told "it
+failed" 33 times and never what failed. The guard escalates instead of restating (claim → show the
+real failure text → stop), and never opens the gate: repetition must not become an escape from the
+done-gate (H05). After: 3 claims, 18s, an honest stop. It does not raise pass-rate — it converts a
+confused failure into a fast truthful one.
+
+**Lesson for this document:** a static audit finds what the code says; only running it finds what the
+code does. Items found by execution belong here alongside items found by reading.
+
 ### P6.1 · Turn checkpoints and rollback: git-plumbing snapshots, /undo, and rollback-informed escalation
 
 **Status: open · Impact 4/5 · Effort M · Depends on: none**
