@@ -5,6 +5,12 @@ Every published release of `blueshark-forge`, newest first.
 Generated from the GitHub Releases by `tools/changelog.py` — the releases are
 what the tag-gated publish actually shipped, so this cannot drift. Don't hand-edit.
 
+## [v0.11.3](https://github.com/hackspaces/blueshark-forge/releases/tag/v0.11.3) — a stuck model is now caught in 3 steps, not ground for 36
+
+*2026-07-15 · `pip install blueshark-forge==0.11.3`*
+
+See the release commit for details.
+
 ## [v0.11.2](https://github.com/hackspaces/blueshark-forge/releases/tag/v0.11.2) — run_tests finds pytest-style tests, and a zero-test run is never evidence
 
 *2026-07-15 · `pip install blueshark-forge==0.11.2`*
