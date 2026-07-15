@@ -1,0 +1,900 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>forge — changelog</title>
+<meta name="description" content="Every published release of forge, newest first.">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' fill='%23111'/%3E%3Ctext x='16' y='23' font-family='monospace' font-size='20' fill='%23fff' text-anchor='middle'%3Ef%3C/text%3E%3C/svg%3E">
+<style>
+  :root{
+    --bg:#ffffff; --ink:#111111; --muted:#666666; --faint:#8a8a8a; --line:#e2e2e2; --inline:#f4f4f4;
+    --inv-bg:#111111; --inv-ink:#f4f4f4;
+  }
+  @media (prefers-color-scheme:dark){
+    :root{
+      --bg:#0c0c0c; --ink:#ededed; --muted:#9a9a9a; --faint:#6d6d6d; --line:#242424; --inline:#181818;
+      --inv-bg:#ededed; --inv-ink:#0c0c0c;
+    }
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0}
+  body{
+    background:var(--bg); color:var(--ink);
+    font-family:ui-monospace,"SF Mono","JetBrains Mono",Menlo,Consolas,"Liberation Mono",monospace;
+    font-size:14px; line-height:1.65; -webkit-font-smoothing:antialiased;
+  }
+  a{color:inherit; text-underline-offset:2px}
+  a:hover{background:var(--ink); color:var(--bg); text-decoration:none}
+  ::selection{background:var(--ink); color:var(--bg)}
+  :focus-visible{outline:2px solid var(--ink); outline-offset:2px}
+
+  .top{display:flex; align-items:center; gap:1rem; padding:1rem 1.6rem; border-bottom:1px solid var(--line)}
+  .top .logo{font-weight:700; font-size:1.05rem; letter-spacing:-.02em; text-decoration:none}
+  .top .logo b{background:var(--ink); color:var(--bg); padding:0 .18em}
+  .top .sp{flex:1}
+  .top a.nav{margin-left:1.3rem; color:var(--faint); font-size:.85rem}
+
+  main{max-width:760px; margin:0 auto; padding:2.4rem 1.6rem 4rem}
+  h1{font-size:1.9rem; letter-spacing:-.03em; margin:0}
+  .lede{color:var(--muted); margin:.7rem 0 0}
+
+  .rel{border-top:1px solid var(--line); margin-top:2.4rem; padding-top:1.6rem}
+  .rel:first-of-type{border-top:0}
+  .tag{display:inline-block; background:var(--inv-bg); color:var(--inv-ink); padding:.1rem .5rem;
+        font-size:.8rem; text-decoration:none; margin-bottom:.5rem}
+  .rel h2{font-size:1.15rem; letter-spacing:-.02em; margin:.3rem 0 0; font-weight:700}
+  .rel .meta{color:var(--faint); font-size:.8rem; margin:.35rem 0 0}
+  .rel .body{margin-top:1rem}
+  .rel .body h3,.rel .body h4,.rel .body h5,.rel .body h6{
+    font-size:.92rem; margin:1.4rem 0 .4rem; letter-spacing:-.01em}
+  .rel .body p{margin:.6rem 0; color:var(--muted)}
+  .rel .body strong{color:var(--ink)}
+  .rel .body ul{margin:.6rem 0; padding-left:1.1rem}
+  .rel .body li{color:var(--muted); margin:.25rem 0}
+  .rel .body blockquote{margin:.8rem 0; padding-left:.9rem; border-left:2px solid var(--line); color:var(--faint)}
+  code{background:var(--inline); padding:.05em .3em; font-size:.88em}
+  /* wide content scrolls in its own box — the page body never scrolls sideways */
+  pre{background:var(--inv-bg); color:var(--inv-ink); padding:.85rem 1rem; overflow-x:auto; margin:.8rem 0}
+  pre code{background:none; padding:0; font-size:.8rem; white-space:pre}
+  table{display:block; overflow-x:auto; border-collapse:collapse; margin:.8rem 0}
+
+  footer{border-top:1px solid var(--line); padding:1rem 1.6rem; color:var(--faint); font-size:.78rem;
+    display:flex; flex-wrap:wrap; gap:.3rem 1rem}
+
+  @media (max-width:560px){
+    .top{padding:.85rem 1.15rem} .top a.nav{margin-left:1rem; font-size:.78rem}
+    main{padding:1.6rem 1.15rem 3rem} h1{font-size:1.5rem}
+    footer{padding:.85rem 1.15rem; font-size:.72rem}
+  }
+</style>
+</head>
+<body>
+  <div class="top">
+    <a class="logo" href="/forge/"><b>forge</b></a>
+    <span class="sp"></span>
+    <a class="nav" href="/forge/">home</a>
+    <a class="nav" href="https://github.com/hackspaces/blueshark-forge">github</a>
+    <a class="nav" href="https://pypi.org/project/blueshark-forge/">pypi</a>
+  </div>
+
+  <main>
+    <h1>Changelog</h1>
+    <p class="lede">Every published release, newest first. Each one shipped through the
+    tag-gated pipeline: full test matrix, tag&#8202;=&#8202;version assertion, wheel smoke-test,
+    then PyPI.</p>
+
+      <article class="rel" id="v0.11.0">
+        <header>
+          <a class="tag" href="https://github.com/hackspaces/blueshark-forge/releases/tag/v0.11.0">v0.11.0</a>
+          <h2>the thesis phases are done, and the harness now catches itself</h2>
+          <p class="meta">2026-07-15 · <code>pip install blueshark-forge==0.11.0</code></p>
+        </header>
+        <div class="body">
+<p>Phases P1–P5 of the breakthrough roadmap are COMPLETE (31/56 items, 55%). That is</p>
+<p>the whole thesis spine:</p>
+<p>P1 Honest observations        5/5 ✅</p>
+<p>P2 The verified loop          3/3 ✅   &quot;done&quot; is a fact, not a claim</p>
+<p>P3 Measurement                4/4 ✅   bench proves harness-lift per lever</p>
+<p>P4 Context integrity &amp; memory 8/8 ✅</p>
+<p>P5 Small-model amplification  8/8 ✅   the thesis, bench-validated</p>
+<p>P6 Loop architecture          3/8</p>
+<p>P7–P10                        0/20</p>
+<p>The roadmap&#x27;s own one-sentence breakthrough was: bench measures harness-lift per</p>
+<p>lever per model (P3), the verified loop makes &quot;done&quot; a fact instead of a claim</p>
+<p>(P2), and the swarm compiles goals into verified commits from laptop-sized models</p>
+<p>(P9). Two of those three legs now stand. P9 — the moat — does not.</p>
+<p>Headline feature: the claim guard (P5.9, #42). A model that claimed done, was</p>
+<p>rejected, and claimed the identical thing again would do so until the step limit —</p>
+<p>qwen2.5-coder:7b did it 33 times, burning 63s and the whole budget to re-send one</p>
+<p>sentence. loop_detect watches ACTIONS; nothing watched the completion path. The</p>
+<p>cause was starvation, not stubbornness: the bounce named the failing command while</p>
+<p>the evidence contract kept only a digest of its output, so the model was told &quot;it</p>
+<p>failed&quot; 33 times and never what failed. Now: claim → show the real failure → stop.</p>
+<p>3 claims, 18s, an honest ending. It does not make models smarter; it converts a</p>
+<p>confused failure into a fast truthful one — and it never opens the gate, because</p>
+<p>repetition must not become an escape from the done-gate (H05).</p>
+<p>P5.9 is the first roadmap item NOT produced by the 31-agent audit. Thirty-one</p>
+<p>agents read every line and could not have found it: it only exists when a real</p>
+<p>model runs a real task. A static audit finds what the code says; running it finds</p>
+<p>what the code does.</p>
+<p>Also in this line since v0.10.0: a real first-run experience, TTY-gated output,</p>
+<p>one canonical install URL (topk1.com/forge/install.sh), a mobile-usable landing</p>
+<p>site, grouped <code>forge --help</code>, and CLAUDE.md.</p>
+<p>723 tests, green on 3.10–3.13.</p>
+        </div>
+      </article>
+      <article class="rel" id="v0.10.3">
+        <header>
+          <a class="tag" href="https://github.com/hackspaces/blueshark-forge/releases/tag/v0.10.3">v0.10.3</a>
+          <h2>a help you can actually read</h2>
+          <p class="meta">2026-07-15 · <code>pip install blueshark-forge==0.10.3</code></p>
+        </header>
+        <div class="body">
+<p>Re-cut: the first v0.10.3 tag pointed at a commit that SyntaxErrored on Python</p>
+<p>3.10/3.11 (f-string backslash, PEP 701 — see #41). The tag-gated publish caught it</p>
+<p>and refused to ship, so nothing ever reached PyPI; this tag replaces it on the</p>
+<p>fixed tree. All four matrix jobs (3.10–3.13) are green.</p>
+<p><code>forge --help</code> was a wall: argparse spelled its 16-name brace blob twice (usage</p>
+<p>line + positional header), then listed every command flat. <code>models</code> and <code>setup</code> —</p>
+<p>the first-run path — sat at the bottom. <code>--model</code>, <code>--dir</code>, <code>--name</code>, <code>--verbose</code></p>
+<p>carried no help text at all. And bare <code>forge</code>, the most common invocation of all,</p>
+<p>was never mentioned.</p>
+<p>Help is now grouped by what you&#x27;re trying to do, first-run first:</p>
+<p>Start here      models, setup</p>
+<p>Work            run, bench</p>
+<p>The fleet       up/down, status, send</p>
+<p>What happened   trace, receipts, learnings/forget, passport</p>
+<p>Data out        export, corpus, replay</p>
+<p>It opens with the three invocations people actually type, every option is</p>
+<p>described, and colour is TTY-gated so piping --help stays plain text. The</p>
+<p>subparsers got a &lt;command&gt; metavar too — argparse had been spelling all 16 names</p>
+<p>into every usage line, including the one printed on an error, where it buried the</p>
+<p>actual message.</p>
+<p>Hand-grouped help can drift from the parser in a way a generated list cannot, so</p>
+<p>TestGroupedHelp pins the groups against the real subcommand set (read back out of</p>
+<p>argparse&#x27;s own invalid-choice error) and fails both ways.</p>
+<p>Also adds CLAUDE.md — the repo rules an agent can&#x27;t infer: stdlib-only is</p>
+<p>load-bearing; a merge is not the finish line (merge → release → verify the curl</p>
+<p>one-liner actually serves it); never tag a merge commit; Python 3.10 is the floor</p>
+<p>and a green run on a newer interpreter proves nothing; and why the site&#x27;s grid</p>
+<p>needs minmax(0,1fr).</p>
+<p>719 tests, green on 3.10 / 3.11 / 3.12 / 3.13.</p>
+        </div>
+      </article>
+      <article class="rel" id="v0.10.2">
+        <header>
+          <a class="tag" href="https://github.com/hackspaces/blueshark-forge/releases/tag/v0.10.2">v0.10.2</a>
+          <h2>one canonical install URL, recorded everywhere</h2>
+          <p class="meta">2026-07-15 · <code>pip install blueshark-forge==0.10.2</code></p>
+        </header>
+        <div class="body">
+<p>The domain is live, so the repo now says so — in one voice, everywhere.</p>
+<h5>The real bug: the installer&#x27;s own URL was a 404</h5>
+<p><code>install.sh</code>&#x27;s header told readers to fetch <code>raw.githubusercontent.com/.../main/install.sh</code>. There is no root <code>install.sh</code> — it lives at <code>main/site/install.sh</code>. So anyone who <strong>opened the script before piping it to their shell</strong> (the security-conscious move) hit a dead URL. The header now names the canonical <code>https://topk1.com/forge/install.sh</code>, with the raw-GitHub path documented as a working mirror.</p>
+<h5>One story, not two</h5>
+<p>The installer&#x27;s <strong>Next</strong> steps led with <code>forge setup</code> — the path v0.10.1 deliberately demoted. It now mirrors the first-run welcome exactly:</p>
+<pre><code>
+Next
+  forge                  see what this machine can run
+  forge models use phi-2 a quick starter — pulled + ready in ~2 min
+  forge run &quot;&lt;a task&gt;&quot;   then put it to work
+
+  (or  forge setup  to pick a model ladder yourself)
+</code></pre>
+<p>The README&#x27;s <strong>Set up</strong> section gets the same treatment — it leads with the real first-run output instead of <code>forge setup</code>.</p>
+<h5>Install</h5>
+<pre><code>
+curl -fsSL https://topk1.com/forge/install.sh | sh
+</code></pre>
+<p><code>README.md</code> is the PyPI <code>long_description</code>, so the new instructions ship to the PyPI page too; <code>Homepage</code> now points at <code>https://topk1.com/forge/</code>.</p>
+<p><strong>Verified against the live domain:</strong> <code>/forge</code>, <code>/forge/</code>, and <code>/forge/install.sh</code> all 200; <code>install.sh</code> serves <code>application/x-sh</code> (not the rewritten HTML); the full one-liner runs clean end-to-end. 716 tests pass.</p>
+<p><strong>Full changelog:</strong> https://github.com/hackspaces/blueshark-forge/compare/v0.10.1...v0.10.2</p>
+        </div>
+      </article>
+      <article class="rel" id="v0.10.1">
+        <header>
+          <a class="tag" href="https://github.com/hackspaces/blueshark-forge/releases/tag/v0.10.1">v0.10.1</a>
+          <h2>a real first run + clean piped output</h2>
+          <p class="meta">2026-07-14 · <code>pip install blueshark-forge==0.10.1</code></p>
+        </header>
+        <div class="body">
+<p>Two terminal-UX fixes, both found by dogfooding a fresh <code>pip install blueshark-forge</code>.</p>
+<p>First-run experience (#36)</p>
+<p>Bare <code>forge</code> on a fresh install used to spin a &quot;loading model…&quot; spinner for a</p>
+<p>few seconds and then drop into a chat pointed at a placeholder default model the</p>
+<p>user had never installed — no guidance, no sign of what the machine could run.</p>
+<p>Now it shows the machine&#x27;s hardware, the model-size ceiling it can run, and the</p>
+<p>two commands to get going (<code>forge models</code>, <code>forge models use phi-2</code>, <code>forge run</code>),</p>
+<p>with <code>forge setup</code> as the manual path. <code>forge run &quot;…&quot;</code> exits 1 with the same</p>
+<p>pointer instead of the same dead end. Once a model is configured, nothing changes.</p>
+<p>Clean piped output (#37)</p>
+<p>The thinking/loading spinner and the <code>forge models --all</code> scan progress wrote</p>
+<p><code>\r</code>, ANSI color, and <code>\033[K</code> unconditionally — leaking escape-code spam into</p>
+<p><code>forge run … &gt; log</code>, <code>| tee</code>, and CI capture. Both now animate only on a real</p>
+<p>terminal (<code>sys.stdout.isatty()</code>); off-TTY they&#x27;re silent and the results print</p>
+<p>clean.</p>
+<p>No API changes. 716 tests.</p>
+        </div>
+      </article>
+      <article class="rel" id="v0.10.0">
+        <header>
+          <a class="tag" href="https://github.com/hackspaces/blueshark-forge/releases/tag/v0.10.0">v0.10.0</a>
+          <h2>the model catalog: find and run what your machine can handle</h2>
+          <p class="meta">2026-07-14 · <code>pip install blueshark-forge==0.10.0</code></p>
+        </header>
+        <div class="body">
+<p>forge learns to answer &quot;which open models can MY computer actually run?&quot; — and to</p>
+<p>run them in one command, from a laptop to a datacenter.</p>
+<p>The catalog (<code>forge models</code>):</p>
+<p>· forge models        — a spread of good open models, fit- AND speed-checked</p>
+<p>against your hardware: system RAM on a CPU laptop, unified memory on Apple</p>
+<p>Silicon, and VRAM on a GPU box (single card → multi-GPU / datacenter node).</p>
+<p>&quot;runs well up to ~NB&quot;, honestly — a 7B &quot;fits&quot; 8GB but crawls on CPU; a small</p>
+<p>GPU is judged by its VRAM, not system RAM.</p>
+<p>· forge models --all  — run that same math on the WHOLE downloadable catalog:</p>
+<p>the Ollama library + curated HuggingFace GGUF (the pool LM Studio / llama.cpp /</p>
+<p>Jan draw from) + MLX (Apple Silicon), fetched concurrently and cached.</p>
+<p>· forge models use &lt;name&gt;  — turnkey. Ollama models are pulled + configured;</p>
+<p>llama.cpp models (even a custom arch like sarvam-30b) get their weights fetched,</p>
+<p>a server launched, and config wired — then <code>forge run</code> just works.</p>
+<p>forge models show/stop round it out.</p>
+<p>Frontier models, your own key: <code>forge setup --engine openai|anthropic</code> — forge</p>
+<p>hosts nothing, it drives the API you point it at.</p>
+<p>Harness-lift: the catalog surfaces each model&#x27;s base-vs-harness gain from</p>
+<p><code>forge bench</code> — the &quot;weak weights + strong harness&quot; number, made visible.</p>
+<p>Getting it: a one-line installer (<code>curl -fsSL …/site/install.sh | sh</code>) and a</p>
+<p>landing site that lives in the repo (Vercel-deployable).</p>
+<p>Still stdlib-only, zero runtime deps. 712 tests.</p>
+        </div>
+      </article>
+      <article class="rel" id="v0.9.0">
+        <header>
+          <a class="tag" href="https://github.com/hackspaces/blueshark-forge/releases/tag/v0.9.0">v0.9.0</a>
+          <h2>the model catalog + hardware-honest local defaults</h2>
+          <p class="meta">2026-07-14 · <code>pip install blueshark-forge==0.9.0</code></p>
+        </header>
+        <div class="body">
+<p>forge learns to answer &quot;which model, and will it run here?&quot; — and to run</p>
+<p>on more than a Mac.</p>
+<p>The model catalog (new <code>forge models</code> command family):</p>
+<p>· forge models          — curated, hand-verified recipes checked against</p>
+<p>THIS machine&#x27;s RAM: engine, size, a fit estimate, and an honest</p>
+<p>verified/candidate status (only models forge has actually run are verified).</p>
+<p>· forge models show &lt;n&gt; — the copy-pasteable runbook; for a custom-arch</p>
+<p>model like sarvam-30b, the <code>strings|grep</code> arch gate BEFORE the 20GB</p>
+<p>download, resumable weights, serve flags, the context-match gotcha.</p>
+<p>· forge models use &lt;n&gt;  — turnkey provisioning for Ollama-native models</p>
+<p>(pull, write config, smoke-test → <code>forge run</code> just works). Non-Ollama</p>
+<p>engines get the honest runbook, never a half-done job.</p>
+<p>Hardware-honest local defaults:</p>
+<p>· CPU-only machines (no Apple Silicon, no dGPU) get a RAM-capped ladder</p>
+<p>instead of a 9B escalation rung that would swap-thrash an 8GB laptop.</p>
+<p>· Windows RAM is now detected — it was silently 0, dropping every Windows</p>
+<p>machine to the minimal tier.</p>
+<p>Full-fidelity replay (H11): <code>forge replay --to-fixture</code> now also captures a</p>
+<p>content-addressed workspace snapshot. Credentials are never archived,</p>
+<p>captures are bounded, and everything excluded is an honest fidelity limitation.</p>
+<p>docs/models: an open collection of how models run through forge, first entry</p>
+<p>sarvam-30b.</p>
+<p>Still stdlib-only, zero runtime deps. 667 tests.</p>
+        </div>
+      </article>
+      <article class="rel" id="v0.8.3">
+        <header>
+          <a class="tag" href="https://github.com/hackspaces/blueshark-forge/releases/tag/v0.8.3">v0.8.3</a>
+          <h2>automated, self-proving release pipeline</h2>
+          <p class="meta">2026-07-12 · <code>pip install blueshark-forge==0.8.3</code></p>
+        </header>
+        <div class="body">
+<p>The release process now proves itself. Pushing a <code>vX.Y.Z</code> tag runs one ordered,</p>
+<p>fail-closed pipeline — no manual <code>gh release create</code>, no way to ship a mislabelled</p>
+<p>or untested artifact.</p>
+<p>A <code>v*</code> tag triggers: tests (3.10–3.13, the same reusable matrix every push to main</p>
+<p>runs) → guard (assert the tag equals <code>forge.__version__</code>; build the wheel and</p>
+<p>install it into a clean venv; smoke-test <code>forge --version</code>/<code>--help</code>) → pypi (publish</p>
+<p>the VETTED artifact via OIDC trusted publishing) → github-release (create the</p>
+<p>Release, titled and noted from the <code>release:</code> commit body). Each stage gates the</p>
+<p>next, so a red test, a tag≠version mismatch, or a broken wheel stops the run before</p>
+<p>anything publishes; the Release is created last, so a Release existing means the</p>
+<p>version is already on PyPI. This closes the exact gap behind the v0.7.6–v0.7.11</p>
+<p>&quot;version bumped but never released&quot; drift.</p>
+<p>All actions are pinned by immutable commit SHA (verified commits, not tag objects);</p>
+<p>the publish is idempotent (<code>skip-existing</code>) so a re-pushed tag recovers a failed</p>
+<p>release; jobs carry timeouts and least-privilege permissions. <code>RELEASING.md</code></p>
+<p>documents the one-push flow. <code>tests/test_cli.py</code> adds in-repo checks that the CLI</p>
+<p>starts (<code>--version</code>/<code>--help</code>) and <code>__version__</code> is clean semver — the coherence the</p>
+<p>tag-gate depends on.</p>
+<p>This release is itself the first cut driven through the new pipeline. Stdlib-only,</p>
+<p>zero runtime deps.</p>
+        </div>
+      </article>
+      <article class="rel" id="v0.8.2">
+        <header>
+          <a class="tag" href="https://github.com/hackspaces/blueshark-forge/releases/tag/v0.8.2">v0.8.2</a>
+          <h2>readable output across every report command</h2>
+          <p class="meta">2026-07-11 · <code>pip install blueshark-forge==0.8.2</code></p>
+        </header>
+        <div class="body">
+<p>Extends the width-aware, colour-gated treatment that landed for <code>forge status</code></p>
+<p>in v0.8.1 to every other plain-print surface, via a shared forge/render.py</p>
+<p>(paint · fit · tilde · term_width · strip_ansi). One theme everywhere: output is</p>
+<p>collapsed to a line and fit to the ACTUAL terminal width with an ellipsis rather</p>
+<p>than wrapping into an unreadable block, and colour is emitted only to a real TTY</p>
+<p>(honours NO_COLOR and TERM=dumb) so piped or redirected output stays clean text.</p>
+<ul>
+<li>receipts   coloured ✓/✗ verdict, ~-shortened project, evidence fit to width</li>
+<li>learnings  coloured verified mark, facts fit to width</li>
+<li>trace      coloured header + action, FAIL in red, active flags in yellow,</li>
+</ul>
+<p>~-shortened cwd, a box-drawn divider sized to the header</p>
+<ul>
+<li>run        one-shot event lines fit to width (were fixed [:80]/[:70]) with</li>
+</ul>
+<p>ok/fail, escalate/borrow and inbox lines coloured</p>
+<p>The interactive chat TUI already has its own rich renderer (in-chat actions,</p>
+<p>diffs, file explorer, approval gate) and is unchanged. Stdlib-only, zero runtime</p>
+<p>deps. 526 tests green (+10 for render).</p>
+        </div>
+      </article>
+      <article class="rel" id="v0.8.1">
+        <header>
+          <a class="tag" href="https://github.com/hackspaces/blueshark-forge/releases/tag/v0.8.1">v0.8.1</a>
+          <h2>readable status screen + clean Ctrl-C everywhere</h2>
+          <p class="meta">2026-07-11 · <code>pip install blueshark-forge==0.8.1</code></p>
+        </header>
+        <div class="body">
+<p>Two CLI quality-of-life fixes.</p>
+<p><code>forge status</code> is now readable. The old renderer truncated at a fixed 120/150</p>
+<p>chars with no terminal-width awareness, so long asks and replies wrapped into an</p>
+<p>unreadable block. It now fits the actual terminal: one aligned header per session</p>
+<p>(color glyph by runtime+state — green idle · yellow working · cyan claude), a</p>
+<p>~-shortened path, and task/you/reply each collapsed to a single width-fitted line</p>
+<p>with an ellipsis. forge and Claude Code peers render through one unified path with</p>
+<p>a right-aligned &quot;N forge · M claude&quot; count. Colour is gated on a TTY (honours</p>
+<p>NO_COLOR / TERM=dumb), so piped output stays clean plaintext.</p>
+<p>Ctrl-C exits clean from any command. A KeyboardInterrupt at any prompt or during</p>
+<p>any long command used to dump a raw traceback — most visibly at the <code>forge setup</code></p>
+<p>model-pull prompt, because setup ran entirely outside the top-level try and the</p>
+<p>handler only caught ForgeError. setup now runs inside the guarded block, and the</p>
+<p>CLI boundary catches KeyboardInterrupt/EOFError to exit 130 (the shell SIGINT</p>
+<p>convention) with no traceback. The handler lives in main() so it also covers the</p>
+<p>installed console-script entry point; the chat REPL still swallows its own Ctrl-C</p>
+<p>to cancel a line and is unaffected.</p>
+<p>516 tests green, including a real SIGINT delivered to a live setup prompt.</p>
+        </div>
+      </article>
+      <article class="rel" id="v0.8.0">
+        <header>
+          <a class="tag" href="https://github.com/hackspaces/blueshark-forge/releases/tag/v0.8.0">v0.8.0</a>
+          <h2>the reliability roadmap, finished (semantic loops + richer fault eval)</h2>
+          <p class="meta">2026-07-11 · <code>pip install blueshark-forge==0.8.0</code></p>
+        </header>
+        <div class="body">
+<p>Completes the two partially-shipped items from the evidence-driven-kernel roadmap:</p>
+<p>deeper fault-injection evaluation and semantic loop detection. The harness now</p>
+<p>distinguishes an action that changed the workspace from one that merely repeated it,</p>
+<p>and stresses recovery across three more deterministic failure modes.</p>
+<p>Semantic loop detection</p>
+<p>The loop breaker now keys on an action&#x27;s EFFECT, not just its shape. A write_file</p>
+<p>signature folds a content hash (edit_file already folded its payload), so rewriting</p>
+<p>a file with NEW content is a distinct action — a changed hypothesis that stays</p>
+<p>healthy — while re-emitting the SAME bytes still trips the breaker. Re-running the</p>
+<p>tests after an edit was already healthy (the edit breaks the repeat window); this</p>
+<p>closes the remaining gap where a content-blind write signature falsely grouped</p>
+<p>genuinely-different writes, and where an identical-write loop could slip through.</p>
+<p>Three new fault scenarios (deterministic, zero-inference)</p>
+<p>repeat_storm         duplicate an action to provoke a no-progress loop and exercise</p>
+<p>loop recovery;</p>
+<p>stale_read           re-read a file immediately after mutating it, against the</p>
+<p>harness&#x27;s pre-edit ledger snapshot;</p>
+<p>deceptive_completion inject an unverified &quot;all tests pass&quot; claim right after a</p>
+<p>change — the evidence-aware done-gate must catch it.</p>
+<p>All eight faults are surfaced through <code>forge replay &lt;sid&gt; --fault &lt;name&gt;</code>.</p>
+<p>Two new evaluation metrics</p>
+<p>verification_precision   of the completions the gate judged, the share that were</p>
+<p>truly verified (n/a when nothing was judged — a run that</p>
+<p>verified nothing is not &quot;perfectly precise&quot;);</p>
+<p>workspace_corruption_rate  mutations whose write/edit FAILED, over the mutations</p>
+<p>that actually executed (gate-blocked actions count in</p>
+<p>neither term).</p>
+<p>Hardening from an adversarial review of this change: the fault finder no longer</p>
+<p>crashes on a model row whose raw is valid non-object JSON, and the corruption metric</p>
+<p>no longer inflates its denominator with mutations that never ran. Stdlib-only,</p>
+<p>zero runtime deps. 512 tests green.</p>
+        </div>
+      </article>
+      <article class="rel" id="v0.7.12">
+        <header>
+          <a class="tag" href="https://github.com/hackspaces/blueshark-forge/releases/tag/v0.7.12">v0.7.12</a>
+          <h2>the corpus flywheel (sessions become training data)</h2>
+          <p class="meta">2026-07-11 · <code>pip install blueshark-forge==0.7.12</code></p>
+        </header>
+        <div class="body">
+<p>Turns forge&#x27;s own operating record into training signal for the model that runs</p>
+<p>inside forge. New <code>forge/corpus.py</code> + <code>forge corpus [sid|last|--all] [--out FILE]</code></p>
+<p>reconstruct a session transcript at the turn level (user → action → observation →</p>
+<p>say) and emit two harness-native signals:</p>
+<ul>
+<li>SFT examples — for every action that actually executed, {messages: &lt;context&gt;,</li>
+</ul>
+<p>completion: &lt;action&gt;}: the context paired with the action the model should emit.</p>
+<p>Teaches the action protocol and the tool sequences that worked.</p>
+<ul>
+<li>Preference pairs — the CORRECTION moments, the highest-value signal because they</li>
+</ul>
+<p>are drawn straight from the failure modes forge already measures and repairs:</p>
+<p>{prompt, chosen, rejected, kind}. kind=grammar is a malformed strike recovered to</p>
+<p>valid action JSON; kind=narrate is an &quot;I&#x27;ll do it…&quot; preamble that got bounced,</p>
+<p>recovered to real work (the act-don&#x27;t-narrate reward). chosen &gt; rejected is the</p>
+<p>DPO/ORPO reward.</p>
+<p>Deterministic and stdlib-only. The per-session workspace briefing is intentionally</p>
+<p>omitted from the reconstructed context — it isn&#x27;t recoverable from a transcript and</p>
+<p>the trainer prepends a consistent system prompt instead. <code>--out corpus.jsonl</code> writes</p>
+<p>flat JSONL tagged by split (sft/pref) over one session or every recorded one.</p>
+<p>This is turn one of the flywheel: every session forge runs is now labeled data for</p>
+<p>the harness that produced it. 456 tests green.</p>
+        </div>
+      </article>
+      <article class="rel" id="v0.7.11">
+        <header>
+          <a class="tag" href="https://github.com/hackspaces/blueshark-forge/releases/tag/v0.7.11">v0.7.11</a>
+          <h2>zero-inference fault-injection replay + newline classifier fix</h2>
+          <p class="meta">2026-07-11 · <code>pip install blueshark-forge==0.7.11</code></p>
+        </header>
+        <div class="body">
+<p>Adds deterministic, zero-inference fault injection over recorded replay traces:</p>
+<p><code>forge replay &lt;sid&gt; --fault &lt;name&gt;</code> (repeatable) injects into a deep copy of the</p>
+<p>trace — the recorded session and workspace stay untouched — and re-drives it</p>
+<p>through the real Agent.send loop. Five scenarios ship: truncate_output,</p>
+<p>malformed_burst, wrong_edit_anchor, force_compaction, and authority_violation.</p>
+<p>The report covers recovery, false-completion, action/tool efficiency, observation</p>
+<p>failures, loops, escalations, authority denials, completion rejections, and</p>
+<p>context-token pressure; inapplicable and unknown injections are reported</p>
+<p>explicitly rather than silently skipped.</p>
+<p>Also rolls up the post-v0.7.10 fix that treats unquoted newlines as command</p>
+<p>separators in the authority classifier, so a privileged later line can no longer</p>
+<p>hide behind a benign first command (quoted multi-line data stays exempt).</p>
+        </div>
+      </article>
+      <article class="rel" id="v0.7.10">
+        <header>
+          <a class="tag" href="https://github.com/hackspaces/blueshark-forge/releases/tag/v0.7.10">v0.7.10</a>
+          <h2>token-aware authority classifier hardening</h2>
+          <p class="meta">2026-07-11 · <code>pip install blueshark-forge==0.7.10</code></p>
+        </header>
+        <div class="body">
+<p>Replaces the shell admin-classification regexes with shlex token-aware parsing</p>
+<p>that inspects the actual parsed command and delete targets. Closes prior bypasses</p>
+<p>and false positives: recursive-force deletes are detected across combined, split,</p>
+<p>and GNU long options; targets are analyzed after quote removal so absolute, home,</p>
+<p>variable, <code>.</code>/<code>..</code>, traversal-outside-workspace, and unprovable-wildcard deletes</p>
+<p>are admin-only while workspace-relative cleanup (rm -rf build/./dist/cache) stays</p>
+<p>at operator; remote installer pipes are matched structurally across segments;</p>
+<p>wrappers and env assignments before a privileged command are handled; forced git</p>
+<p>history includes --force-with-lease; secret stores match by path component with</p>
+<p>.env.example/.sample/.template explicitly permitted. Invalid FORGE_AUTHORITY now</p>
+<p>fails closed to observe, and malformed shell tokenization fails closed to admin.</p>
+        </div>
+      </article>
+      <article class="rel" id="v0.7.9">
+        <header>
+          <a class="tag" href="https://github.com/hackspaces/blueshark-forge/releases/tag/v0.7.9">v0.7.9</a>
+          <h2>runtime authority separate from model capability</h2>
+          <p class="meta">2026-07-11 · <code>pip install blueshark-forge==0.7.9</code></p>
+        </header>
+        <div class="body">
+<p>Adds harness-owned authority levels (observe/contribute/operator/admin, default</p>
+<p>operator) independent of model passports and ladder tier, configured via</p>
+<p>FORGE_AUTHORITY. Authority is checked before interaction mode and cannot be</p>
+<p>expanded by a stronger escalated model. The constrained grammar is narrowed</p>
+<p>before generation and re-enforced after parsing for advisory engines; denials</p>
+<p>log actual/required authority and project into the canonical protocol as</p>
+<p>AuthorityDenied → DIAGNOSE (recovery to PLAN). Admin-only shell is scoped to</p>
+<p>genuinely dangerous patterns — sudo, remote-script pipes, secret-store reads,</p>
+<p>forced git history, and recursive-force deletes aimed at root/home/an absolute</p>
+<p>path — while everyday-safe commands (env, rm -rf of a project subdir) stay at</p>
+<p>operator. Read-only <code>fleet_send target=list</code> remains available to observers.</p>
+        </div>
+      </article>
+      <article class="rel" id="v0.7.8">
+        <header>
+          <a class="tag" href="https://github.com/hackspaces/blueshark-forge/releases/tag/v0.7.8">v0.7.8</a>
+          <h2>deterministic completion policy</h2>
+          <p class="meta">2026-07-11 · <code>pip install blueshark-forge==0.7.8</code></p>
+        </header>
+        <div class="body">
+<p>Turns completion accept/reject from control-flow booleans into an explicit,</p>
+<p>inspectable CompletionPolicy over harness-built EvidenceContracts. Three modes</p>
+<p>via FORGE_COMPLETION_POLICY: audit (record, never block), balanced (default —</p>
+<p>reject a failed check once, then permit the historical second-claim escape as a</p>
+<p>named single_bounce_override), and strict (require passing verification for every</p>
+<p>changed workspace). Each decision is logged as completion_policy with its</p>
+<p>evidence and attempt number, and the final decision is attached to accepted</p>
+<p>assistant records. Balanced mode is outcome-compatible with prior behavior while</p>
+<p>making the former invisible escape hatch explicit. README documents the modes.</p>
+        </div>
+      </article>
+      <article class="rel" id="v0.7.7">
+        <header>
+          <a class="tag" href="https://github.com/hackspaces/blueshark-forge/releases/tag/v0.7.7">v0.7.7</a>
+          <h2>evidence-aware completion gate</h2>
+          <p class="meta">2026-07-11 · <code>pip install blueshark-forge==0.7.7</code></p>
+        </header>
+        <div class="body">
+<p>Connects the v0.7.6 evidence model to the real agent loop. A turn-scoped,</p>
+<p>harness-owned EvidenceCollector records changed files (from write/edit and</p>
+<p>opaque mutating bash) and verification results (command, exit code, output</p>
+<p>digest) straight from tool outcomes — the model cannot forge it. Every accepted</p>
+<p>completion carries an EvidenceContract with <code>verified</code>; a failed done-gate emits</p>
+<p>a structured <code>completion_rejected</code> record with its evidence, and a missing/absent</p>
+<p>runner is captured as an explicit unverified assumption. Evidence resets each</p>
+<p>user turn. The done-gate&#x27;s accept/reject decision and the action schema are</p>
+<p>unchanged — the contract is additive on assistant/completion_rejected records.</p>
+        </div>
+      </article>
+      <article class="rel" id="v0.7.6">
+        <header>
+          <a class="tag" href="https://github.com/hackspaces/blueshark-forge/releases/tag/v0.7.6">v0.7.6</a>
+          <h2>evidence-driven execution kernel</h2>
+          <p class="meta">2026-07-11 · <code>pip install blueshark-forge==0.7.6</code></p>
+        </header>
+        <div class="body">
+<p>Formalizes a first-class execution state model (ORIENT→INVESTIGATE→PLAN→MUTATE→</p>
+<p>VERIFY→DIAGNOSE→COMPLETE) and a versioned canonical runtime event protocol, and</p>
+<p>projects existing session transcript records onto additive <code>runtime</code> envelopes</p>
+<p>without changing or removing any legacy field. Adds structured evidence</p>
+<p>contracts (changed files, verification, digests, unverified assumptions) plus</p>
+<p>verification obligations and recovery transitions on state changes. A stuck</p>
+<p>hand-off is no longer misprojected as a completion claim.</p>
+        </div>
+      </article>
+      <article class="rel" id="v0.7.5">
+        <header>
+          <a class="tag" href="https://github.com/hackspaces/blueshark-forge/releases/tag/v0.7.5">v0.7.5</a>
+          <h2>Phase 6 tools + environment fluency</h2>
+          <p class="meta">2026-07-10 · <code>pip install blueshark-forge==0.7.5</code></p>
+        </header>
+        <div class="body">
+<p>The harness grows better limbs, and learns the machine it&#x27;s running on.</p>
+<h4>New actions &amp; mechanisms</h4>
+<ul>
+<li><strong>run_tests</strong> — one action runs the project&#x27;s REAL test suite (auto-detected — no guessing pytest vs npm) and returns a COMPACT digest: the counts line, which tests failed, the assertion, and your files in the traceback. It parses pytest/unittest/go/cargo/jest and filters site-packages noise out of the frames — surfacing exactly the short summary that a raw-output cut buries. A known runner you invoke by hand via bash is digested too.</li>
+<li><strong>Atomic multi-edit</strong> — <code>edit_file</code> learns an <code>edits:[{old,new},…]</code> array applied validate-first, all-or-nothing: a rename + its call sites in one turn instead of one edit per turn. Also fixes a loop-detector false-positive on consecutive distinct edits to one file.</li>
+<li><strong>Background-process supervisor</strong> — a crashed background server is now visible the instant it dies (pushed into context unprompted), and a live roster of pids/logs rides bash observations so they survive compaction.</li>
+</ul>
+<h4>Environment fluency</h4>
+<p>The harness knows the OS but now also its *behavioral* differences: on macOS it surfaces the BSD-vs-GNU userland quirks (<code>timeout</code>→<code>gtimeout</code>, <code>sed -i</code> needs a suffix arg, no <code>readlink -f</code>/<code>date -d</code>), naming the GNU tools actually installed, and error hints gain OS-gated recovery lines. It also detects the project&#x27;s real interpreter (<code>.venv</code>/<code>uv</code>/<code>poetry</code>) so &quot;use python3&quot; becomes &quot;use <code>.venv/bin/python</code>&quot;.</p>
+<p>Stdlib-only, zero runtime deps. 450 tests green.</p>
+        </div>
+      </article>
+      <article class="rel" id="v0.7.4">
+        <header>
+          <a class="tag" href="https://github.com/hackspaces/blueshark-forge/releases/tag/v0.7.4">v0.7.4</a>
+          <h2>&#x27;act, don&#x27;t narrate&#x27; guard</h2>
+          <p class="meta">2026-07-10 · <code>pip install blueshark-forge==0.7.4</code></p>
+        </header>
+        <div class="body">
+<p>A harness fix surfaced by running forge through a real, standard agentic coding benchmark (bare vs full harness ablation).</p>
+<h4>What the benchmark caught</h4>
+<p>Running the same model (qwen3-coder:30b) with the harness off vs on, the *full* harness scored <strong>worse</strong> (0/5 vs bare 2/5) — not because the model was worse, but because of a harness defect: the model would read the files, emit a <code>say</code> like *&quot;I&#x27;ll implement it… let me analyze&quot;*, and the harness accepted that as the finished turn and stopped — before writing a single line. The done-gate only bounces a <code>say</code> after file mutations, so a read-then-narrate turn slipped through.</p>
+<h4>The fix</h4>
+<p>In autonomous mode, a <code>say</code> that only *describes* upcoming file work after a zero-mutation turn is now bounced once — &quot;do the work, don&#x27;t narrate your plan.&quot; This took the full harness from <strong>0/5 → 3/5</strong> on the slice, eliminating the regression. It also helps small models, which are especially prone to narrate-and-bail.</p>
+<p>This is the &quot;test the harness, not the model&quot; methodology in action: an ablation on a real benchmark found a genuine scaffolding bug that a raw pass-rate would have hidden.</p>
+<p>Stdlib-only, zero runtime deps. 423 tests green.</p>
+        </div>
+      </article>
+      <article class="rel" id="v0.7.3">
+        <header>
+          <a class="tag" href="https://github.com/hackspaces/blueshark-forge/releases/tag/v0.7.3">v0.7.3</a>
+          <h2>Trial fixes + send() decomposition</h2>
+          <p class="meta">2026-07-10 · <code>pip install blueshark-forge==0.7.3</code></p>
+        </header>
+        <div class="body">
+<p>Fixes surfaced by a live end-to-end trial (a real 7B and 30B model fixing a buggy project through the CLI), plus a readability refactor of the core loop.</p>
+<h4>Trial-driven fixes</h4>
+<ul>
+<li><strong>edit_file</strong> now hands back a ready-to-use line-anchored template when the <code>old</code> snippet doesn&#x27;t match, so models don&#x27;t have to reproduce it byte-exactly (they routinely can&#x27;t).</li>
+<li><strong>detect_test_cmd</strong> recognizes a bare root-level <code>test_*.py</code> / <code>*_test.py</code>, so the synchronous done-gate auto-verifies for the common small-project layout.</li>
+<li><strong>Accurate stuck message</strong> on a single-model ladder (&quot;no stronger local model to escalate to&quot; instead of a false &quot;even after escalating&quot;).</li>
+<li><strong>write_file</strong> ensures a single final newline (quieter diffs).</li>
+</ul>
+<h4>Refactor</h4>
+<ul>
+<li>The 500-line <code>send()</code> loop is decomposed into named single-responsibility methods (<code>_begin_turn</code>, <code>_prepare_and_generate</code>, <code>_handle_malformed</code>, <code>_execute_and_record</code>, <code>_handle_failure</code>, <code>_escalate</code>, <code>_do_fleet_send</code>, <code>_log_step</code>). Control-altering phases use explicit signals so the loop&#x27;s early-exit semantics are preserved exactly — verified by the full test suite AND real 7B/30B inference.</li>
+</ul>
+<p>Stdlib-only, zero runtime deps. 419 tests green.</p>
+        </div>
+      </article>
+      <article class="rel" id="v0.7.2">
+        <header>
+          <a class="tag" href="https://github.com/hackspaces/blueshark-forge/releases/tag/v0.7.2">v0.7.2</a>
+          <h2>Review cleanup pass</h2>
+          <p class="meta">2026-07-10 · <code>pip install blueshark-forge==0.7.2</code></p>
+        </header>
+        <div class="body">
+<p>A bug-fix release clearing the remaining lower-severity findings from the adversarial review (20 fixes, one commit each).</p>
+<h4>Fixes</h4>
+<ul>
+<li><strong>Resource leaks:</strong> background-log fds, session wake-pipe fds, and the throwaway replay tempdir are all released now.</li>
+<li><strong>Crash-safety:</strong> the TRUST daemon&#x27;s state files are written atomically (crash mid-write no longer resets them).</li>
+<li><strong>Fleet concurrency:</strong> the Claude-bridge inbox read-modify-write is flock-serialized; the wake-pipe drain is now atomic with the inbox swap (no lost wakeups).</li>
+<li><strong>Verification accuracy:</strong> interpreter inline-code runs (<code>python -c</code>, <code>node -e</code>) count as file-mutating; the read-before-edit gate falls back to a content sha1 when mtime+size look unchanged.</li>
+<li><strong>Resilience / graceful degradation:</strong> deeply-nested Python no longer aborts the symbol index; a missing <code>git</code>, an empty model ladder, non-numeric <code>offset</code>/<code>limit</code>, non-string action fields, and a transient 400 all degrade cleanly instead of crashing or persisting bad state.</li>
+<li><strong>Fidelity:</strong> edits preserve CRLF line endings and executable bits; a subset index refresh no longer clobbers the cache.</li>
+</ul>
+<p>Stdlib-only, zero runtime deps. 416 tests green.</p>
+        </div>
+      </article>
+      <article class="rel" id="v0.7.1">
+        <header>
+          <a class="tag" href="https://github.com/hackspaces/blueshark-forge/releases/tag/v0.7.1">v0.7.1</a>
+          <h2>Adversarial-review hardening</h2>
+          <p class="meta">2026-07-10 · <code>pip install blueshark-forge==0.7.1</code></p>
+        </header>
+        <div class="body">
+<p>A bug-fix release hardening forge against the HIGH-tier and corruption-class findings from a six-agent adversarial review of the whole codebase.</p>
+<h4>Fixes</h4>
+<ul>
+<li><strong>Stream parsers</strong> no longer crash on hostile frames — a non-object JSON frame (<code>{&quot;message&quot;: null}</code>, a bare number/array/string) or a non-string <code>content</code> previously raised an uncaught error that killed the turn or silently truncated the stream.</li>
+<li><strong>Anchored edits</strong> can no longer silently delete lines — <code>end_line</code> is now validated against the range actually read, and a blank anchor matches only a truly identical line.</li>
+<li><strong>TRUST daemon</strong> no longer permanently suppresses a done-claim after a transient verify timeout/error (the claim is marked seen only after a verdict is produced).</li>
+<li><strong>Verify subprocess</strong> is bounded and group-killed on timeout, so it can&#x27;t abort the tick or orphan the real test process.</li>
+<li><strong>A bad paste no longer quits the REPL</strong> — an undecodable stdin byte is skipped instead of being read as EOF.</li>
+<li><strong>Writes are atomic</strong> (temp-file + <code>os.replace</code>, mode-preserving) so a mid-write failure can&#x27;t truncate the original file.</li>
+<li>Plus: paths-with-spaces handling, unreadable-store resilience, concurrent-passport-write safety, and cleaner error surfacing.</li>
+</ul>
+<p>Stdlib-only, zero runtime deps. 415 tests green.</p>
+        </div>
+      </article>
+      <article class="rel" id="v0.7.0">
+        <header>
+          <a class="tag" href="https://github.com/hackspaces/blueshark-forge/releases/tag/v0.7.0">v0.7.0</a>
+          <h2>Phase 5: Small-model amplification</h2>
+          <p class="meta">2026-07-08 · <code>pip install blueshark-forge==0.7.0</code></p>
+        </header>
+        <div class="body">
+<p>Phase 5 complete — the harness scaffolding that makes small local models reliable.</p>
+<h4>Highlights</h4>
+<ul>
+<li><strong>Model passports (P5.8)</strong> — forge measures each model (active ~90s setup probe + passive live telemetry) and auto-tunes its own knobs: tighter loop threshold for loop-prone models, bigger <code>num_predict</code> for write-file truncators, hotter retry schedule for greedy-identical failers. New <code>forge passport</code>.</li>
+<li><strong>Step-scoped borrowing + unified stuck ledger (P5.7)</strong> — one weighted per-turn stuck score; buy a single strong-rung generation at the exact decision points the cheap model is stuck, then decay back.</li>
+<li><strong>Self-harvested few-shot exemplars (P5.6)</strong> — malformed-retry nudges quote the model&#x27;s own past valid actions.</li>
+<li><strong>Retry-heat temperature (P5.5)</strong> — greedy first try, perturb on each nudge, reset on success.</li>
+<li><strong>Deterministic JSON salvage (P5.4)</strong> — recover fenced / prose-prefixed / trailing-comma action JSON before counting a malformed strike.</li>
+<li><strong>Line-anchored edit dialect (P5.3)</strong>, <strong>dry-run verifier + best-of-N resample (P5.2)</strong>, <strong>state-dependent action grammar (P5.1)</strong>.</li>
+</ul>
+<p>Stdlib-only, zero runtime deps. 403 tests green.</p>
+        </div>
+      </article>
+      <article class="rel" id="v0.6.0">
+        <header>
+          <a class="tag" href="https://github.com/hackspaces/blueshark-forge/releases/tag/v0.6.0">v0.6.0</a>
+          <h2>Phase 3: Measurement</h2>
+          <p class="meta">2026-07-07 · <code>pip install blueshark-forge==0.6.0</code></p>
+        </header>
+        <div class="body">
+<p>Phase 3 makes forge&#x27;s core thesis — *the harness makes small models capable* — measurable and regressable.</p>
+<h4>Highlights</h4>
+<ul>
+<li><strong><code>forge bench</code></strong> — task-eval harness reporting <strong>harness-lift</strong> (same model bare vs full) with per-lever ablation across 8 switchable levers (schema, workspace, plan-pin, loop-detect, read-gate, alias-repair, escalation, compaction). Default = all levers on = byte-for-byte unchanged.</li>
+<li><strong>Structured step trace</strong> — one schema-versioned <code>meta</code> record per session + one <code>step</code> record per loop iteration; the formerly-invisible malformed/loop/compaction events now log durably. New <strong><code>forge trace &lt;sid|last&gt;</code></strong>.</li>
+<li><strong>Flight recorder + <code>forge replay</code></strong> — records raw model output per step (malformed raws included) into a <code>RecordingBackend</code> cassette; re-drives a real <code>Agent.send</code> with <strong>no model</strong>, turning any recorded session into a zero-inference regression fixture.</li>
+<li><strong>Agent-loop invariant battery</strong> — direct tests for escalation, loop detection, compaction, plan pinning, and inbox absorption.</li>
+</ul>
+<p>Suite: <strong>215 tests green</strong>, stdlib-only, zero runtime deps.</p>
+        </div>
+      </article>
+      <article class="rel" id="v0.5.0">
+        <header>
+          <a class="tag" href="https://github.com/hackspaces/blueshark-forge/releases/tag/v0.5.0">v0.5.0</a>
+          <h2>forge v0.5.0 — /files folder explorer</h2>
+          <p class="meta">2026-07-07 · <code>pip install blueshark-forge==0.5.0</code></p>
+        </header>
+        <div class="body">
+<h4><code>/files</code> — a Miller-column folder explorer in the terminal</h4>
+<p>Three panes like ranger/Finder, dependency-free: <strong>parent · current · preview</strong> (file contents; directories show their entries; binaries show size). Runs on the alternate screen — your conversation is restored pixel-perfect on close.</p>
+<ul>
+<li><code>↑↓</code> move · <code>←→</code> navigate</li>
+<li><code>Enter</code> on a file <strong>attaches it to your next message</strong> as <code>@file</code> (prompt pre-filled)</li>
+<li><code>.</code> toggles hidden files · <code>q</code>/<code>Esc</code> closes</li>
+</ul>
+<p><strong>Full changelog</strong>: https://github.com/hackspaces/blueshark-forge/compare/v0.4.1...v0.5.0</p>
+        </div>
+      </article>
+      <article class="rel" id="v0.4.1">
+        <header>
+          <a class="tag" href="https://github.com/hackspaces/blueshark-forge/releases/tag/v0.4.1">v0.4.1</a>
+          <h2>forge v0.4.1</h2>
+          <p class="meta">2026-07-07 · <code>pip install blueshark-forge==0.4.1</code></p>
+        </header>
+        <div class="body">
+<h4>Fix</h4>
+<ul>
+<li><strong>No more guessed project types</strong> — the workspace briefing and banner only claim a project type from a real manifest at the root (<code>go.mod</code>, <code>package.json</code>, <code>pyproject.toml</code>, …), naming the marker. A directory with stray source files (like a home dir with one <code>.go</code> file) gets no label at all.</li>
+</ul>
+<p><strong>Full changelog</strong>: https://github.com/hackspaces/blueshark-forge/compare/v0.4.0...v0.4.1</p>
+        </div>
+      </article>
+      <article class="rel" id="v0.4.0">
+        <header>
+          <a class="tag" href="https://github.com/hackspaces/blueshark-forge/releases/tag/v0.4.0">v0.4.0</a>
+          <h2>forge v0.4.0 — background processes</h2>
+          <p class="meta">2026-07-07 · <code>pip install blueshark-forge==0.4.0</code></p>
+        </header>
+        <div class="body">
+<h4>Servers keep running while the agent tests them</h4>
+<ul>
+<li><strong><code>bash {command, background: true}</code></strong> — starts the process detached, returns <strong>immediately</strong> with its pid + a live log file, and keeps it running while the agent continues: curl it, run a client, <code>tail</code> the log, <code>kill</code> the pid.</li>
+<li>A trailing <code>&amp;</code> triggers the same path automatically (<code>&amp;&amp;</code> chains do not).</li>
+<li>An instant crash — taken port, compile error — is caught within ~1s and reported with its real output instead of pretending to run.</li>
+<li>All background processes are cleaned up when the forge session exits.</li>
+</ul>
+<p>Also includes the v0.3.1 pathless write_file fix.</p>
+<p><strong>Full changelog</strong>: https://github.com/hackspaces/blueshark-forge/compare/v0.3.1...v0.4.0</p>
+        </div>
+      </article>
+      <article class="rel" id="v0.3.1">
+        <header>
+          <a class="tag" href="https://github.com/hackspaces/blueshark-forge/releases/tag/v0.3.1">v0.3.1</a>
+          <h2>forge v0.3.1</h2>
+          <p class="meta">2026-07-07 · <code>pip install blueshark-forge==0.3.1</code></p>
+        </header>
+        <div class="body">
+<h4>Fix: pathless write_file soft-lock</h4>
+<p>Small models sometimes emit <code>write_file</code>/<code>edit_file</code> with the path under a different key (<code>filename</code>, <code>file</code>, …) or missing entirely. That used to hit an internal guard with a confusing block, invisibly — the model would spiral into mkdir/touch/echo workarounds.</p>
+<ul>
+<li>path aliases honored: <code>filename</code> / <code>file</code> / <code>filepath</code> / <code>file_path</code> / <code>name</code></li>
+<li>truly pathless actions get an instructive error showing the exact JSON to re-send</li>
+<li>the read-before-edit guard only triggers on real files and now logs to the transcript</li>
+</ul>
+<p><strong>Full changelog</strong>: https://github.com/hackspaces/blueshark-forge/compare/v0.3.0...v0.3.1</p>
+        </div>
+      </article>
+      <article class="rel" id="v0.3.0">
+        <header>
+          <a class="tag" href="https://github.com/hackspaces/blueshark-forge/releases/tag/v0.3.0">v0.3.0</a>
+          <h2>forge v0.3.0 — plan/auto/manual modes + live message queue</h2>
+          <p class="meta">2026-07-07 · <code>pip install blueshark-forge==0.3.0</code></p>
+        </header>
+        <div class="body">
+<h4>Modes — <code>shift+tab</code> cycles (or <code>/mode</code>)</h4>
+<ul>
+<li><strong>auto</strong> — acts freely, no questions (the default, unchanged)</li>
+<li><strong>plan</strong> — read-only: investigates with read/grep/glob/list, presents a plan via <code>say</code>; mutating actions are blocked with guidance</li>
+<li><strong>manual</strong> — every mutating action (<code>bash</code>, <code>write_file</code>, <code>edit_file</code>, <code>fleet_send</code>) asks first:</li>
+<li><code>y</code> — yes, once</li>
+<li><code>a</code> — always: saves the approval (bash by command head like <code>bash:git</code>, others by action type) so it never asks again</li>
+<li><code>n</code> — no: the model is told not to retry as-is</li>
+</ul>
+<h4>Queue messages while it works</h4>
+<p>The input box stays live during a run — type and press Enter to deliver a message the agent absorbs <strong>between steps</strong> and steers by. Anything not absorbed becomes the next turn. The approval question paints in the activity row above the box.</p>
+<p><strong>Full changelog</strong>: https://github.com/hackspaces/blueshark-forge/compare/v0.2.3...v0.3.0</p>
+        </div>
+      </article>
+      <article class="rel" id="v0.2.3">
+        <header>
+          <a class="tag" href="https://github.com/hackspaces/blueshark-forge/releases/tag/v0.2.3">v0.2.3</a>
+          <h2>forge v0.2.3 — clean rendering</h2>
+          <p class="meta">2026-07-07 · <code>pip install blueshark-forge==0.2.3</code></p>
+        </header>
+        <div class="body">
+<h4>Clean rendering</h4>
+<ul>
+<li><strong>Word-wrapped replies</strong> — reply text wraps at word boundaries with a 2-space margin, streamed or whole; no more mid-word hard breaks (<code>CONTRIBU</code> / <code>TING.md</code>)</li>
+<li><strong>Rounded input box with two writable lines</strong> — long input wraps onto a second row as you type instead of scrolling horizontally; overflow keeps the cursor visible</li>
+<li>Footer layout: activity spinner · boxed input · status line</li>
+</ul>
+<p><strong>Full changelog</strong>: https://github.com/hackspaces/blueshark-forge/compare/v0.2.2...v0.2.3</p>
+        </div>
+      </article>
+      <article class="rel" id="v0.2.2">
+        <header>
+          <a class="tag" href="https://github.com/hackspaces/blueshark-forge/releases/tag/v0.2.2">v0.2.2</a>
+          <h2>forge v0.2.2</h2>
+          <p class="meta">2026-07-06 · <code>pip install blueshark-forge==0.2.2</code></p>
+        </header>
+        <div class="body">
+<h4>Fixes</h4>
+<ul>
+<li><strong>Working spinner in the output flow</strong> — the <code>working…</code> indicator now sits just above the input (where output streams), not below it; footer is now activity · rule · input · status</li>
+<li><strong>Roster-format targets resolve</strong> — <code>fleet_send</code> accepts <code>name(sid-prefix)</code> exactly as the session list displays it</li>
+<li><strong>Self-excluding target match</strong> — messaging a name you share with another session picks the *other* session instead of failing as ambiguous</li>
+<li>Ambiguity errors now suggest id-prefix targeting</li>
+</ul>
+<p><strong>Full changelog</strong>: https://github.com/hackspaces/blueshark-forge/compare/v0.2.1...v0.2.2</p>
+        </div>
+      </article>
+      <article class="rel" id="v0.2.1">
+        <header>
+          <a class="tag" href="https://github.com/hackspaces/blueshark-forge/releases/tag/v0.2.1">v0.2.1</a>
+          <h2>forge v0.2.1</h2>
+          <p class="meta">2026-07-06 · <code>pip install blueshark-forge==0.2.1</code></p>
+        </header>
+        <div class="body">
+<h4>Fixes</h4>
+<ul>
+<li><strong>Ctrl-C no longer crashes with a traceback</strong> — it now stops the agent gracefully; pressing Esc/Ctrl-C a second time force-returns the prompt if a step is stuck</li>
+<li><strong>Esc interrupts long-running commands</strong> — a slow <code>find</code>/build is killed immediately (whole process group) instead of running to completion</li>
+<li><strong><code>fleet_send</code> target <code>list</code></strong> — the agent can now answer &quot;what sessions are you connected to&quot; with the full cross-runtime roster (forge + Claude Code)</li>
+</ul>
+<p><strong>Full changelog</strong>: https://github.com/hackspaces/blueshark-forge/compare/v0.2.0...v0.2.1</p>
+        </div>
+      </article>
+      <article class="rel" id="v0.2.0">
+        <header>
+          <a class="tag" href="https://github.com/hackspaces/blueshark-forge/releases/tag/v0.2.0">v0.2.0</a>
+          <h2>forge v0.2.0 — one fleet with Claude Code</h2>
+          <p class="meta">2026-07-06 · <code>pip install blueshark-forge==0.2.0</code></p>
+        </header>
+        <div class="body">
+<h4>One fleet with Claude Code</h4>
+<p>forge now speaks the Claude Code fleet wire protocol. On a machine running Claude Code with a fleet channel:</p>
+<ul>
+<li><strong>Unified board</strong> — <code>forge status</code> lists Claude Code sessions alongside forge sessions (task, last prompt, last reply), and Claude Code&#x27;s fleet board sees forge sessions.</li>
+<li><strong>Cross-runtime messaging, both directions</strong> — <code>forge send</code> / the agent&#x27;s <code>fleet_send</code> reach Claude Code sessions (arriving as channel events mid-conversation); Claude Code&#x27;s <code>fleet_send</code> reaches forge sessions (arriving in the agent&#x27;s inbox mid-work).</li>
+<li><strong>Zero config</strong> — every forge session registers in the shared inbox registry and accepts the fleet&#x27;s authenticated <code>POST /send</code>.</li>
+<li><strong><code>forge setup</code> checks interop on any machine</strong> — detects Claude Code, prepares the shared token, and reports exactly what works. Without Claude Code, forge&#x27;s native fleet works standalone.</li>
+</ul>
+<p>Verified live in both directions before release.</p>
+<p><strong>Full changelog</strong>: https://github.com/hackspaces/blueshark-forge/compare/v0.1.1...v0.2.0</p>
+        </div>
+      </article>
+      <article class="rel" id="v0.1.1">
+        <header>
+          <a class="tag" href="https://github.com/hackspaces/blueshark-forge/releases/tag/v0.1.1">v0.1.1</a>
+          <h2>forge v0.1.1</h2>
+          <p class="meta">2026-07-06 · <code>pip install blueshark-forge==0.1.1</code></p>
+        </header>
+        <div class="body">
+<h4>What&#x27;s new</h4>
+<h5>Claude-Code-grade terminal</h5>
+<ul>
+<li>Bottom-pinned input with a scroll-region transcript, live status line (model · context %), boxed diffs, and a welcome banner</li>
+<li>Live plan panel and clean tool-step rendering with pass/fail + timing</li>
+</ul>
+<h5>Line-editor polish</h5>
+<ul>
+<li>Delete/Home/End keys and readline-style Ctrl-A/E (home/end), Ctrl-U/K/W (kill line-start / line-end / word)</li>
+<li>Multi-byte UTF-8 input decoded correctly</li>
+<li>Delete key no longer inserts a stray <code>~</code></li>
+<li>Terminal resize (SIGWINCH) re-pins the scroll region and repaints the footer</li>
+<li>Long input lines no longer wrap into the pinned footer</li>
+<li>Arrow keys pressed mid-run no longer stop the agent — bare Esc still does</li>
+</ul>
+<p><strong>Full changelog</strong>: https://github.com/hackspaces/blueshark-forge/compare/v0.1.0...v0.1.1</p>
+        </div>
+      </article>
+      <article class="rel" id="v0.1.0">
+        <header>
+          <a class="tag" href="https://github.com/hackspaces/blueshark-forge/releases/tag/v0.1.0">v0.1.0</a>
+          <h2>forge v0.1.0</h2>
+          <p class="meta">2026-07-06 · <code>pip install blueshark-forge==0.1.0</code></p>
+        </header>
+        <div class="body">
+<p>A model-agnostic agentic runtime for the terminal — any local model becomes a capable agent, because the intelligence lives in the harness, not the weights.</p>
+<p><strong>Install</strong></p>
+<pre><code>
+pipx install blueshark-forge   # or: pip install blueshark-forge
+forge setup                    # detects your hardware / picks an engine + models
+forge                          # open it in any repo and talk to it
+</code></pre>
+<p><strong>Highlights</strong></p>
+<ul>
+<li>Runs any local model via Ollama, or any OpenAI-compatible server (vLLM, llama.cpp, MLX, LM Studio, TGI, SGLang, cloud)</li>
+<li>Harness levers that make small models capable: constrained decoding, living plan, surgical edits, self-correction, read-before-edit, a local model ladder that escalates when stuck</li>
+<li>Workspace + machine awareness, streaming TUI (Esc to clear/stop), honest per-model context management</li>
+<li>Native multi-agent fleet: session tracking, token-authenticated messaging, independent verification, coordination, shared learnings</li>
+<li>Stdlib-only, 34 tests, CI across Python 3.10–3.13</li>
+</ul>
+        </div>
+      </article>
+  </main>
+
+  <footer>
+    <span>model-agnostic agentic runtime · stdlib-only, zero runtime deps · MIT</span>
+    <span class="sp"></span>
+    <span>generated from the GitHub Releases</span>
+  </footer>
+</body>
+</html>
