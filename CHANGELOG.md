@@ -5,6 +5,12 @@ Every published release of `blueshark-forge`, newest first.
 Generated from the GitHub Releases by `tools/changelog.py` — the releases are
 what the tag-gated publish actually shipped, so this cannot drift. Don't hand-edit.
 
+## [v0.11.5](https://github.com/hackspaces/blueshark-forge/releases/tag/v0.11.5) — a project with no tests is winnable again
+
+*2026-07-15 · `pip install blueshark-forge==0.11.5`*
+
+See the release commit for details.
+
 ## [v0.11.4](https://github.com/hackspaces/blueshark-forge/releases/tag/v0.11.4) — the harness does the read you skipped, instead of bouncing once per file
 
 *2026-07-15 · `pip install blueshark-forge==0.11.4`*
