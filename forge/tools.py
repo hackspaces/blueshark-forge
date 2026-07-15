@@ -467,6 +467,13 @@ def _kill_background():
                 pass
 
 
+# Sentinel prefix for "this project has no test suite at all". The agent's evidence
+# guard matches it to record an ASSUMPTION rather than a failed verification — a run
+# that never had a suite to run verifies nothing either way. Shared as one constant so
+# the message and the guard cannot drift apart.
+NO_SUITE = "run_tests: no test suite detected here"
+
+
 def _run_tests(cwd, stop=None):
     """P6.3: run the project's REAL test suite (auto-detected via detect_test_cmd) and
     return a COMPACT digest instead of raw output — the model never guesses the runner,
@@ -478,7 +485,7 @@ def _run_tests(cwd, stop=None):
     except Exception:
         cmd = None
     if not cmd:
-        return ("run_tests: no test suite detected here (looked for pytest / a tests dir / a "
+        return (NO_SUITE + " (looked for pytest / a tests dir / a "
                 "root test_*.py / go.mod / a package.json test script / Cargo.toml / Makefile "
                 "test). If you know the command, run it with bash.", False)
     obs, ok = _run(cmd, cwd, timeout=180, stop=stop)

@@ -496,6 +496,38 @@ class TestDoneGate(unittest.TestCase):
         self.assertEqual(len(checks), 1)                         # the gate DID run its own check
         self.assertFalse(checks[0]["ok"])
 
+    def test_no_test_suite_is_an_assumption_not_a_failed_verification(self):
+        # A project with NO test suite must stay WINNABLE. run_tests finds nothing to
+        # run, which verifies nothing either way — recording it as a FAILED verification
+        # poisoned the contract and rejected the claim forever. Measured: a correct
+        # 2-file fix in a suite-less project was rejected 3x and killed by the claim
+        # guard, while the done-gate had already said "no test suite found, assuming the
+        # changes are correct" — the two layers disagreeing about the same fact.
+        result, events, sess, _ = self._run_turn(
+            [self._WRITE, '{"thought":"t","action":"run_tests"}', self._SAY],
+            test_cmd=None)
+        self.assertEqual(result, "all done")                     # winnable again
+        self.assertFalse(any(k == "verified" for k, f in sess.logs))   # but never called verified
+
+    def test_failing_run_tests_still_rejects(self):
+        # the invariant the fix must NOT break: a suite that really ran and really failed
+        # is still a failed verification, and still blocks the claim.
+        result, events, sess, _ = self._run_turn(
+            [self._WRITE, '{"thought":"t","action":"run_tests"}', self._SAY],
+            test_cmd="false")
+        self.assertNotEqual(result, "all done")                  # gate held
+        self.assertFalse(any(k == "verified" for k, f in sess.logs))
+
+    def test_no_suite_message_carries_the_shared_sentinel(self):
+        # the agent's evidence guard matches tools.NO_SUITE by prefix — if the message
+        # and the constant ever drift apart, empty-suite projects silently become
+        # unwinnable again. Pin them together.
+        from forge.tools import NO_SUITE
+        d = tempfile.mkdtemp()                                   # a dir with no suite at all
+        obs, ok = execute({"action": "run_tests"}, d)
+        self.assertFalse(ok)
+        self.assertTrue(obs.startswith(NO_SUITE), obs[:80])
+
     def test_is_test_cmd_recognizes_runners(self):
         from forge.agent import _is_test_cmd
         d = tempfile.mkdtemp()
