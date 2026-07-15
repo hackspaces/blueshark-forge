@@ -28,7 +28,7 @@ from .execution import (CompletionPolicy, CompletionDecision, PolicyOutcome,
                         EvidenceCollector, ExecutionState, RuntimeEvent)
 from .lifecycle import LifecycleTracker, outcome_for, Stage
 from .ledger import Ledger, DEFAULT_READ_LIMIT
-from .tools import (ACTION_SCHEMA, ACTION_VARIANTS, ALL_ACTIONS, TOOL_HELP,
+from .tools import (ACTION_SCHEMA, ACTION_VARIANTS, ALL_ACTIONS, NO_SUITE, TOOL_HELP,
                     build_schema, required_fields, execute, dry_run, shape, error_hint)
 
 STUCK_AT = int(os.environ.get("FORGE_STUCK_THRESHOLD", "7"))  # failures before escalating a rung
@@ -1878,12 +1878,20 @@ class Agent:
             self._verified = False
         if kind == "run_tests":
             from . import testparse as _tp
-            if _cmd_missing(obs) or _tp.zero_collected(obs):
-                # not evidence either way: the runner was absent or ran 0 tests. A
-                # failed verification here would poison the contract and make an
-                # empty-suite project unwinnable — record the assumption instead,
-                # so the done-gate's accept-unverified path stays reachable.
-                self.evidence.record_assumption("run_tests could not verify (absent runner or 0 tests collected)")
+            if _cmd_missing(obs) or _tp.zero_collected(obs) or obs.startswith(NO_SUITE):
+                # not evidence either way: there was no suite at all, the runner was
+                # absent, or it ran 0 tests. A failed verification here would poison the
+                # contract and make an empty-suite project unwinnable — record the
+                # assumption instead, so the done-gate's accept-unverified path stays
+                # reachable. NO_SUITE is the third door: detect_test_cmd found nothing to
+                # run, which _cmd_missing (the shell's phrasing) and zero_collected (a
+                # parse of runner output) both miss — there IS no runner and no output.
+                # Measured: a correct 2-file fix in a project with no tests was rejected
+                # 3x and killed by the claim guard, while the done-gate had already said
+                # "no test suite found, assuming the changes are correct" — the two layers
+                # disagreeing on the same fact.
+                self.evidence.record_assumption(
+                    "run_tests could not verify (no suite, absent runner, or 0 tests collected)")
             else:
                 self.evidence.record_verification("run_tests", ok, obs)
                 if ok:
