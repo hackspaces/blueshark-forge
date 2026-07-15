@@ -74,7 +74,26 @@ ALL_LEVERS = frozenset({
     "alias_repair", # normalize path-field aliases (filename/file/...)
     "escalation",   # bump to a stronger ladder rung when stuck
     "compaction",   # summarize old turns near the context limit
+    "claim_guard",  # break the repeat-a-rejected-completion loop (below)
 })
+
+# P5.9 claim guard. `loop_detect` breaks repeated ACTIONS; nothing watched the
+# COMPLETION path, so a model that claimed done, got rejected, and claimed the
+# identical thing again would do so until the step limit. Measured on
+# qwen2.5-coder:7b: 5 real actions followed by 33 byte-identical rejected claims
+# — a minute of compute and the whole budget spent re-sending one sentence.
+#
+# The cause is information starvation, not stubbornness: the bounce names the
+# failing COMMAND but the evidence contract stores only a digest of its output,
+# so the model is told "it failed" and never what failed. Identical input,
+# identical output — forever.
+#
+# So the guard escalates instead of repeating: say it once; on an identical
+# second claim show the real failure text it never saw; on a third, stop. The
+# run then ends on its honest rejection in 3 claims instead of 33. Costs nothing
+# when a model isn't stuck — it only fires on an exact repeat.
+CLAIM_REPEAT_CAP = 3      # identical rejected claims tolerated before stopping
+CLAIM_FAIL_TAIL = 800     # chars of real failure output to surface on the repeat
 
 # P4.8 pinned scratch notes — durable facts the harness pins alongside the plan
 # every step (so they survive compaction verbatim). FIFO-capped: oldest evicted
@@ -369,6 +388,10 @@ class Agent:
         self._verified_workspace = None   # H04: the workspace digest that test judged
         self._bounced = False    # the done-gate already bounced/nudged once this turn
         self._narrated = False   # the 'act, don't narrate' guard already bounced once this turn
+        self._claim_key = None   # P5.9 claim guard: identity of the last rejected claim
+        self._claim_repeat = 0   # ...and how many times it has come back unchanged
+        self._claim_stuck = False  # ...and whether it is past saving (loop stops, gate stays shut)
+        self._verify_fail = ""   # the real failure text the contract only keeps a digest of
         self.evidence = EvidenceCollector(self.session.cwd)  # harness-owned completion provenance
         self.completion_policy = CompletionPolicy()
         self._completion_decision = None
@@ -1466,6 +1489,9 @@ class Agent:
                         self.messages.append({"role": "user", "content":
                                               f"[done-gate] `{cmd}` passed"})
                     else:
+                        # Keep the real output: the contract records only its digest, so
+                        # without this the claim guard has nothing concrete to show.
+                        self._verify_fail = obs2 or ""
                         self.on_event("done_check", cmd=cmd, ok=False)
 
         # H02: the reducer's authoritative completion transition, now that the done-gate's
@@ -1505,8 +1531,56 @@ class Agent:
                          policy=decision.to_dict(), reason=decision.reason)
         failed = [v.command for v in contract.verification if v.exit_code != 0]
         detail = ("; failed: " + ", ".join(failed)) if failed else ""
-        return (f"[completion-policy:{decision.code}] {decision.reason}{detail}. "
-                "Gather passing evidence or change the implementation before finishing.")
+        bounce = (f"[completion-policy:{decision.code}] {decision.reason}{detail}. "
+                  "Gather passing evidence or change the implementation before finishing.")
+        return self._claim_guard(bounce, decision, claim)
+
+    def _claim_guard(self, bounce, decision, claim):
+        """P5.9 — escalate a repeated rejection instead of restating it.
+
+        Same claim + same rejection means the model has no new information to act
+        on, so re-sending the same words cannot change the outcome. Second time,
+        show the real failure output (the contract keeps only its digest). Third,
+        raise the stuck flag so the loop stops.
+
+        The gate NEVER opens here — this returns a bounce every time. Letting the
+        claim through on repeat would make repetition itself an escape from the
+        done-gate, which is the exact hole H05 closes ("overridable ONLY by a
+        recorded approval, never by a repeated claim"). Stopping is the loop's job;
+        the run still ends on the REJECT in `_completion_decision`.
+        """
+        if not self._lv("claim_guard"):
+            return bounce
+
+        key = (decision.code, (claim or "").strip(), bounce)
+        if key == self._claim_key:
+            self._claim_repeat += 1
+        else:
+            self._claim_key, self._claim_repeat = key, 1
+
+        if self._claim_repeat == 1:
+            return bounce
+
+        if self._claim_repeat < CLAIM_REPEAT_CAP:
+            tail = (self._verify_fail or "").strip()[-CLAIM_FAIL_TAIL:]
+            self.session.log("claim_guard", action="show_evidence",
+                             repeat=self._claim_repeat, code=decision.code)
+            self.on_event("claim_guard", repeat=self._claim_repeat, action="show_evidence")
+            evidence = (f"\n\nThe actual output you are ignoring:\n{tail}" if tail else "")
+            return (bounce + "\n\n[harness] You already claimed this and were rejected for "
+                    "the identical reason. Repeating it will not work — nothing has changed."
+                    + evidence +
+                    "\n\nDo something different: fix the cause, or run a command that proves "
+                    "it works. Do not claim done again without new passing evidence.")
+
+        # Still identical after being shown the evidence — stuck, not thinking. Flag it
+        # for the loop and STILL bounce: the gate must not open just because it asked
+        # three times.
+        self._claim_stuck = True
+        self.session.log("claim_guard", action="stop", repeat=self._claim_repeat,
+                         code=decision.code)
+        self.on_event("claim_guard", repeat=self._claim_repeat, action="stop")
+        return bounce
 
     # ---- P4.5 just-in-time retrieval -----------------------------------------
     def _retrieval_ensure(self):
@@ -2023,6 +2097,15 @@ class Agent:
                         bounce = self._done_gate(act.get("message", "")) or self._narration_bounce(act.get("message", ""))
                         if bounce:
                             self.messages.append({"role": "user", "content": bounce})
+                            # P5.9: the claim guard gave up. Stop here rather than spend the
+                            # rest of the budget on one repeated sentence. This returns the
+                            # HARNESS's words, never the model's claim — `_completion_decision`
+                            # stays REJECT, so `forge run` still exits non-zero.
+                            if self._claim_stuck:
+                                return ("(stopped: claimed done "
+                                        f"{self._claim_repeat}× with the identical unproven "
+                                        "claim, even after being shown the failure — nothing "
+                                        "was accepted)")
                             continue
                         msg = act.get("message", "")
                         contract = self.evidence.contract(msg)
