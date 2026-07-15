@@ -105,24 +105,24 @@ class TestLeverGating(unittest.TestCase):
         self.assertTrue(obs[0])                       # blind edit was NOT blocked
         self.assertIn("x = 2", _read(os.path.join(d, "r.py")))
 
-    def test_default_still_blocks_read_before_edit(self):
-        """levers=None keeps the guard: the same blind edit is blocked first."""
+    def test_default_still_guards_read_before_edit(self):
+        """levers=None keeps the guard: the SAME blind edit never writes from memory.
+        The harness serves the file's real content instead, and only the retry lands —
+        the exact contrast with the lever-off case above, which writes blind at step 0."""
         d = tempfile.mkdtemp()
         _write(os.path.join(d, "r.py"), "x = 1\n")
         actions = [
             '{"thought":"blind","action":"edit_file","path":"r.py","old":"x = 1","new":"x = 2"}',
-            '{"thought":"read","action":"read_file","path":"r.py"}',
-            '{"thought":"edit","action":"edit_file","path":"r.py","old":"x = 1","new":"x = 2"}',
             SAY,
         ]
         events = []
         a = Agent(ScriptBackend(actions), sm.EphemeralSession(d, "s"), max_steps=6,
                   levers=None,
-                  on_event=lambda k, **kw: events.append((k, kw.get("ok"))))
+                  on_event=lambda k, **kw: events.append((k, kw)))
         a.send("change x")
-        obs = [ok for k, ok in events if k == "observation"]
-        self.assertFalse(obs[0])                      # blind edit blocked
-        self.assertTrue(obs[-1])                      # edit after read allowed
+        obs = [(kw.get("text", ""), kw.get("ok")) for k, kw in events if k == "observation"]
+        self.assertIn("without reading it", obs[0][0])   # served the read rather than writing blind
+        self.assertEqual(_read(os.path.join(d, "r.py")), "x = 1\n")   # guard held: nothing written
 
     def test_compaction_off_never_calls_compact(self):
         d = tempfile.mkdtemp()
