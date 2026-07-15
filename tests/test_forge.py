@@ -186,6 +186,35 @@ class TestSyntaxGate(unittest.TestCase):
         self.assertFalse(ok)
         self.assertIn("invalid", out)
 
+    @unittest.skipUnless(_which("node"), "node not available")
+    def test_error_names_the_real_file_not_the_temp_path(self):
+        # The check runs on a temp copy, so its error cites the temp path. tempfile
+        # returns /var/folders/… while macOS reports /private/var/folders/…, so a
+        # replace of the UNRESOLVED path matched only the suffix and stranded the
+        # prefix: the model was told the error was in "/privatea.js" — a file that
+        # does not exist, sending it to fix the wrong thing.
+        from forge import tools
+        line = tools._external_check(["node", "--check"], "function(\n", "a.js")
+        self.assertTrue(line.startswith("a.js"), f"should name a.js, got {line!r}")
+        self.assertNotIn("/private", line)
+        self.assertNotIn("/var/folders", line)
+
+    def test_slow_checker_never_reports_a_false_pass(self):
+        # A timeout makes the gate fail OPEN (None → write allowed). That is right when
+        # the checker is absent, but a transient hang must never come back as "" —
+        # "" means "syntax fine" and would let a broken file land. A 3s budget did
+        # exactly this on a loaded CI runner (node is ~0.02s warm, cold start is not),
+        # so test_invalid_js_blocked failed intermittently with the gate reporting fine
+        # when it had never actually run.
+        from forge import tools
+        orig = tools.SYNTAX_CHECK_TIMEOUT
+        tools.SYNTAX_CHECK_TIMEOUT = 1          # 1s, then a 2s retry
+        try:
+            out = tools._external_check(["sh", "-c", "sleep 30"], "x = 1", "a.js")
+        finally:
+            tools.SYNTAX_CHECK_TIMEOUT = orig
+        self.assertIsNone(out, "a hang must read as 'cannot check', never as 'fine'")
+
     def test_toml_check_when_available(self):
         try:
             import tomllib  # noqa: F401

@@ -13,6 +13,11 @@ import subprocess
 import time
 
 BASH_TIMEOUT = int(os.environ.get("FORGE_BASH_TIMEOUT", "60"))  # fail fast, don't hang for minutes
+# Per-write syntax check (bash -n / node --check). Warm these cost ~0.02s; the budget
+# is for a COLD interpreter start on a loaded machine. It is deliberately generous:
+# timing out makes the gate fail OPEN (see _external_check), and a broken file landing
+# is far worse than waiting a few seconds on one write.
+SYNTAX_CHECK_TIMEOUT = int(os.environ.get("FORGE_SYNTAX_TIMEOUT", "10"))
 
 
 def _which(t):
@@ -628,18 +633,44 @@ def _external_check(cmd, text, path):
     """Run an external syntax checker (bash -n, node --check) on CANDIDATE text
     written to a temp file with the real extension — the real file is never
     touched. Returns "" on pass, the first error line (with the temp path
-    rewritten to the real basename) on failure, or None if the check can't run."""
+    rewritten to the real basename) on failure, or None if the check can't run.
+
+    None means "can't check", and the caller lets the write THROUGH — which is the
+    only sane answer when the checker isn't installed, but a hazard when it merely
+    timed out: a slow interpreter start would silently disable the syntax gate and
+    let a broken file land. The old 3s budget did exactly that on a contended CI
+    runner (node --check is ~0.02s warm, but a cold start under load is not), so
+    `test_invalid_js_blocked` failed intermittently — the gate reporting "fine"
+    when it had in fact never run. Hence a generous budget plus one retry: this is
+    a per-write check on one file, so seconds are cheap and a false "fine" is not.
+    """
     import tempfile
     fd, tmp = tempfile.mkstemp(suffix=os.path.splitext(path)[1])
     try:
         with os.fdopen(fd, "w") as f:
             f.write(text)
-        r = subprocess.run(cmd + [tmp], capture_output=True, text=True, timeout=3)
+        for budget in (SYNTAX_CHECK_TIMEOUT, SYNTAX_CHECK_TIMEOUT * 2):
+            try:
+                r = subprocess.run(cmd + [tmp], capture_output=True, text=True,
+                                   timeout=budget)
+                break
+            except subprocess.TimeoutExpired:
+                r = None            # cold start? give it one more, longer, go
+        if r is None:
+            return None             # genuinely too slow — can't check
         if r.returncode == 0:
             return ""
         msg = ((r.stderr or "") + (r.stdout or "")).strip().splitlines()
         line = msg[0] if msg else f"exit {r.returncode}"
-        return line.replace(tmp, os.path.basename(path))
+        # Rewrite the temp path to the real basename. Try the RESOLVED path first:
+        # tempfile hands back /var/folders/… while macOS reports /private/var/folders/…,
+        # so replacing the unresolved path matches only the suffix and strands the
+        # prefix — the model was being told the error was in "/privatea.js", a file
+        # that does not exist.
+        base = os.path.basename(path)
+        for cand in (os.path.realpath(tmp), tmp):
+            line = line.replace(cand, base)
+        return line
     except (subprocess.TimeoutExpired, OSError, ValueError):
         return None
     finally:
