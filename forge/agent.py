@@ -1013,6 +1013,12 @@ class Agent:
         # an anchored edit isn't rejected for a missing `old`.
         if kind == "edit_file" and act.get("start_line") is not None:
             reqs = ["path", "start_line", "end_line", "anchor", "new"]
+        elif kind == "edit_file" and act.get("edits"):
+            # P6.5 batch dialect ({path, edits:[{old,new},...]}): the grammar variant
+            # still forces top-level old/new, so a legal batch edit arrives with a
+            # placeholder old:"" — execute() dispatches edits[] first, so only
+            # path+edits are genuinely required here.
+            reqs = ["path", "edits"]
         out = []
         for f in reqs:
             v = act.get(f)
@@ -2162,28 +2168,71 @@ class Agent:
                     self._alias_path(act)
                     if self._lv("schema"):
                         missing = self._missing_required(kind, act)
-                        if missing:
+                        # present-but-EMPTY `old` (and nothing else wrong) is intent, not an
+                        # omission — and the grammar can force `old` PRESENT but not non-empty,
+                        # so the P5.1 resend would deterministically re-emit old:"" while its
+                        # hint ("re-send the SAME action") contradicts the teach below. Skip it.
+                        empty_old = (kind == "edit_file" and missing == ["old"]
+                                     and act.get("old") == "")
+                        if missing and not empty_old:
                             act, kind, missing = self._resend_variant(act, kind, pin, step, missing, trace)
+                            empty_old = (kind == "edit_file" and missing == ["old"]
+                                         and act.get("old") == "")
                         if missing:
-                            obs = (f"'{kind}' is missing required field(s): "
-                                   f"{', '.join('`' + m + '`' for m in missing)}. Re-send the SAME action "
-                                   "as one complete JSON object with those fields included.")
+                            if empty_old:
+                                # the model (usually a small one) is trying to append/insert.
+                                # "missing field `old`" invites re-sending the same action
+                                # verbatim — observed grinding to the step limit — so teach
+                                # the two real moves instead.
+                                obs = ("edit_file's `old` is EMPTY — an empty string cannot locate text "
+                                       "to replace. To modify this file: put the EXACT existing text in "
+                                       "`old`. To append or create content: use write_file with the "
+                                       "file's complete new content instead.")
+                            else:
+                                obs = (f"'{kind}' is missing required field(s): "
+                                       f"{', '.join('`' + m + '`' for m in missing)}. Re-send the SAME action "
+                                       "as one complete JSON object with those fields included.")
                             trace["ok"] = False
                             self.on_event("action", action=kind, detail="(incomplete)")
                             self.on_event("observation", text=obs, ok=False)
                             self.session.log("action", action=kind, args={"invalid": "missing fields", "missing": missing},
                                              thought=act.get("thought", ""))
-                            self.messages.append({"role": "user", "content": f"⚠ {obs}"})
+                            # an incomplete action IS a failed action: route it through the
+                            # stuck ledger so the loop breaker / borrow / escalation see it.
+                            # Without this the branch `continue`s before the sig accounting,
+                            # so a model re-sending the same incomplete action is invisible
+                            # to every guard (observed: 35 identical incomplete edit_file
+                            # steps from a 7B, zero interventions).
+                            sig = f"{kind}:(incomplete):{','.join(sorted(missing))}"
+                            trace["sig"] = sig
+                            tag, borrow_now, control = self._handle_failure(kind, sig, obs, step, trace)
+                            if control == "continue":       # escalated to a fresh rung
+                                continue
+                            if isinstance(control, tuple):  # no rung left — end the turn
+                                return control[1]
+                            self.messages.append({"role": "user", "content": f"{tag}⚠ {obs}"})
+                            if borrow_now:
+                                self._borrow(self.messages + ([pin] if pin else []), step, trace)
                             continue
                     elif kind in ("read_file", "write_file", "edit_file") and not act.get("path"):
-                        # bare mode (schema lever off): the original pathless-only nudge.
+                        # bare mode (schema lever off): the original pathless-only nudge —
+                        # routed through the same failure accounting as the schema branch.
                         obs = (f"'{kind}' is missing its `path` field. Re-send the SAME action as one JSON object "
                                f'with the file path included, e.g. {{"action":"{kind}","path":"dir/file.go", ...}}.')
                         trace["ok"] = False
                         self.on_event("action", action=kind, detail="(no path)")
                         self.on_event("observation", text=obs, ok=False)
                         self.session.log("action", action=kind, args={"invalid": "missing path"}, thought=act.get("thought", ""))
-                        self.messages.append({"role": "user", "content": f"⚠ {obs}"})
+                        sig = f"{kind}:(incomplete):path"
+                        trace["sig"] = sig
+                        tag, borrow_now, control = self._handle_failure(kind, sig, obs, step, trace)
+                        if control == "continue":
+                            continue
+                        if isinstance(control, tuple):
+                            return control[1]
+                        self.messages.append({"role": "user", "content": f"{tag}⚠ {obs}"})
+                        if borrow_now:
+                            self._borrow(self.messages + ([pin] if pin else []), step, trace)
                         continue
 
                     if kind == "fleet_send":
