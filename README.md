@@ -16,10 +16,10 @@ Not tied to any vendor. Runs on your machine, on your models.
 **One line** (macOS / Linux) — checks your environment and installs the `forge` CLI:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/hackspaces/blueshark-forge/main/site/install.sh | sh
+curl -fsSL https://topk1.com/forge/install.sh | sh
 ```
 
-<sub>Prefer to see it first? Append `FORGE_INSTALL_DRY_RUN=1` before `sh` to check your setup without installing. Once the [landing site](site/) is on a domain, this becomes the cleaner `curl -fsSL forge.<domain>/install.sh | sh`.</sub>
+<sub>Prefer to see it first? Append `FORGE_INSTALL_DRY_RUN=1` before `sh` to check your setup without installing anything — or just open [topk1.com/forge/install.sh](https://topk1.com/forge/install.sh) and read it. Fetching straight from the repo works too: `curl -fsSL https://raw.githubusercontent.com/hackspaces/blueshark-forge/main/site/install.sh | sh`.</sub>
 
 **Or by hand** — requires Python 3.10+:
 
@@ -34,11 +34,29 @@ simplest local setup, or bring a frontier model with your own key (OpenAI / Anth
 
 ## Set up (once per machine)
 
-```bash
-forge setup
+**Just run `forge`.** On a fresh install it detects your hardware, tells you the
+biggest model your machine can actually run, and points at the next step:
+
+```
+  ✦ forge  ·  run any model your machine can handle
+
+  Nothing set up yet — but Apple M5 Pro · 48GB RAM · GPU / Metal (fast)
+  can run models up to ~70B right here.
+
+  forge models            see everything it can run
+  forge models use phi-2  a quick starter — pulled + ready in ~2 min
+  forge run "…"           then put it to work
 ```
 
-This inspects your machine and configures forge for it:
+`forge models` lists what fits this machine — every model sized and speed-checked
+against your RAM, GPU/VRAM, or Apple unified memory. `forge models use <name>`
+provisions it (pulls the weights, launches a server if it needs one) and points
+forge's config at it. That's the whole setup.
+
+<sub>`forge models --all` runs the same fit-math over the *full* downloadable catalog (Ollama library + HuggingFace GGUF + MLX), not just the curated spread.</sub>
+
+**Or pick a ladder yourself** — `forge setup` inspects your machine and configures
+forge for it:
 - detects your **RAM / chip / cores**,
 - picks a **model ladder** sized to your hardware (e.g. 8GB → a 3B; 16GB → 9B;
   48GB Apple Silicon → `qwen3-coder:30b → qwen3.6`),

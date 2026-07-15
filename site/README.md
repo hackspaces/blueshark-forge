@@ -23,5 +23,7 @@ page too — the rewrite only *adds* the `/forge` path.)
 
 ## Files
 
-- `index.html` — the landing page (static; forge's gold/Geist visual language).
-- `install.sh` — the one-line installer (also the raw-GitHub install source).
+- `index.html` — the landing page (static, black-and-white monospace, single-viewport).
+- `install.sh` — the one-line installer. **`https://topk1.com/forge/install.sh` is the
+  canonical install URL** (what the README and the landing page both point at); the raw
+  GitHub path `main/site/install.sh` serves the same file as a mirror.

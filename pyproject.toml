@@ -30,7 +30,7 @@ classifiers = [
 dependencies = []  # stdlib only — the whole point
 
 [project.urls]
-Homepage = "https://github.com/hackspaces/blueshark-forge"
+Homepage = "https://topk1.com/forge/"
 Repository = "https://github.com/hackspaces/blueshark-forge"
 Issues = "https://github.com/hackspaces/blueshark-forge/issues"
 
