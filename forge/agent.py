@@ -27,7 +27,7 @@ from .authority import AuthorityPolicy
 from .execution import (CompletionPolicy, CompletionDecision, PolicyOutcome,
                         EvidenceCollector, ExecutionState, RuntimeEvent)
 from .lifecycle import LifecycleTracker, outcome_for, Stage
-from .ledger import Ledger
+from .ledger import Ledger, DEFAULT_READ_LIMIT
 from .tools import (ACTION_SCHEMA, ACTION_VARIANTS, ALL_ACTIONS, TOOL_HELP,
                     build_schema, required_fields, execute, dry_run, shape, error_hint)
 
@@ -954,6 +954,52 @@ class Agent:
                     "read_file it again before editing or overwriting it." + tail)
         return (f"Blocked: read {path} before editing or overwriting it — "
                 "work from its actual current content, not memory. Use read_file first." + tail)
+
+    def _serve_read_before_edit(self, kind, act, fp, step, trace):
+        """The read-before-edit gate caught an edit/overwrite of a file the model has
+        NEVER read. A bare bounce ('go read it first') corrects but does not TEACH: a
+        small model complies for THIS file, then re-hits the identical block on the next
+        unread file one step later — measured, a 7B blocked on calc.py, read it, fixed it,
+        then blindly edited test_calc.py and was blocked again (one wasted turn + one wasted
+        generation per file). So instead of only bouncing, the harness does the read the
+        model skipped: it reads the file, records it in the ledger (so the retry clears the
+        gate), and returns the numbered content in THIS observation. The gate's guarantee —
+        edit from real content, not memory — is met a turn sooner, and the model re-issues
+        its edit against real text. Bounded to a file that fits one default read (a bigger
+        file falls back to the bounce so the model range-reads it itself); only for the
+        never-read case (a changed/evicted file keeps its own more specific message).
+        Returns True if served (caller continues), False to fall back to the bounce."""
+        try:
+            with open(fp, errors="replace") as f:
+                nlines = sum(1 for _ in f)
+        except OSError:
+            return False
+        if nlines > DEFAULT_READ_LIMIT:          # too big to inject whole — let the model range-read
+            return False
+        body, ok = execute({"action": "read_file", "path": act.get("path")}, self.session.cwd, stop=self.stop)
+        if not ok:                               # a read the model itself couldn't do either → bounce
+            return False
+        self.ledger.record_read(fp, step)        # the retry now passes ledger.current()
+        verb = "overwriting" if kind == "write_file" else "editing"
+        # Say what happened, forbid the now-redundant re-read, and name the ONE next move.
+        # An earlier wording ("read any file before your first edit to it") taught the rule
+        # and was obeyed literally: the model issued a read the harness had just done for it,
+        # which the cache answered with "already in your context" — the wasted turn came back
+        # under a new name. The harness owns this discipline now; the model only has to edit.
+        note = (f"You began {verb} {act.get('path')} without reading it — so the harness read it FOR "
+                "you. Its current content is below and is now in your context: do NOT read it again. "
+                f"Base your edit on this content, not memory, and issue your {kind} now.\n{body}")
+        obs_msg = {"role": "user", "content": f"Observation:\n{note}"}
+        self.messages.append(obs_msg)
+        self.ledger.set_obs_msg(fp, obs_msg)     # bind for compaction-eviction tracking
+        trace["ok"] = True
+        trace["served_read_before_edit"] = True
+        self.on_event("action", action=kind, detail=act.get("path", ""), thought=act.get("thought", ""))
+        self.on_event("observation", text=note, ok=True)
+        self.session.log("action", action=kind,
+                         args={"served-read-before-edit": act.get("path", "")}, thought=act.get("thought", ""))
+        self.session.log("observation", text=note, ok=True)
+        return True
 
     def _edit_region_seen(self, act, fp):
         """True unless the edit targets lines OUTSIDE the (partial) range the model
@@ -2296,6 +2342,13 @@ class Agent:
                     if self._lv("read_gate") and kind in ("edit_file", "write_file"):
                         fp = os.path.realpath(os.path.join(self.session.cwd, act["path"]))
                         if os.path.isfile(fp) and not self.ledger.current(fp):
+                            # never-read file: don't just bounce (the model re-hits the same
+                            # block on the next unread file) — serve the read the model skipped
+                            # so the retry edits from real content. Changed/evicted/oversized
+                            # fall through to the more specific bounce below.
+                            if self.ledger.status(fp) == "unread" \
+                                    and self._serve_read_before_edit(kind, act, fp, step, trace):
+                                continue
                             obs = self._read_gate_msg(kind, act, fp)
                             trace["ok"] = False
                             self.on_event("action", action=kind, detail=act.get("path", ""))

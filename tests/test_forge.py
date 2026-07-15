@@ -23,7 +23,7 @@ from forge.authority import AuthorityPolicy  # noqa: E402
 # the real ~/.forge/profile (and out of the heat/loop assertions below) by pointing the
 # store at a throwaway tempdir for this module's whole lifetime.
 _profile.PROFILE_DIR = tempfile.mkdtemp(prefix="forge-profile-forge-suite-")
-from forge.ledger import Ledger            # noqa: E402
+from forge.ledger import Ledger, DEFAULT_READ_LIMIT  # noqa: E402
 from forge.backends import make_backend, OllamaBackend, OpenAICompatBackend  # noqa: E402
 from forge.tools import (execute, dry_run, _fuzzy_replace, _syntax_error, _which,  # noqa: E402
                          shape, overflow_dir, _maybe_offload, MAX_OUTPUT,
@@ -282,23 +282,77 @@ class TestSyntaxGate(unittest.TestCase):
 
 
 class TestReadBeforeEdit(unittest.TestCase):
-    def test_blind_edit_blocked_until_read(self):
+    def _obs(self, d, actions, max_steps=6):
+        events = []
+        a = Agent(ScriptBackend(actions), sm.EphemeralSession(d, "script"), max_steps=max_steps,
+                  on_event=lambda k, **kw: events.append((k, kw)))
+        a.send("go")
+        return [(kw.get("text", ""), kw.get("ok")) for k, kw in events if k == "observation"]
+
+    def test_blind_edit_serves_the_file_then_the_retry_lands(self):
+        # A blind edit of a never-read file is no longer a wasted bounce: the harness
+        # serves the file's real content in-observation (so the model edits from real
+        # text, not memory) AND teaches the rule; the retry edit then lands.
         d = tempfile.mkdtemp()
         _write(os.path.join(d, "r.py"), "x = 1\n")
         actions = [
             '{"thought":"blind","action":"edit_file","path":"r.py","old":"x = 1","new":"x = 2"}',
-            '{"thought":"read","action":"read_file","path":"r.py"}',
             '{"thought":"edit","action":"edit_file","path":"r.py","old":"x = 1","new":"x = 2"}',
             '{"thought":"done","action":"say","message":"done"}',
         ]
-        events = []
-        a = Agent(ScriptBackend(actions), sm.EphemeralSession(d, "script"), max_steps=6,
-                  on_event=lambda k, **kw: events.append((k, kw.get("ok"))))
-        a.send("change x")
-        obs = [ok for k, ok in events if k == "observation"]
-        self.assertEqual(obs[0], False)       # blind edit blocked
-        self.assertTrue(obs[-1])              # edit after read allowed
+        obs = self._obs(d, actions)
+        self.assertTrue(obs[0][1])                       # served, not bounced
+        self.assertIn("x = 1", obs[0][0])                # real content injected
+        self.assertIn("without reading it", obs[0][0])   # and it teaches the rule
+        self.assertTrue(obs[1][1])                       # the retry edit lands
         self.assertIn("x = 2", _read(os.path.join(d, "r.py")))
+
+    def test_blind_edit_serve_does_not_write_from_memory(self):
+        # the correctness invariant the gate exists to protect: the blind step must NOT
+        # mutate the file — it only reads. A blind edit followed by `say` leaves it untouched.
+        d = tempfile.mkdtemp()
+        _write(os.path.join(d, "r.py"), "x = 1\n")
+        actions = [
+            '{"thought":"blind","action":"edit_file","path":"r.py","old":"x = 1","new":"x = 2"}',
+            '{"thought":"done","action":"say","message":"done"}',
+        ]
+        obs = self._obs(d, actions)
+        self.assertTrue(obs[0][1])                        # the read was served
+        self.assertEqual(_read(os.path.join(d, "r.py")), "x = 1\n")   # but nothing was written
+
+    def test_each_new_unread_file_is_served_not_re_blocked(self):
+        # the reported bug: a small model blocked on file 1, complied, then made the
+        # IDENTICAL mistake on file 2 one step later. Now BOTH blind edits are served —
+        # zero wasted read turns — and both retries land.
+        d = tempfile.mkdtemp()
+        _write(os.path.join(d, "a.py"), "p = 1\n")
+        _write(os.path.join(d, "b.py"), "q = 1\n")
+        actions = [
+            '{"thought":"blind a","action":"edit_file","path":"a.py","old":"p = 1","new":"p = 2"}',
+            '{"thought":"edit a","action":"edit_file","path":"a.py","old":"p = 1","new":"p = 2"}',
+            '{"thought":"blind b","action":"edit_file","path":"b.py","old":"q = 1","new":"q = 2"}',
+            '{"thought":"edit b","action":"edit_file","path":"b.py","old":"q = 1","new":"q = 2"}',
+            '{"thought":"done","action":"say","message":"done"}',
+        ]
+        obs = self._obs(d, actions, max_steps=8)
+        self.assertTrue(all(ok for _, ok in obs))         # not one failed bounce among them
+        self.assertIn("q = 1", obs[2][0])                 # file 2's blind edit is served too
+        self.assertEqual(_read(os.path.join(d, "a.py")), "p = 2\n")
+        self.assertEqual(_read(os.path.join(d, "b.py")), "q = 2\n")
+
+    def test_oversized_file_falls_back_to_the_bounce(self):
+        # serving is bounded: a file too big for one default read is NOT injected whole —
+        # the model is bounced to range-read it itself (the pre-existing behavior).
+        d = tempfile.mkdtemp()
+        _write(os.path.join(d, "big.py"), "".join(f"x{i} = {i}\n" for i in range(DEFAULT_READ_LIMIT + 5)))
+        actions = [
+            '{"thought":"blind","action":"edit_file","path":"big.py","old":"x0 = 0","new":"x0 = 9"}',
+            '{"thought":"done","action":"say","message":"done"}',
+        ]
+        obs = self._obs(d, actions)
+        self.assertFalse(obs[0][1])                       # bounced, not served
+        self.assertIn("Blocked: read", obs[0][0])
+        self.assertEqual(_read(os.path.join(d, "big.py")).splitlines()[0], "x0 = 0")   # untouched
 
 
 class _RecSession:
@@ -2063,17 +2117,18 @@ class TestRetryHeat(unittest.TestCase):
         self.assertEqual(b.temps, [0.0, 0.0])
 
     def test_loop_break_bumps_heat(self):
-        # the same edit is blocked (read-before-edit) three times; the 3rd trips the
-        # loop detector, whose bump raises the NEXT generation off greedy.
+        # the same read is served three times; the 3rd trips the loop detector, whose
+        # bump raises the NEXT generation off greedy. (A repeated blind EDIT no longer
+        # loops here — the harness serves the file on the first, so the 2nd edits for real.)
         d = tempfile.mkdtemp()
-        _write(os.path.join(d, "u.py"), "a\n")   # exists but never read -> gate blocks the edit
-        edit = '{"thought":"t","action":"edit_file","path":"u.py","old":"a","new":"b"}'
-        actions = [edit, edit, edit, '{"thought":"done","action":"say","message":"done"}']
+        _write(os.path.join(d, "u.py"), "a\n")
+        read = '{"thought":"t","action":"read_file","path":"u.py"}'
+        actions = [read, read, read, '{"thought":"done","action":"say","message":"done"}']
         b = _HeatBackend(actions)
         a = Agent(b, _RecSession(d), max_steps=8)
         a.send("go")
-        # first three gens are greedy (blocks are not heat sites); the loop trip on the
-        # 3rd bumps heat so the say samples at 0.4.
+        # first three gens are greedy (reads/serves are not heat sites); the loop trip on
+        # the 3rd bumps heat so the say samples at 0.4.
         self.assertEqual(b.temps, [0.0, 0.0, 0.0, 0.4])
 
     def test_declined_action_bumps_heat(self):
@@ -3863,21 +3918,21 @@ class TestLineAnchoredEdit(unittest.TestCase):
         self.assertIn("CHANGED on disk", obs[2][0])
         self.assertIn("Re-read lines 1-1", obs[2][0])        # anchored range echoed in the block
 
-    def test_first_read_numbered_and_read_before_edit_still_gates(self):
+    def test_blind_anchored_edit_is_served_numbered_content(self):
         fp = os.path.join(self.d, "r.py")
         _write(fp, "alpha = 1\nbeta = 2\n")
         actions = [
-            # a blind anchored edit with NO prior read is gated by read-before-edit
+            # a blind anchored edit with NO prior read is SERVED the numbered content the
+            # anchor dialect needs (not a bare bounce), so the retry lands from real lines.
             '{"thought":"blind","action":"edit_file","path":"r.py","start_line":1,"end_line":1,"anchor":"alpha = 1","new":"alpha = 9"}',
-            '{"thought":"read","action":"read_file","path":"r.py"}',
             '{"thought":"edit","action":"edit_file","path":"r.py","start_line":1,"end_line":1,"anchor":"alpha = 1","new":"alpha = 9"}',
             '{"thought":"done","action":"say","message":"done"}',
         ]
         a, events, obs = self._drive(self.d, actions)
-        self.assertFalse(obs[0][1])                          # blind edit blocked
-        self.assertTrue(obs[1][1])                           # the read shows numbered content
-        self.assertIn("1\talpha = 1", obs[1][0])
-        self.assertTrue(obs[2][1])                           # after the read, the anchored edit lands
+        self.assertTrue(obs[0][1])                           # served, not bounced
+        self.assertIn("1\talpha = 1", obs[0][0])             # numbered content the anchor needs
+        self.assertIn("without reading it", obs[0][0])       # teaches the rule
+        self.assertTrue(obs[1][1])                           # the retry anchored edit lands
         self.assertEqual(_read(fp), "alpha = 9\nbeta = 2\n")
 
     def test_splice_marks_file_stale_for_out_of_window_edit(self):
