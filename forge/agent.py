@@ -182,11 +182,13 @@ def _is_test_cmd(command, cwd):
 
 
 def _cmd_missing(out):
-    """A guessed test command wasn't runnable here (exit 127) — e.g. detect_test_cmd
-    returns 'pytest -q' just because a tests/ dir exists, but pytest isn't installed.
-    _run swallows the return code, so we read the shell's own phrasing."""
-    o = (out or "").lower()
-    return "command not found" in o or ": not found" in o
+    """A guessed test command wasn't runnable here — e.g. detect_test_cmd returns
+    'pytest -q' just because a tests/ dir exists, but pytest isn't installed (exit
+    127). _run swallows the return code, so fleet.runner_missing reads the shell's/
+    interpreter's own phrasing (shared with the fleet verifier, which must equally
+    not treat an absent runner as evidence)."""
+    from . import fleet
+    return fleet.runner_missing(out)
 
 
 # ---- P4.5 just-in-time retrieval ---------------------------------------------
@@ -1464,7 +1466,7 @@ class Agent:
             self._emit_receipt(claim)                              # H04
             return None
 
-        from . import fleet, tools
+        from . import fleet, testparse, tools
         # Only the first claim runs the automatic check. A second claim evaluates the
         # same captured evidence, making the old bounce escape deterministic and auditable.
         if not self._verified and not self._bounced:
@@ -1480,6 +1482,11 @@ class Agent:
                 if _cmd_missing(obs2):
                     self.evidence.record_assumption(
                         "detected test command is unavailable: " + cmd)
+                elif testparse.zero_collected(obs2):
+                    # a 0-test run verifies nothing — and unittest exits 0 on one
+                    # before 3.12, so the exit code alone would falsely verify
+                    self.evidence.record_assumption(
+                        "test command ran but collected 0 tests: " + cmd)
                 else:
                     self.evidence.record_verification(cmd, ok2, obs2)
                     if ok2:
@@ -1818,13 +1825,22 @@ class Agent:
             self.evidence.record_change(changed)
             self._verified = False
         if kind == "run_tests":
-            self.evidence.record_verification("run_tests", ok, obs)
-            if ok:
-                self._mark_verified()         # P6.3: a passing run_tests satisfies the done-gate
+            from . import testparse as _tp
+            if _cmd_missing(obs) or _tp.zero_collected(obs):
+                # not evidence either way: the runner was absent or ran 0 tests. A
+                # failed verification here would poison the contract and make an
+                # empty-suite project unwinnable — record the assumption instead,
+                # so the done-gate's accept-unverified path stays reachable.
+                self.evidence.record_assumption("run_tests could not verify (absent runner or 0 tests collected)")
+            else:
+                self.evidence.record_verification("run_tests", ok, obs)
+                if ok:
+                    self._mark_verified()     # P6.3: a passing run_tests satisfies the done-gate
         if ok and kind == "bash":
             _cmd = act.get("command", "")
             from . import fleet as _fleet
-            if _is_test_cmd(_cmd, self.session.cwd):
+            from . import testparse as _testparse
+            if _is_test_cmd(_cmd, self.session.cwd) and not _testparse.zero_collected(obs):
                 self.evidence.record_verification(_cmd, True, obs)
                 self._mark_verified()         # the model ran the suite itself
             elif _fleet.bash_mutates(_cmd):

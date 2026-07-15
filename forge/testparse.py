@@ -40,6 +40,36 @@ _JEST_FAIL = re.compile(r"^\s*(?:✕|×|✗|●)\s+(.+?)\s*$")
 # a python traceback frame
 _FRAME = re.compile(r'File "([^"]+)", line (\d+)(?:, in (\S+))?')
 
+# a run that collected ZERO tests, decided from the FINAL summary line only (searched
+# from the END, like _summary): a nested runner leaking `Ran 0 tests` into a passing
+# suite's output must not flip it, and a pytest collection ERROR ("collected 0 items /
+# 1 error", terminal `N error in ...`) is positive evidence of breakage, NOT a zero run.
+_RAN_N_RE = re.compile(r"^Ran (\d+) tests?\b")
+_NO_TESTS_RAN_RE = re.compile(r"^=*\s*no tests ran\b", re.I)
+_PYTEST_COUNTS_RE = re.compile(
+    r"^(?:=+.*?)?\b\d+\s+(?:passed|failed|errors?|skipped|deselected|xfailed|xpassed|warnings?)\b")
+
+
+def zero_collected(output):
+    """True when the FINAL summary of runner output shows a run that collected/ran
+    ZERO tests. Such a run verifies nothing, so it must never satisfy a verification
+    gate — on Python < 3.12 unittest exits 0 on it, which reads as a passing suite
+    to any exit-code check."""
+    if not output:
+        return False
+    for ln in reversed(output.splitlines()):
+        s = ln.strip()
+        if not s:
+            continue
+        m = _RAN_N_RE.match(s)
+        if m:
+            return m.group(1) == "0"
+        if _NO_TESTS_RAN_RE.match(s):
+            return True
+        if _PYTEST_COUNTS_RE.match(s):
+            return False
+    return False
+
 
 def is_test_runner(command):
     """True if `command`'s head is a known test runner (opportunistic-digest hook)."""
@@ -48,14 +78,21 @@ def is_test_runner(command):
 
 def _summary(lines):
     """The most informative counts/summary line, searched from the END (where runners
-    print it). pytest's `=== N failed ===` banner or unittest's OK/FAILED/Ran line."""
+    print it). pytest's `=== N failed ===` banner, or unittest's Ran + OK/FAILED —
+    unittest splits counts and status across two lines and the counts line is the one
+    that matters (zero_collected reads `Ran 0 tests` off the digest downstream), so
+    a bare terminal OK/FAILED is held until its Ran line is found and both are kept."""
+    status = None
     for ln in reversed(lines):
         s = ln.strip()
         if _PYTEST_SUMMARY.match(s):
             return s.strip("= ").strip()
         if _UNITTEST_SUMMARY.match(s):
-            return s
-    return None
+            if s.startswith("Ran "):
+                return s + (f" — {status}" if status else "")
+            if status is None:
+                status = s
+    return status
 
 
 def _pytest_fails(lines):
