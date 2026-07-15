@@ -590,6 +590,16 @@ _COMMAND_GROUPS = [
     ]),
 ]
 
+# The three invocations people actually type. Kept as data, not inline literals:
+# `forge run "<task>"` embeds quotes, and a quoted literal inside an f-string
+# expression is a SyntaxError on Python ≤3.11 (PEP 701 only lifted that in 3.12),
+# which forge still supports.
+_USAGE_EXAMPLES = [
+    ("forge", "chat, oriented in the current directory"),
+    ('forge run "<task>"', "one task, start to finish"),
+    ("forge models", "what this machine can run"),
+]
+
 _OPTIONS = [
     ("--model M[,M]", "a model, or a ladder cheap→strong; overrides the config"),
     ("--dir PATH", "where to work (default: this directory)"),
@@ -617,9 +627,8 @@ def _help_text():
     # The test suite pins "usage: forge" — and it's the line people actually scan for.
     add(P("usage: forge", "bold") + " [options] <command> [args]")
     add("")
-    add("  " + P(f"{'forge':<{W}}", "cyan") + "chat, oriented in the current directory")
-    add("  " + P(f"{'forge run \"<task>\"':<{W}}", "cyan") + "one task, start to finish")
-    add("  " + P(f"{'forge models':<{W}}", "cyan") + "what this machine can run")
+    for cmd, desc in _USAGE_EXAMPLES:
+        add("  " + P(f"{cmd:<{W}}", "cyan") + desc)
 
     for title, rows in _COMMAND_GROUPS:
         add("")

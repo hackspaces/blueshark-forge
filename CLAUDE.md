@@ -78,6 +78,27 @@ Offline and stdlib-only, like the runtime. Tests must never launch a real model
 server or hit the network — a past test did, and quietly ran a 30B model. Mock the
 provisioning path.
 
+### Python 3.10 is the floor, and your interpreter is probably newer
+
+`requires-python = ">=3.10"`. A green local run proves nothing about 3.10/3.11 if
+you're on 3.12+, because **newer syntax compiles silently for you and is a
+SyntaxError for a supported user**. This has already shipped once: a quoted
+literal inside an f-string expression (`f"{'a \"b\"':<{w}}"`) is fine from 3.12
+(PEP 701) and a hard SyntaxError on 3.10/3.11 — it passed locally on 3.14 and
+broke both older jobs.
+
+There is no static guard for this: `ast.parse(..., feature_version=(3,10))` does
+**not** catch it. The only real check is running an old interpreter:
+
+```bash
+python3.11 -m compileall -q forge/ tests/     # syntax floor
+python3.11 -m unittest discover -s tests -q   # and the suite
+```
+
+CI runs the full 3.10–3.13 matrix. **Read every matrix job before merging, not
+just the one required check** — `test (3.12)` is the only *required* status, so a
+3.10/3.11 failure will not block the merge button. Green-on-3.12 is not green.
+
 ## The site
 
 `site/` is a static, no-build landing page deployed by Vercel from `main`
