@@ -1,7 +1,10 @@
 #!/bin/sh
 # forge installer — one line to the model-agnostic agentic runtime.
 #
-#   curl -fsSL https://raw.githubusercontent.com/hackspaces/blueshark-forge/main/install.sh | sh
+#   curl -fsSL https://topk1.com/forge/install.sh | sh
+#
+# (mirror, if you'd rather fetch from the repo directly:
+#  curl -fsSL https://raw.githubusercontent.com/hackspaces/blueshark-forge/main/site/install.sh | sh)
 #
 # Installs the `blueshark-forge` package (the `forge` CLI), checking prerequisites
 # and telling you what it found. Idempotent — re-run to upgrade. Set
@@ -69,9 +72,12 @@ else
   say "frontier model with your own key (OpenAI / Anthropic). forge drives any of them."
 fi
 
-# 5. Where to go next.
+# 5. Where to go next — the same three steps `forge` itself shows on a fresh run,
+#    so the installer and the first-run welcome tell one story.
 printf '\n\033[1mNext\033[0m\n'
-say "forge setup            configure a model sized to this machine"
-say "forge models           browse the curated model catalog"
-say 'forge run "<a task>"   run an agent in the current directory'
+say "forge                  see what this machine can run"
+say "forge models use phi-2 a quick starter — pulled + ready in ~2 min"
+say 'forge run "<a task>"   then put it to work'
+printf '\n'
+say "(or  forge setup  to pick a model ladder yourself)"
 printf '\n'
