@@ -95,6 +95,20 @@ class TestDigest(unittest.TestCase):
         self.assertNotIn("site-packages", dg)                  # stdlib/site-packages frame dropped
 
 
+class TestSummaryKeepsCounts(unittest.TestCase):
+    def test_unittest_digest_keeps_the_ran_line(self):
+        # unittest splits counts and status across two lines; the digest used to
+        # keep only the terminal OK, eating `Ran 0 tests` — so zero_collected on a
+        # DIGESTED observation (the opportunistic bash hook's view) missed a
+        # zero-test run wherever `python3` on PATH is < 3.12 (exit 0). CI-only bug.
+        dg = testparse.digest("Ran 0 tests in 0.000s\n\nOK", "")
+        self.assertIn("Ran 0 tests", dg)
+        self.assertTrue(testparse.zero_collected(dg))
+        dg = testparse.digest("Ran 5 tests in 0.010s\n\nOK", "")
+        self.assertIn("Ran 5 tests", dg)
+        self.assertFalse(testparse.zero_collected(dg))
+
+
 class TestZeroCollected(unittest.TestCase):
     def test_zero_collected_shapes(self):
         for out in ("Ran 0 tests in 0.000s\n\nOK",              # unittest, exit 0 before 3.12

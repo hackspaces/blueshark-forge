@@ -78,14 +78,21 @@ def is_test_runner(command):
 
 def _summary(lines):
     """The most informative counts/summary line, searched from the END (where runners
-    print it). pytest's `=== N failed ===` banner or unittest's OK/FAILED/Ran line."""
+    print it). pytest's `=== N failed ===` banner, or unittest's Ran + OK/FAILED —
+    unittest splits counts and status across two lines and the counts line is the one
+    that matters (zero_collected reads `Ran 0 tests` off the digest downstream), so
+    a bare terminal OK/FAILED is held until its Ran line is found and both are kept."""
+    status = None
     for ln in reversed(lines):
         s = ln.strip()
         if _PYTEST_SUMMARY.match(s):
             return s.strip("= ").strip()
         if _UNITTEST_SUMMARY.match(s):
-            return s
-    return None
+            if s.startswith("Ran "):
+                return s + (f" — {status}" if status else "")
+            if status is None:
+                status = s
+    return status
 
 
 def _pytest_fails(lines):
