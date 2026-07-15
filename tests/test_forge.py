@@ -16,7 +16,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from forge import session as sm            # noqa: E402
 from forge import ledger as ledger_mod     # noqa: E402
 from forge import profile as _profile      # noqa: E402
-from forge.agent import Agent              # noqa: E402
+from forge.agent import Agent, ALL_LEVERS  # noqa: E402
 from forge.authority import AuthorityPolicy  # noqa: E402
 
 # P5.8 hermetic redirect: Agents built here record passport telemetry; keep it out of
@@ -508,6 +508,82 @@ class TestDoneGate(unittest.TestCase):
             self.assertFalse(self.fleet.harness_verified(sid))
         finally:
             sm2.SESSIONS = orig
+
+
+class TestClaimGuard(unittest.TestCase):
+    """P5.9 — the claim guard breaks the repeat-a-rejected-completion loop.
+
+    Measured on qwen2.5-coder:7b before this existed: 5 real actions, then 33
+    byte-identical rejected claims until the step limit. `loop_detect` watches
+    ACTIONS; nothing watched the completion path. The model wasn't being stubborn,
+    it was starved — the bounce names the failing command but the evidence contract
+    keeps only a DIGEST of its output, so it was told "it failed" and never what.
+
+    The guard escalates rather than restates, and — the part that matters — it
+    never opens the gate. Repetition must not become an escape hatch (H05).
+    """
+
+    def setUp(self):
+        from forge import fleet
+        self.fleet = fleet
+        self._orig = fleet.detect_test_cmd
+
+    def tearDown(self):
+        self.fleet.detect_test_cmd = self._orig
+
+    _WRITE = '{"thought":"w","action":"write_file","path":"new.py","content":"x = 1\\n"}'
+    _SAY = '{"thought":"d","action":"say","message":"all done"}'
+
+    def _stuck_turn(self, levers=None, max_steps=12):
+        """A model that writes, then claims done forever against a failing test."""
+        d = tempfile.mkdtemp()
+        self.fleet.detect_test_cmd = lambda cwd: "false"
+        events = []
+        sess = _RecSession(d)
+        a = Agent(ScriptBackend([self._WRITE] + [self._SAY] * 20), sess,
+                  max_steps=max_steps, levers=levers,
+                  on_event=lambda k, **kw: events.append((k, kw)))
+        return a.send("do it"), events, sess, a
+
+    def test_stops_early_instead_of_burning_the_budget(self):
+        result, events, sess, a = self._stuck_turn(max_steps=12)
+        stops = [kw for k, kw in events if k == "claim_guard" and kw.get("action") == "stop"]
+        self.assertEqual(len(stops), 1)                       # gave up exactly once
+        self.assertLessEqual(a._claim_repeat, 3)              # 3 claims, not 33
+        self.assertIn("stopped", result)                      # harness's words...
+        self.assertNotIn("all done", result)                  # ...NOT the model's claim
+        self.assertNotEqual(result, "(hit the step limit — ask me to continue)")
+
+    def test_gate_never_opens_on_repetition(self):
+        # The whole point: stopping must not be a way to get an unproven claim accepted.
+        result, events, sess, a = self._stuck_turn()
+        self.assertFalse(a._completion_decision.allowed)      # still REJECT → run exits non-zero
+        self.assertFalse(any(k == "verified" for k, _ in sess.logs))
+
+    def test_shows_the_real_failure_before_giving_up(self):
+        # The repeat is starvation, so the escalation must add information the model has
+        # not already been given — not restate the same sentence louder.
+        _, events, _, a = self._stuck_turn()
+        shown = [kw for k, kw in events if k == "claim_guard"
+                 and kw.get("action") == "show_evidence"]
+        self.assertTrue(shown, "must surface the real output before stopping")
+        nudges = [m["content"] for m in a.messages
+                  if m.get("role") == "user" and "[harness]" in str(m.get("content", ""))]
+        self.assertTrue(nudges, "the escalated bounce must reach the model")
+        self.assertIn("Repeating it will not work", nudges[0])
+
+    def test_lever_off_restores_the_old_behaviour(self):
+        # bench must be able to ablate it: without the lever, the loop runs to the
+        # step limit exactly as before.
+        others = frozenset(l for l in ALL_LEVERS if l != "claim_guard")
+        result, events, _, a = self._stuck_turn(levers=others, max_steps=6)
+        self.assertFalse([k for k, _ in events if k == "claim_guard"])
+        self.assertEqual(result, "(hit the step limit — ask me to continue)")
+        # gated at the mechanism site, so ablation is byte-for-byte the old harness —
+        # it doesn't even count.
+        self.assertEqual(a._claim_repeat, 0)
+        self.assertFalse(a._claim_stuck)
+
 
 
 class TestNarrationGuard(unittest.TestCase):

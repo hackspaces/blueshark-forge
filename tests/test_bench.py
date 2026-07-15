@@ -85,7 +85,7 @@ class TestLeverGating(unittest.TestCase):
     def test_default_levers_is_all(self):
         a = Agent(ScriptBackend([SAY]), sm.EphemeralSession(tempfile.mkdtemp(), "s"))
         self.assertEqual(a.levers, ALL_LEVERS)
-        self.assertEqual(len(ALL_LEVERS), 8)
+        self.assertEqual(len(ALL_LEVERS), 9)
 
     def test_bare_does_not_block_read_before_edit(self):
         """With NO levers, a blind edit of an unread existing file is allowed
