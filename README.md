@@ -13,15 +13,21 @@ Not tied to any vendor. Runs on your machine, on your models.
 
 ## Install
 
-**One line** (macOS / Linux) — checks your environment and installs the `forge` CLI:
+**macOS / Linux** — one line; checks your environment and installs the `forge` CLI:
 
 ```bash
 curl -fsSL https://topk1.com/forge/install.sh | sh
 ```
 
-<sub>Prefer to see it first? Append `FORGE_INSTALL_DRY_RUN=1` before `sh` to check your setup without installing anything — or just open [topk1.com/forge/install.sh](https://topk1.com/forge/install.sh) and read it. Fetching straight from the repo works too: `curl -fsSL https://raw.githubusercontent.com/hackspaces/blueshark-forge/main/site/install.sh | sh`.</sub>
+**Windows** (PowerShell or cmd) — requires Python 3.10+:
 
-**Or by hand** — requires Python 3.10+:
+```bat
+pip install blueshark-forge
+```
+
+<sub>Prefer to see the macOS/Linux script first? Append `FORGE_INSTALL_DRY_RUN=1` before `sh` to check your setup without installing anything — or just open [topk1.com/forge/install.sh](https://topk1.com/forge/install.sh) and read it. Fetching straight from the repo works too: `curl -fsSL https://raw.githubusercontent.com/hackspaces/blueshark-forge/main/site/install.sh | sh`.</sub>
+
+**Or by hand** (any OS) — requires Python 3.10+:
 
 ```bash
 pipx install blueshark-forge          # recommended (isolated); or: pip install blueshark-forge
@@ -29,8 +35,6 @@ pipx install blueshark-forge          # recommended (isolated); or: pip install 
 
 **An engine is optional** — only local models need one. Install [Ollama](https://ollama.com) for the
 simplest local setup, or bring a frontier model with your own key (OpenAI / Anthropic). forge drives any of them.
-
-<sub>Windows: `pip install blueshark-forge` (a native installer is on the roadmap).</sub>
 
 ## Set up (once per machine)
 

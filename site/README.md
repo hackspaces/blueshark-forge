@@ -16,7 +16,8 @@ page and the one-line installer.
 under a **path** and the domain root stays free for anything else:
 
 - `https://topk1.com/forge/` — the landing page
-- `curl -fsSL https://topk1.com/forge/install.sh | sh` — installs the `forge` CLI
+- `curl -fsSL https://topk1.com/forge/install.sh | sh` — installs the `forge` CLI (macOS / Linux)
+- `pip install blueshark-forge` — the `forge` CLI on Windows (PowerShell / cmd)
 
 (The domain root `https://topk1.com/` and the bare `.vercel.app` URL still serve the
 page too — the rewrite only *adds* the `/forge` path.)

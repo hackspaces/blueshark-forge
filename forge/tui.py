@@ -9,9 +9,15 @@ import select
 import shutil
 import signal
 import sys
-import termios
 import threading
-import tty
+
+try:
+    import termios
+    import tty
+except ImportError:                 # native Windows has no POSIX terminal control —
+    termios = tty = None            # _supported() goes False, so every raw-mode path
+                                    # below falls back to plain input() and none of the
+                                    # termios.*/tty.* calls (all gated on it) are reached.
 
 DIM = "\033[2m"; GR = "\033[32m"; CY = "\033[36m"; MG = "\033[35m"; RST = "\033[0m"
 
@@ -23,7 +29,9 @@ WAKE = object()   # prompt() returns this when the wake fd fires (idle inbox arr
 
 
 def _supported():
-    return sys.stdin.isatty() and sys.stdout.isatty()
+    # termios is None on native Windows; a Windows console still reports isatty()==True,
+    # so without this check the raw-mode editor would run and hit termios.tcgetattr(None).
+    return termios is not None and sys.stdin.isatty() and sys.stdout.isatty()
 
 
 def _vis(s):
