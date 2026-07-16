@@ -58,6 +58,7 @@
 
   .cmd{margin:1.5rem 0 0}
   .cmd .lbl{color:var(--faint); font-size:.78rem; margin:0 0 .45rem}
+  .cmd .lbl2{margin-top:.7rem}
   .cmd .box{display:flex; align-items:center; gap:.9rem; background:var(--inv-bg); color:var(--inv-ink); padding:.85rem 1rem; overflow-x:auto}
   .cmd code{white-space:nowrap; font-size:.9rem} .cmd code .u{color:var(--inv-muted)}
   .cmd button{margin-left:auto; flex-shrink:0; background:none; border:1px solid var(--inv-muted); color:var(--inv-muted); font:inherit; font-size:.74rem; padding:.22rem .55rem; cursor:pointer}
@@ -143,9 +144,13 @@
           <p class="lbl"># install · macOS / Linux</p>
           <div class="box">
             <code id="cmd">curl -fsSL <span class="u">https://topk1.com/forge/install.sh</span> | sh</code>
-            <button type="button" id="copy">copy</button>
+            <button type="button" class="copy" data-cmd="cmd">copy</button>
           </div>
-          <p class="note">Windows: <code>pip install blueshark-forge</code></p>
+          <p class="lbl lbl2"># install · Windows &nbsp;<span class="u">(PowerShell / cmd)</span></p>
+          <div class="box">
+            <code id="cmdwin">pip install blueshark-forge</code>
+            <button type="button" class="copy" data-cmd="cmdwin">copy</button>
+          </div>
         </div>
 
         <ul>
@@ -187,10 +192,13 @@
 
 <script>
   (function(){
-    var b=document.getElementById('copy'), c=document.getElementById('cmd');
-    if(b&&c) b.addEventListener('click',function(){
-      var t=c.innerText.trim();
-      if(navigator.clipboard) navigator.clipboard.writeText(t).then(function(){ b.textContent='copied'; setTimeout(function(){b.textContent='copy';},1400); });
+    document.querySelectorAll('.copy').forEach(function(b){
+      var c=document.getElementById(b.getAttribute('data-cmd'));
+      if(!c) return;
+      b.addEventListener('click',function(){
+        var t=c.innerText.trim();
+        if(navigator.clipboard) navigator.clipboard.writeText(t).then(function(){ b.textContent='copied'; setTimeout(function(){b.textContent='copy';},1400); });
+      });
     });
   })();
 </script>
