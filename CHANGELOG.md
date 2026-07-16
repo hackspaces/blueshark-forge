@@ -5,6 +5,12 @@ Every published release of `blueshark-forge`, newest first.
 Generated from the GitHub Releases by `tools/changelog.py` — the releases are
 what the tag-gated publish actually shipped, so this cannot drift. Don't hand-edit.
 
+## [v0.11.6](https://github.com/hackspaces/blueshark-forge/releases/tag/v0.11.6) — forge starts on native Windows, and the page serves a Windows install command
+
+*2026-07-16 · `pip install blueshark-forge==0.11.6`*
+
+See the release commit for details.
+
 ## [v0.11.5](https://github.com/hackspaces/blueshark-forge/releases/tag/v0.11.5) — a project with no tests is winnable again
 
 *2026-07-15 · `pip install blueshark-forge==0.11.5`*
