@@ -180,8 +180,10 @@ def cmd_run(args):
             print(_paint(f"  ↓ recovered — back to {k['model']}", "green"))
         elif kind == "inbox":
             print(_paint(f"  ✉ {k['sender']}: {_fit(k['text'], W - len(k['sender']) - 6)}", "magenta"))
+    from . import mcp as _mcp
+    _servers = _mcp.connect(cfgmod.load(), warn=lambda n, e: print(_paint(f"  ⚠ MCP server {n!r} unavailable: {e}", "yellow")))
     agent = Agent(_make_ladder(_resolve_model(args)), s, on_event=on_event, max_steps=args.max_steps, autonomous=True,
-                  goal=args.task,
+                  goal=args.task, mcp_servers=_servers,
                   workspace=_workspace_ctx(os.path.abspath(args.dir), _ctx_budget(ladder[0])))
     try:
         reply = agent.send(args.task)
