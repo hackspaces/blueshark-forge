@@ -428,7 +428,9 @@ class Screen:
     def _layout(self, plen, text, cur):
         """Wrap the logical input across the box's writable rows, keeping the
         cursor visible. Returns (segments, cursor_row, cursor_col) where col is
-        an offset into the row's content area."""
+        an offset into the row's content area. (Char-based scroll/cursor math —
+        display-column FITTING of each segment happens in _footer_lines, which clips
+        + pads by width so the box stays aligned even with wide chars in the input.)"""
         inner = max(8, self.w - 4)                    # inside '│ ' … ' │'
         caps = [inner - plen] + [inner] * (self.rows - 1)
         total = sum(caps)
@@ -442,21 +444,35 @@ class Screen:
             return segs, 0, plen + min(rel, caps[0])
         return segs, 1 + (rel - caps[0]) // inner, (rel - caps[0]) % inner
 
+    def _footer_lines(self, prompt, text, status, cur=None, dim=False):
+        """Build the footer's line strings (no I/O — so it's unit-testable). Every box
+        line is exactly self.w DISPLAY columns wide; the border is drawn once and the
+        content rows pad to match. Returns (lines, cursor_row, cursor_col)."""
+        plen = _vis(prompt)
+        segs, crow, ccol = self._layout(plen, text, len(text) if cur is None else cur)
+        style = DIM if dim else ""
+        inner = self.w - 4
+        lines = [_clip(f"{MG}{self._activity}{RST}" if self._activity else "", self.w),
+                 f"{DIM}╭{'─' * (self.w - 2)}╮{RST}"]
+        # Clip each segment to its DISPLAY-column budget and pad to fill, so the right
+        # border sits at the same column on every row even when the input has wide chars
+        # (CJK/emoji). Clipping + width-padding is what keeps the box aligned; the char-
+        # based _layout only decides how the logical line splits across rows.
+        seg0 = _clip(segs[0], max(0, inner - plen))
+        lines.append(f"{DIM}│{RST} {prompt}{style}{seg0}{RST}"
+                     f"{' ' * max(0, inner - plen - _vis(seg0))} {DIM}│{RST}")
+        for s in segs[1:]:
+            sc = _clip(s, inner)
+            lines.append(f"{DIM}│{RST} {style}{sc}{RST}{' ' * max(0, inner - _vis(sc))} {DIM}│{RST}")
+        lines.append(f"{DIM}╰{'─' * (self.w - 2)}╯{RST}")
+        lines.append(_clip(f"{DIM}{status}{RST}", self.w))
+        return lines, crow, ccol
+
     def _paint(self, prompt, text, status, cur=None, dim=False):
         """Repaint the footer. `text` is the plain logical input line; it wraps
         across the box's writable rows."""
         base = self.h - self.footer + 1
-        plen = _vis(prompt)
-        segs, crow, ccol = self._layout(plen, text, len(text) if cur is None else cur)
-        style = DIM if dim else ""
-        lines = [_clip(f"{MG}{self._activity}{RST}" if self._activity else "", self.w),
-                 f"{DIM}╭{'─' * (self.w - 2)}╮{RST}"]
-        pad0 = max(0, (self.w - 4) - plen - len(segs[0]))
-        lines.append(f"{DIM}│{RST} {prompt}{style}{segs[0]}{RST}{' ' * pad0} {DIM}│{RST}")
-        for s in segs[1:]:
-            lines.append(f"{DIM}│{RST} {style}{s}{RST}{' ' * max(0, (self.w - 4) - len(s))} {DIM}│{RST}")
-        lines.append(f"{DIM}╰{'─' * (self.w - 2)}╯{RST}")
-        lines.append(_clip(f"{DIM}{status}{RST}", self.w))
+        lines, crow, ccol = self._footer_lines(prompt, text, status, cur, dim)
         for i in range(self.footer):
             sys.stdout.write(f"\033[{base + i};1H\033[K")
             if i < len(lines):

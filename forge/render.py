@@ -33,11 +33,13 @@ def _char_width(ch):
         return 0
     if unicodedata.combining(ch):                 # combining marks (accents) add nothing
         return 0
-    if unicodedata.east_asian_width(ch) in ("W", "F"):   # CJK wide / fullwidth
+    if unicodedata.east_asian_width(ch) in ("W", "F"):   # CJK wide / fullwidth (catches most emoji too)
         return 2
-    if 0x1f000 <= o <= 0x1faff or 0x2600 <= o <= 0x27bf:  # emoji blocks (EAW is inconsistent here)
-        return 2
-    return 1
+    if 0x1f000 <= o <= 0x1faff:                          # emoji planes — a backstop for any the
+        return 2                                         # EAW table doesn't yet mark 'W'
+    return 1                                             # NB: the BMP symbol/dingbat range
+                                                         # (0x2600–0x27bf, e.g. ❯) is mostly width-1;
+                                                         # trusting EAW there matches wcwidth + real terminals
 
 
 def display_width(s):
