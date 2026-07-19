@@ -5,6 +5,12 @@ Every published release of `blueshark-forge`, newest first.
 Generated from the GitHub Releases by `tools/changelog.py` — the releases are
 what the tag-gated publish actually shipped, so this cannot drift. Don't hand-edit.
 
+## [v0.11.8](https://github.com/hackspaces/blueshark-forge/releases/tag/v0.11.8) — MCP: any MCP server’s tools become grammar-forced forge actions a small model can call
+
+*2026-07-19 · `pip install blueshark-forge==0.11.8`*
+
+See the release commit for details.
+
 ## [v0.11.7](https://github.com/hackspaces/blueshark-forge/releases/tag/v0.11.7) — forge is frozen-binary ready (autopilot re-invokes correctly when packaged as a standalone executable)
 
 *2026-07-19 · `pip install blueshark-forge==0.11.7`*
