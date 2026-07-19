@@ -293,6 +293,38 @@ def _daemon_launch_cmd(model, interval):
     return [sys.executable, "-m", "forge.daemon", model, str(interval)]
 
 
+def cmd_team(args):
+    """P9.2 first swarm slice: plan a goal into a task DAG, run each task as a worker in
+    its own git worktree, and merge only the branches that pass the verify gate."""
+    if _first_run(args):
+        print("✗ no model set up yet.\n  See what this machine can run:  forge models",
+              file=sys.stderr)
+        sys.exit(1)
+    from . import team as teammod
+    ladder = _make_ladder(_resolve_model(args))
+    _colors = {"start": "cyan", "merged": "green", "refuted": "red", "failed": "red",
+               "skipped": "yellow", "conflict": "yellow"}
+    def on_event(kind, **k):
+        if kind == "team_planned":
+            print(_paint(f"  planned {len(k['subtasks'])} tasks: {', '.join(k['subtasks'])}", "cyan"))
+        elif kind == "team_task":
+            st = k.get("status", "")
+            tail = f" — {k['detail']}" if k.get("detail") else (f"  {k['title']}" if k.get("title") else "")
+            print(_paint(f"  · {k['id']}: {st}{tail}", _colors.get(st, "dim")))
+    try:
+        res = teammod.run_team(args.goal, os.path.abspath(args.dir), ladder,
+                               on_event=on_event, max_steps=args.max_steps)
+    except teammod.TeamError as e:
+        print(_paint(f"✗ {e}", "red"), file=sys.stderr)
+        sys.exit(1)
+    merged, total = len(res["merged"]), len(res["results"])
+    fin = res["final"]
+    print(f"\n{_paint('team done', 'green')}: {merged}/{total} tasks merged into {res['integration_branch']}")
+    print(f"  final suite: {'✓' if fin['ok'] else '✗'} {fin['detail']}")
+    print(_paint(f"  review:  git diff {res['base']}..{res['integration_branch']}", "dim"))
+    print(_paint(f"  keep it: git checkout {res['base']} && git merge {res['integration_branch']}", "dim"))
+
+
 def cmd_up(args):
     import subprocess
     if _daemon_running():
@@ -582,6 +614,7 @@ _COMMAND_GROUPS = [
     ]),
     ("Work", [
         ("run", 'one task, start to finish  ·  forge run "fix the failing test"'),
+        ("team", 'a goal → a task DAG → isolated worktree workers → merge only what verifies'),
         ("bench", "harness-lift eval: the same model bare vs full harness"),
     ]),
     ("The fleet", [
@@ -687,6 +720,10 @@ def main():
     p_run.add_argument("task")
     p_run.add_argument("--max-steps", type=int, default=40)
 
+    p_team = sub.add_parser("team", help="swarm: plan a goal into a task DAG, run each task in an isolated worktree, merge only what verifies")
+    p_team.add_argument("goal")
+    p_team.add_argument("--max-steps", type=int, default=40)
+
     sub.add_parser("status", help="autopilot state + live sessions")
 
     p_send = sub.add_parser("send", help="message another session")
@@ -757,7 +794,7 @@ def main():
 
     args = ap.parse_args()
     from .models_cmd import cmd_models
-    dispatch = {"run": cmd_run, "status": cmd_status, "send": cmd_send, "up": cmd_up,
+    dispatch = {"run": cmd_run, "team": cmd_team, "status": cmd_status, "send": cmd_send, "up": cmd_up,
                 "down": cmd_down, "receipts": cmd_receipts, "learnings": cmd_learnings,
                 "forget": cmd_forget, "trace": cmd_trace, "corpus": cmd_corpus, "export": cmd_export, "bench": cmd_bench, "replay": cmd_replay,
                 "passport": cmd_passport, "models": cmd_models}
