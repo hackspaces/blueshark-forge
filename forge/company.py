@@ -127,6 +127,39 @@ def write_item(name, item):
         json.dump(item, f, indent=2)
 
 
+def _receipts_path(name):
+    return os.path.join(_company_path(name), "receipts.jsonl")
+
+
+def record_receipt(name, item_id, assignee, verdict, detail):
+    """Append one audit receipt — the trust layer's durable trail. Every done-claim's
+    verdict is written here (CONFIRMED/REJECTED), so the receipts ticker in the TUI is a
+    live view over real events, and the record survives the run."""
+    rec = {"ts": time.time(), "item": item_id, "assignee": assignee,
+           "verdict": verdict, "detail": (detail or "")[:200]}
+    try:
+        with open(_receipts_path(name), "a") as f:
+            f.write(json.dumps(rec) + "\n")
+    except OSError:
+        pass
+
+
+def read_receipts(name, limit=None):
+    out = []
+    try:
+        with open(_receipts_path(name)) as f:
+            for ln in f:
+                ln = ln.strip()
+                if ln:
+                    try:
+                        out.append(json.loads(ln))
+                    except ValueError:
+                        pass
+    except OSError:
+        pass
+    return out[-limit:] if limit else out
+
+
 def read_board(name):
     d = _board_dir(name)
     items = []
@@ -287,14 +320,17 @@ def _run_item(name, it, charter, cwd, wt_root, integration, integ_wt,
         it["attempts"] = attempt + 1
         if not verdict[0]:
             it.update(state="escalated", result=verdict[1]); write_item(name, it)
+            record_receipt(name, tid, it["assignee"], "REJECTED", verdict[1])
             emit("company_item", id=tid, state="escalated", detail=verdict[1])
             return
         m = team._git(integ_wt, "merge", "--no-ff", "-m", f"company merge {tid}", branch, check=False)
         if m.returncode != 0:
             team._git(integ_wt, "merge", "--abort", check=False)
             it.update(state="escalated", result="merge conflict"); write_item(name, it)
+            record_receipt(name, tid, it["assignee"], "REJECTED", "merge conflict")
             emit("company_item", id=tid, state="escalated", detail="merge conflict"); return
         it.update(state="verified", result=verdict[1]); write_item(name, it)
+        record_receipt(name, tid, it["assignee"], "CONFIRMED", verdict[1])
         emit("company_item", id=tid, state="verified", detail=verdict[1])
     finally:
         team._git(cwd, "worktree", "remove", "--force", wt, check=False)

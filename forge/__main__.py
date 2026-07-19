@@ -214,7 +214,7 @@ def _daemon_running():
         return None
 
 
-from .render import paint as _paint, fit as _fit, tilde as _tilde, term_width, strip_ansi as _strip_ansi
+from .render import paint as _paint, fit as _fit, tilde as _tilde, term_width, term_rows as _term_rows, strip_ansi as _strip_ansi
 
 
 def cmd_status(args):
@@ -363,6 +363,24 @@ def cmd_company(args):
         return
     if sub == "status":
         print(co.status(args.name))
+        return
+    if sub == "watch":
+        from . import company_tui
+        import time
+        try:
+            while True:
+                sys.stdout.write("\033[2J\033[H")
+                try:
+                    print("\n".join(company_tui.render_dashboard(args.name,
+                          cols=term_width(), rows=max(20, _term_rows()))))
+                except co.CompanyError as e:
+                    print(_paint(f"✗ {e}", "red")); break
+                board = co.read_board(args.name)
+                if board and all(it.get("state") in ("verified", "escalated", "blocked") for it in board):
+                    print(_paint("\n  run complete — Ctrl-C to exit", "dim"))
+                time.sleep(1.0)
+        except KeyboardInterrupt:
+            pass
         return
     # run
     _colors = {"running": "cyan", "verified": "green", "escalated": "red", "blocked": "yellow"}
@@ -842,6 +860,8 @@ def main():
     p_co_run.add_argument("--max-steps", type=int, default=40)
     p_co_status = co_sub.add_parser("status", help="the manager's roll-up (STATUS.md) or the live board")
     p_co_status.add_argument("name")
+    p_co_watch = co_sub.add_parser("watch", help="the live company TUI — animated office + board + receipts ticker")
+    p_co_watch.add_argument("name")
 
     p_office = sub.add_parser("office", help="the spatial office view of a company — a braille floorplan of desks + live state; --watch animates it")
     p_office.add_argument("name")

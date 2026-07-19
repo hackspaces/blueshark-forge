@@ -131,6 +131,10 @@ def term_width(default=100):
     return shutil.get_terminal_size((default, 24)).columns
 
 
+def term_rows(default=30):
+    return shutil.get_terminal_size((100, default)).lines
+
+
 def tilde(path):
     """Collapse the home prefix to ~ for a shorter, readable path."""
     home = os.path.expanduser("~")
