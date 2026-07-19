@@ -389,6 +389,41 @@ def cmd_company(args):
     print(_paint(f"  review:  git diff {res['base']}..{res['integration']}", "dim"))
 
 
+def cmd_office(args):
+    """Render a company's office — the spatial view over its board. A one-shot floorplan
+    (the braille/dither map with each worker's desk state), or --watch to tail the board and
+    re-render live as items move through queued → running → verified/escalated."""
+    from . import company as co, office
+    try:
+        charter = co.load_charter(args.name)
+    except co.CompanyError as e:
+        print(_paint(f"✗ {e}", "red"), file=sys.stderr); sys.exit(1)
+    roles = ["manager"] + co.workers(charter) + ["verifier"]
+
+    def snapshot():
+        board = co.read_board(args.name)
+        states = {it["assignee"]: it.get("state", "queued") for it in board}
+        agents = {r: (r if not r.startswith("worker") else r) for r in roles}
+        agents["manager"] = "board" if any(s == "running" for s in states.values()) else "manager"
+        return office.render_office(args.name, roles, item_states=states, agent_at=agents)
+
+    if not args.watch:
+        print("\n".join(snapshot()))
+        return
+    import time
+    try:
+        while True:
+            sys.stdout.write("\033[2J\033[H")               # clear + home
+            print(_paint(f"  {args.name} — office  (Ctrl-C to exit)", "bold"))
+            print("\n".join(snapshot()))
+            board = co.read_board(args.name)
+            if board and all(it.get("state") in ("verified", "escalated", "blocked") for it in board):
+                print(_paint("\n  run complete.", "dim")); break
+            time.sleep(1.0)
+    except KeyboardInterrupt:
+        pass
+
+
 def cmd_up(args):
     import subprocess
     if _daemon_running():
@@ -680,6 +715,7 @@ _COMMAND_GROUPS = [
         ("run", 'one task, start to finish  ·  forge run "fix the failing test"'),
         ("team", 'a goal → a task DAG → isolated worktree workers → merge only what verifies'),
         ("company", 'a goal → a manager + worker org, TRUST audits every done-claim, you steer as CEO'),
+        ("office", 'the spatial view of a company — a live braille floorplan of desks + state'),
         ("bench", "harness-lift eval: the same model bare vs full harness"),
         ("roster", "your agent cards — each model you forge is scored on real agentic work"),
     ]),
@@ -807,6 +843,10 @@ def main():
     p_co_status = co_sub.add_parser("status", help="the manager's roll-up (STATUS.md) or the live board")
     p_co_status.add_argument("name")
 
+    p_office = sub.add_parser("office", help="the spatial office view of a company — a braille floorplan of desks + live state; --watch animates it")
+    p_office.add_argument("name")
+    p_office.add_argument("--watch", action="store_true", help="tail the board and re-render live")
+
     sub.add_parser("status", help="autopilot state + live sessions")
 
     p_send = sub.add_parser("send", help="message another session")
@@ -877,7 +917,7 @@ def main():
 
     args = ap.parse_args()
     from .models_cmd import cmd_models
-    dispatch = {"run": cmd_run, "team": cmd_team, "company": cmd_company, "roster": cmd_roster, "status": cmd_status, "send": cmd_send, "up": cmd_up,
+    dispatch = {"run": cmd_run, "team": cmd_team, "company": cmd_company, "office": cmd_office, "roster": cmd_roster, "status": cmd_status, "send": cmd_send, "up": cmd_up,
                 "down": cmd_down, "receipts": cmd_receipts, "learnings": cmd_learnings,
                 "forget": cmd_forget, "trace": cmd_trace, "corpus": cmd_corpus, "export": cmd_export, "bench": cmd_bench, "replay": cmd_replay,
                 "passport": cmd_passport, "models": cmd_models}

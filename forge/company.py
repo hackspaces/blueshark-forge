@@ -301,14 +301,22 @@ def _run_item(name, it, charter, cwd, wt_root, integration, integ_wt,
 
 
 def _run_verify(cmd, cwd):
-    """Run an item's own verify condition (a shell command). No command → unverified-accept,
-    forge's own run_tests policy (a missing check is not a failure)."""
+    """Run an item's own verify condition (a shell command). No command → unverified. A
+    command whose RUNNER is absent (e.g. the manager wrote `python` where only `python3`
+    exists) is 'unverified', NOT failed — the same policy as run_tests: a check that can't
+    run is not evidence of failure, and the INDEPENDENT TRUST audit is the real gate. So a
+    manager's slightly-off verify never hard-fails good work; only a check that runs and
+    fails does. Returns (ok, detail) where ok means 'not a failure' (passed or unrunnable)."""
+    from .fleet import runner_missing
     cmd = (cmd or "").strip()
     if not cmd:
         return True, "no verify (unverified)"
     import subprocess
     r = subprocess.run(cmd, cwd=cwd, shell=True, capture_output=True, text=True)
-    tail = (r.stdout + r.stderr).strip().splitlines()[-1:] or [""]
+    out = r.stdout + r.stderr
+    if runner_missing(out):
+        return True, f"verify runner unavailable, unverified ({cmd[:40]})"
+    tail = out.strip().splitlines()[-1:] or [""]
     return r.returncode == 0, f"$ {cmd} → {'ok' if r.returncode == 0 else 'FAIL'} · {tail[0][:70]}"
 
 

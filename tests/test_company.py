@@ -184,6 +184,18 @@ class TestRun(unittest.TestCase):
                         verifier=lambda wt, files: (False, "TRUST: independent check failed"))
         self.assertEqual(res["escalated"], ["w1"])
 
+    def test_verify_with_a_missing_runner_is_unverified_not_failed(self):
+        # found by running: the manager wrote `python ...` where only python3 exists →
+        # command-not-found. That must be UNVERIFIED (the item's self-check couldn't run),
+        # not a hard failure — the independent TRUST audit is the real gate.
+        ok, detail = company._run_verify("definitely-not-a-real-binary-xyz --check", tempfile.mkdtemp())
+        self.assertTrue(ok)
+        self.assertIn("unverified", detail)
+
+    def test_a_verify_that_runs_and_fails_still_fails(self):
+        ok, _ = company._run_verify("false", tempfile.mkdtemp())   # runs, exits 1
+        self.assertFalse(ok)
+
     def test_compression_upward_status_has_no_raw_worker_output(self):
         repo = _repo({"README": "x\n"})
         plan = {"work_items": [
