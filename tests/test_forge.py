@@ -2313,6 +2313,35 @@ class TestApprovalGate(unittest.TestCase):
         self.assertEqual(gate.request("bash x", stop_event=stop), "no")
 
 
+class TestPromptProvenance(unittest.TestCase):
+    """A prompt change IS a behavior change, so the EXACT assembled system prompt (core +
+    AUTONOMOUS + any injected MCP help) is logged every session — attributable and diffable.
+    Without this, a behavior shift can't be traced to the prompt that caused it."""
+
+    def _run(self, autonomous):
+        d = tempfile.mkdtemp()
+        sess = _RecSession(d)
+        Agent(ScriptBackend(['{"thought":"t","action":"say","message":"hi"}']), sess,
+              max_steps=3, autonomous=autonomous).send("hi")
+        sysrec = [f for k, f in sess.logs if k == "system_prompt"]
+        meta = [f for k, f in sess.logs if k == "meta"]
+        return sysrec, meta
+
+    def test_system_prompt_is_logged_with_text_and_sha(self):
+        sysrec, meta = self._run(autonomous=True)
+        self.assertEqual(len(sysrec), 1)
+        self.assertIn("You are Forge", sysrec[0]["text"])          # the exact prompt is recoverable
+        self.assertEqual(sysrec[0]["sha"], meta[0]["system_sha"])  # meta carries it too, for quick diffs
+        self.assertIn("mcp_tools", sysrec[0])                      # and which external tools were present
+
+    def test_a_prompt_change_changes_the_sha(self):
+        # autonomous mode appends the AUTONOMOUS block — a different prompt must hash differently,
+        # so a prompt change is always detectable across two runs.
+        auto, _ = self._run(autonomous=True)
+        plain, _ = self._run(autonomous=False)
+        self.assertNotEqual(auto[0]["sha"], plain[0]["sha"])
+
+
 class TestModeGate(unittest.TestCase):
     def _agent(self, mode, approve=None, approvals=()):
         a = Agent.__new__(Agent)
