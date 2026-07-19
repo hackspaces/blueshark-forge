@@ -1,22 +1,19 @@
-"""Model cards — a Pokémon-authentic, deterministic-yet-unique profile of every model a
-user runs, built from the model's REAL attributes and the user's REAL work.
+"""Agent cards — a deterministic-yet-unique profile of every model a user forges into an
+agent, built from the model's real attributes and the user's real work.
 
-The science is Pokémon's, faithfully: six stats (HP/Atk/Def/SpA/SpD/Spe), IVs 0-31, 25
-natures (+10%/-10% one stat, never HP), the Gen-3 stat formula, and a shiny roll from the
-Trainer-ID ⊕ PID trick (~1/4096). The *randomness* is deterministic — a specimen is a pure
-function of (trainer_id, model), so it never changes and can be regenerated anywhere (the
-website, a reshare) from those inputs alone. The *uniqueness* is guaranteed: the Trainer ID
-is a 128-bit value minted once per install, so no two people ever roll the same specimen —
-Pokémon's own mechanic, with a wide enough ID that its real-game TID collisions can't happen.
+forge's premise is that raw weights become a capable AGENT through the harness — so a card
+measures AGENTIC work, not creature combat. The six attributes are the things that decide
+whether a small model gets real work done: does it reason, land its edits, recover from a
+failure, finish honestly, keep pace. The scoring MATH is a well-known deterministic stat
+formula (nothing ownable), but every attribute, class, and term here is forge's own.
 
-What's the model vs what's the trainer:
-  - SPECIES (base stats, types, dex no.) come from the model's real metadata — params, size,
-    harness-lift, whether forge has verified it. A 0.5B is a fast glass-cannon; a 70B a slow
-    tanky powerhouse (Speed falls with size, like a real early- vs late-route Pokémon).
-  - The INDIVIDUAL (IVs, nature, shininess) is fixed at first encounter from H(trainer_id‖model)
-    — your unique specimen of that species.
-  - LEVEL and EVs grow with your actual WORK (verified tasks / sessions) — training, the way
-    a Pokémon levels. Use the model more, the card grows.
+Two properties, by design:
+  - DETERMINISTIC + GLOBALLY UNIQUE. Each install mints a 128-bit Forge ID once. A specimen
+    is a pure function of (forge_id, model): its Grain (innate roll), Temperament, and Foil
+    are fixed at first forge and regenerate identically anywhere — so a shared card
+    reproduces exactly, yet no two people ever roll the same one (128 bits can't collide).
+  - DRIVEN BY REAL WORK. The model's real metadata sets its class + base attributes; the
+    user's real sessions/edits raise its Mastery and Temper. Use it more, the card grows.
 """
 import hashlib
 import json
@@ -26,67 +23,76 @@ import os
 from . import render as _r
 
 FORGE_DIR = os.path.expanduser("~/.forge")
-_TRAINER_PATH = os.path.join(FORGE_DIR, "trainer.json")
+_ID_PATH = os.path.join(FORGE_DIR, "forge_id.json")
 
-STATS = ("hp", "atk", "def", "spa", "spd", "spe")
-STAT_LABELS = {"hp": "HP", "atk": "Attack", "def": "Defense",
-               "spa": "Sp.Atk", "spd": "Sp.Def", "spe": "Speed"}
+# The six AGENT ATTRIBUTES. `stm` (Stamina) is the endurance attribute — it uses the
+# endurance stat formula (no temperament modifier) the way HP does; the other five can be
+# tilted by temperament. Order is fixed (it seeds Grain + the formula).
+ATTRS = ("stm", "pre", "res", "rea", "rel", "pac")
+ATTR_LABELS = {"stm": "Stamina", "pre": "Precision", "res": "Resilience",
+               "rea": "Reasoning", "rel": "Reliability", "pac": "Pace"}
+ATTR_BLURB = {
+    "stm": "sustains long autonomous runs", "pre": "lands edits right the first time",
+    "res": "recovers from a failure without spiraling", "rea": "depth of planning + thought",
+    "rel": "finishes honestly — verified, not just claimed", "pac": "throughput — steps to done",
+}
 
-# The 25 natures in canonical index order. up/down index into the FIVE nature-affected stats
-# (never HP): [atk, def, spe, spa, spd]. up==down → neutral (×1.0 everywhere).
-_NATURE_STATS = ("atk", "def", "spe", "spa", "spd")
-_NATURE_NAMES = (
-    "Hardy", "Lonely", "Brave", "Adamant", "Naughty",
-    "Bold", "Docile", "Relaxed", "Impish", "Lax",
-    "Timid", "Hasty", "Serious", "Jolly", "Naive",
-    "Modest", "Mild", "Quiet", "Bashful", "Rash",
-    "Calm", "Gentle", "Sassy", "Careful", "Quirky",
+# Temperament tilts ONE attribute up 10% and another down 10% (never Stamina), over the five
+# tunable attributes; a diagonal roll is neutral. 25 dispositions — the name is flavor, the
+# +X/-Y is shown, exactly as the disposition is learned in play.
+_TEMPER_ATTRS = ("pre", "res", "pac", "rea", "rel")
+_TEMPERAMENTS = (
+    "Methodical", "Reckless", "Dogged", "Terse", "Cautious",
+    "Bold", "Patient", "Restless", "Meticulous", "Blunt",
+    "Nimble", "Hasty", "Balanced", "Eager", "Scattered",
+    "Thoughtful", "Curious", "Deliberate", "Plain", "Impulsive",
+    "Careful", "Gentle", "Stubborn", "Diligent", "Quirky",
 )
 
-SHINY_THRESHOLD = 16          # (tid ⊕ pid) & 0xFFFF < 16  →  1/4096, the modern shiny rate
+FOIL_THRESHOLD = 16          # (id ⊕ pid) low bits < 16  →  ~1/4096, a rare finish
 
-RARITY_TIERS = [              # by base-stat total, Pokémon-style
-    (600, "legendary"), (540, "epic"), (460, "rare"), (380, "uncommon"), (0, "common"),
-]
+# Rarity by Forge Rating (attribute total).
+RATING_TIERS = [(600, "mythic"), (540, "master"), (460, "forged"), (380, "tempered"), (0, "raw")]
+_RARITY_STYLE = {"mythic": "yellow", "master": "magenta", "forged": "cyan",
+                 "tempered": "green", "raw": "dim"}
+_RARITY_PIP = {"mythic": "◆◆◆◆◆", "master": "◆◆◆◆", "forged": "◆◆◆", "tempered": "◆◆", "raw": "◆"}
 
 
-# ---- Trainer ID: the per-install uniqueness root ----------------------------
-def trainer_id():
-    """This install's 128-bit Trainer ID, minted once and reused forever. It is the
-    guarantee that no two people ever generate the same specimens — every card the user
-    owns is seeded from it, and 128 bits makes a collision across all installs impossible
-    in practice (unlike Pokémon's 16-bit TID, which really does collide)."""
+# ---- Forge ID: the per-install uniqueness root ------------------------------
+def forge_id():
+    """This install's 128-bit Forge ID, minted once and reused forever — the guarantee no
+    two people ever forge the same specimen. Every card is seeded from it."""
     try:
-        with open(_TRAINER_PATH) as f:
-            tid = json.load(f).get("tid")
-            if tid:
-                return tid
+        with open(_ID_PATH) as f:
+            fid = json.load(f).get("id")
+            if fid:
+                return fid
     except (OSError, ValueError):
         pass
-    tid = os.urandom(16).hex()                 # 128 bits
+    fid = os.urandom(16).hex()
     try:
         os.makedirs(FORGE_DIR, exist_ok=True)
-        with open(_TRAINER_PATH, "w") as f:
-            json.dump({"tid": tid}, f)
+        with open(_ID_PATH, "w") as f:
+            json.dump({"id": fid}, f)
     except OSError:
         pass
-    return tid
+    return fid
 
 
 def _h(*parts):
     return int(hashlib.sha256(":".join(str(p) for p in parts).encode()).hexdigest(), 16)
 
 
-# ---- species (from the model's real attributes) -----------------------------
 def _clamp(v, lo=15, hi=200):
     return max(lo, min(hi, int(round(v))))
 
 
-def species(model):
-    """Base stats + types + dex number for a model, DETERMINISTIC from its real metadata.
-    `model` is a registry entry (or any dict with params_b / weights / lift_pts / status).
-    Speed falls with size (small = fast); power/HP rise with it; harness-lift and a forge-
-    verified ★ harden Defense/Sp.Def — the card rewards models forge has actually proven."""
+# ---- the model's forged form (base attributes from real metadata) -----------
+def forged_form(model):
+    """Base attributes + class + a stable index for a model, DETERMINISTIC from its real
+    metadata. Small models are fast but frail (high Pace, low Stamina); big models endure
+    and reason but are slow; a forge-VERIFIED ★ or measured harness-lift raises Resilience +
+    Reliability — the card rewards models forge has actually proven, not just big ones."""
     p = float(model.get("params_b") or 1)
     size = float((model.get("weights") or {}).get("size_gb") or p)
     lift = model.get("lift_pts") or 0
@@ -95,230 +101,216 @@ def species(model):
     name = model.get("name", "?")
     is_code = "cod" in (name + " " + (model.get("notes") or "")).lower()
 
-    power = 40 + 60 * math.log10(1 + p)                       # rises with params
+    power = 40 + 60 * math.log10(1 + p)
     base = {
-        "hp":  _clamp(45 + 6 * math.log10(1 + size) * 10 / 3 + p),   # endurance ~ size
-        "atk": _clamp(power + (15 if is_code else 0)),
-        "def": _clamp(power * 0.8 + 3 * lift + (20 if verified else 0)),
-        "spa": _clamp(power + (18 if reasoning else 0)),
-        "spd": _clamp(power * 0.8 + 2 * lift + (15 if verified else 0)),
-        "spe": _clamp(210 - 90 * math.log10(1 + p)),          # FALLS with size — small is fast
+        "stm": _clamp(45 + 20 * math.log10(1 + size) + p),        # endurance ~ size/context
+        "pre": _clamp(power + (18 if is_code else 0)),            # coders land edits
+        "res": _clamp(power * 0.8 + 3 * lift + (20 if verified else 0)),   # proven → recovers
+        "rea": _clamp(power + (18 if reasoning else 0)),          # reasoning models think deeper
+        "rel": _clamp(power * 0.8 + 2 * lift + (18 if verified else 0)),   # verified → honest done
+        "pac": _clamp(210 - 90 * math.log10(1 + p)),             # small is FAST
     }
-    return {"name": name, "base": base, "bst": sum(base.values()),
-            "types": _types(model, is_code, reasoning),
-            "dex": _h("dex", name) % 1000 + 1}                # a stable dex number
+    return {"name": name, "base": base, "rating": sum(base.values()),
+            "classes": _classes(model, is_code, reasoning),
+            "no": _h("no", name) % 1000 + 1}
 
 
-def _types(model, is_code, reasoning):
+def _classes(model, is_code, reasoning):
     p = float(model.get("params_b") or 1)
-    types = []
+    out = []
     if is_code:
-        types.append("Steel")                                 # precise, hard-edged
+        out.append("Coder")
     if reasoning:
-        types.append("Psychic")
-    if (model.get("kind") == "moe"):
-        types.append("Electric")                              # sparky, sparse-active
-    if p >= 30 and "Dragon" not in types:
-        types.append("Dragon")                                # big, rare
+        out.append("Reasoner")
+    if model.get("kind") == "moe":
+        out.append("Sparse")           # mixture-of-experts: sparse-active
+    if p >= 30 and "Anvil" not in out:
+        out.append("Anvil")            # big, heavy, tanky
     if p < 2:
-        types.append("Flying")                                # tiny, nimble
-    if not types:
-        types.append("Normal")
-    return types[:2]
+        out.append("Sprinter")         # tiny, quick
+    if not out:
+        out.append("Generalist")
+    return out[:2]
 
 
-def rarity(bst, verified=False):
-    for cutoff, tier in RARITY_TIERS:
-        if bst >= cutoff:
+def rarity(rating):
+    for cutoff, tier in RATING_TIERS:
+        if rating >= cutoff:
             return tier
-    return "common"
+    return "raw"
 
 
-# ---- the individual (fixed at first encounter, unique per trainer+model) -----
-def pid(tid, model_name):
-    """The 32-bit Personality Value — fixed per (trainer, model). Drives nature, IVs, and
-    (with the Trainer ID) shininess, exactly as Pokémon's PID does."""
-    return _h("pid", tid, model_name) & 0xFFFFFFFF
+# ---- the specimen (fixed at first forge, unique per Forge ID + model) -------
+def pid(fid, model_name):
+    """The 32-bit specimen value — fixed per (forge_id, model). Drives Temperament, Grain,
+    and (with the Forge ID) Foil."""
+    return _h("pid", fid, model_name) & 0xFFFFFFFF
 
 
-def nature(pid_val):
-    """(name, up_stat, down_stat) — nature = PID % 25. Neutral natures have up==down."""
+def temperament(pid_val):
+    """(name, up_attr, down_attr) — index = pid % 25. Neutral dispositions have up==down."""
     i = pid_val % 25
-    up, down = _NATURE_STATS[i // 5], _NATURE_STATS[i % 5]
-    return _NATURE_NAMES[i], (None, None) if up == down else (up, down)
+    up, down = _TEMPER_ATTRS[i // 5], _TEMPER_ATTRS[i % 5]
+    return _TEMPERAMENTS[i], (None, None) if up == down else (up, down)
 
 
-def ivs(pid_val):
-    """The six Individual Values (0-31), the genetic uniqueness — derived from the PID via
-    a hash chain so two trainers' specimens of the same species differ."""
-    h = hashlib.sha256(f"iv:{pid_val}".encode()).digest()
-    return {s: h[i] % 32 for i, s in enumerate(STATS)}
+def grain(pid_val):
+    """The six Grain values (0-31) — the innate quality of this specimen, its genetic roll,
+    derived from the specimen value so two forges of one model differ."""
+    hb = hashlib.sha256(f"grain:{pid_val}".encode()).digest()
+    return {a: hb[i] % 32 for i, a in enumerate(ATTRS)}
 
 
-def is_shiny(tid, pid_val):
-    """Pokémon's shiny test, adapted: (TID ⊕ PID) low bits < threshold → ~1/4096.
-    Deterministic per (trainer, model); you either own a shiny of it or you don't."""
-    tid_int = int(tid, 16) if isinstance(tid, str) else int(tid)
-    thi, tlo = (tid_int >> 16) & 0xFFFF, tid_int & 0xFFFF
+def is_foil(fid, pid_val):
+    """A rare finish (~1/4096): (Forge ID ⊕ specimen) low bits below the threshold. Fixed
+    per (forge_id, model) — you either forged a foil of it or you didn't."""
+    fid_int = int(fid, 16) if isinstance(fid, str) else int(fid)
+    fhi, flo = (fid_int >> 16) & 0xFFFF, fid_int & 0xFFFF
     phi, plo = (pid_val >> 16) & 0xFFFF, pid_val & 0xFFFF
-    return (thi ^ tlo ^ phi ^ plo) < SHINY_THRESHOLD
+    return (fhi ^ flo ^ phi ^ plo) < FOIL_THRESHOLD
 
 
-# ---- training (level + EVs grow with real work) ------------------------------
+# ---- Mastery + Temper (grow with real work) ---------------------------------
 def training(telemetry):
-    """Level (1-100) and an EV spread from the user's REAL work with the model — the
-    'seeds of work'. `telemetry` is a dict of counts (verified tasks, sessions, actions).
-    A never-used model is a freshly-encountered Lv.5; work levels it and pours EVs into the
-    stat it exercised most. Empty telemetry → the base specimen."""
-    verified = int((telemetry or {}).get("verified", 0))
+    """Mastery (1-100) and a Temper spread from the user's REAL work — the seeds of work.
+    `telemetry`: {sessions, edits}. A never-run model is a fresh, un-mastered specimen; use
+    levels its Mastery and pours Temper into what it exercised. Empty → the base specimen."""
+    edits = int((telemetry or {}).get("edits", 0))
     sessions = int((telemetry or {}).get("sessions", 0))
-    level = max(1, min(100, 5 + 3 * verified + sessions))
-    # EVs earned by work, weighted toward the stat the model proved (verified → def/spd,
-    # raw runs → atk/spa), capped like the game (252/stat, 510 total).
-    evs = {s: 0 for s in STATS}
-    earned = min(510, 8 * (verified * 2 + sessions))
-    evs["def"] = evs["spd"] = min(252, earned // 3)
-    evs["atk"] = evs["spa"] = min(252, earned // 4)
-    return level, evs
+    mastery = max(1, min(100, 5 + 3 * edits + sessions))
+    temper = {a: 0 for a in ATTRS}
+    earned = min(510, 8 * (edits * 2 + sessions))            # capped 510 total, 252/attr
+    temper["res"] = temper["rel"] = min(252, earned // 3)    # sustained use hardens the proven attrs
+    temper["pre"] = temper["rea"] = min(252, earned // 4)
+    return mastery, temper
 
 
-# ---- the Gen-3 stat formula --------------------------------------------------
-def _stat(stat, base, iv, ev, level, nat_up, nat_down):
-    core = ((2 * base + iv + ev // 4) * level) // 100
-    if stat == "hp":
-        return core + level + 10
+# ---- the deterministic attribute formula ------------------------------------
+def _attr(attr, base, grain_v, temper_v, mastery, up, down):
+    core = ((2 * base + grain_v + temper_v // 4) * mastery) // 100
+    if attr == "stm":                                        # endurance: no temperament tilt
+        return core + mastery + 10
     val = core + 5
-    if stat == nat_up:
+    if attr == up:
         val = (val * 110) // 100
-    elif stat == nat_down:
+    elif attr == down:
         val = (val * 90) // 100
     return val
 
 
-def card(model, tid=None, telemetry=None):
-    """Assemble the full model card: species (from the model) + this trainer's unique
-    individual (IVs/nature/shiny) + training (level/EVs from work) → the six computed stats.
-    Fully determined by (tid, model, telemetry), so it regenerates identically anywhere."""
-    tid = tid or trainer_id()
-    sp = species(model)
-    pv = pid(tid, sp["name"])
-    nat_name, (up, down) = nature(pv)
-    iv = ivs(pv)
-    level, evs = training(telemetry)
-    stats = {s: _stat(s, sp["base"][s], iv[s], evs[s], level, up, down) for s in STATS}
+def card(model, fid=None, telemetry=None):
+    """Assemble the full agent card: the model's forged form + this install's unique specimen
+    (Grain/Temperament/Foil) + training (Mastery/Temper) → the six computed attributes. Fully
+    determined by (fid, model, telemetry), so it regenerates identically anywhere."""
+    fid = fid or forge_id()
+    form = forged_form(model)
+    pv = pid(fid, form["name"])
+    temp_name, (up, down) = temperament(pv)
+    gr = grain(pv)
+    mastery, temper = training(telemetry)
+    attrs = {a: _attr(a, form["base"][a], gr[a], temper[a], mastery, up, down) for a in ATTRS}
     return {
-        "name": sp["name"], "dex": sp["dex"], "types": sp["types"],
-        "base": sp["base"], "bst": sp["bst"],
-        "rarity": rarity(sp["bst"], model.get("status") == "verified"),
-        "shiny": is_shiny(tid, pv),
-        "nature": nat_name, "nature_up": up, "nature_down": down,
-        "ivs": iv, "evs": evs, "level": level, "stats": stats,
-        "iv_total": sum(iv.values()),
+        "name": form["name"], "no": form["no"], "classes": form["classes"],
+        "base": form["base"], "rating": form["rating"],
+        "rarity": rarity(form["rating"]), "foil": is_foil(fid, pv),
+        "temperament": temp_name, "temper_up": up, "temper_down": down,
+        "grain": gr, "temper": temper, "mastery": mastery, "attrs": attrs,
+        "grain_total": sum(gr.values()),
     }
 
 
-# ---- rendering (built on the display-width foundation) -----------------------
-_RARITY_STYLE = {"legendary": "yellow", "epic": "magenta", "rare": "cyan",
-                 "uncommon": "green", "common": "dim"}
-_RARITY_PIP = {"legendary": "★★★★★", "epic": "★★★★", "rare": "★★★", "uncommon": "★★", "common": "★"}
+# ---- rendering (built on the display-width foundation) ----------------------
 _CARD_W = 42
 
 
 def _bar(value, hi, width=12):
-    """A stat bar scaled to the card's own strongest stat, so the spread is legible on a
-    weak model and a legendary alike (a fixed cap pins every legendary bar to full)."""
     filled = max(0, min(width, round(value / max(1, hi) * width)))
     return "█" * filled + "·" * (width - filled)
 
 
 def render_card(c, width=_CARD_W):
-    """A boxed trainer-card view of one specimen. Every line is padded to the same DISPLAY
-    width (the render foundation) so the box holds even with wide model names / emoji.
-    Colour by rarity; a shiny gets a ✨ and a gold frame. Content is placed at fixed inner
-    columns (not via fit(), which would collapse the indent) so labels + values align."""
+    """A boxed card for one specimen. Every line is padded to the same DISPLAY width (the
+    render foundation), so the box holds even with wide model names / emoji. Coloured by
+    rarity; a foil gets a ✦ and a gold frame. Content sits at fixed columns so it aligns."""
     inner = width - 2
     rs = _RARITY_STYLE.get(c["rarity"], "dim")
-    frame = "yellow" if c["shiny"] else rs
+    frame = "yellow" if c["foil"] else rs
 
-    def line(body="", pad_char=" "):
-        """Frame a body string, padding by DISPLAY columns (ANSI/wide-char aware). `body`
-        may carry colour; it is clipped to fit and padded to the inner width."""
+    def line(body=""):
         body = _r.clip(body, inner)
-        pad = pad_char * max(0, inner - _r.display_width(body))
+        pad = " " * max(0, inner - _r.display_width(body))
         return _r.paint("│", frame) + body + pad + _r.paint("│", frame)
 
     def rule(l, r):
         return _r.paint(l + "─" * inner + r, frame)
 
-    shiny = _r.paint(" ✨", "yellow") if c["shiny"] else ""
-    types = " ".join(f"[{t}]" for t in c["types"])
-    nat = (f"+{STAT_LABELS[c['nature_up']]}/-{STAT_LABELS[c['nature_down']]}"
-           if c["nature_up"] else "neutral")
-    hi = max(c["stats"].values())
+    foil = _r.paint(" ✦", "yellow") if c["foil"] else ""
+    classes = " ".join(f"[{t}]" for t in c["classes"])
+    temp = (f"+{ATTR_LABELS[c['temper_up']]}/-{ATTR_LABELS[c['temper_down']]}"
+            if c["temper_up"] else "neutral")
+    hi = max(c["attrs"].values())
     out = [rule("╭", "╮"),
-           line(f" #{c['dex']:03d}  " + _r.paint(c["name"], "bold")
-                + _r.paint(f"  Lv.{c['level']}", "dim") + shiny),
+           line(f" No.{c['no']:03d}  " + _r.paint(c["name"], "bold")
+                + _r.paint(f"  M{c['mastery']}", "dim") + foil),
            line("  " + _r.paint(f"{c['rarity'].upper()} {_RARITY_PIP[c['rarity']]}", rs)
-                + _r.paint(f"   {types}", "dim")),
-           line("  " + _r.paint(f"Nature {c['nature']} ({nat})", "dim")),
+                + _r.paint(f"   {classes}", "dim")),
+           line("  " + _r.paint(f"Temperament {c['temperament']} ({temp})", "dim")),
            rule("├", "┤")]
-    for s in STATS:
-        # fixed columns: 2 indent · 7 label · 4 value · 2 gap · bar
-        out.append(line(f"  {STAT_LABELS[s]:<7}{c['stats'][s]:>4}  {_bar(c['stats'][s], hi)}"))
+    for a in ATTRS:
+        out.append(line(f"  {ATTR_LABELS[a]:<11}{c['attrs'][a]:>4}  {_bar(c['attrs'][a], hi)}"))
     out.append(rule("├", "┤"))
-    out.append(line(_r.paint(f"  BST {c['bst']}   IV {c['iv_total']}/186   "
-                             f"Σ {sum(c['stats'].values())}", "dim")))
+    out.append(line(_r.paint(f"  Forge Rating {c['rating']}   Grain {c['grain_total']}/186", "dim")))
     out.append(rule("╰", "╯"))
     return "\n".join(out)
 
 
 def _telemetry(model_name):
-    """Real work done with a model on THIS machine, for level/EVs — read from the profile
-    store's actual counters. Sessions are experience (level); successful edits are the
-    productive work that trains it. A model never run returns empties (a fresh Lv.5)."""
+    """Real work with a model on THIS machine, for Mastery/Temper — from the profile store's
+    actual counters. Sessions are experience; successful edits are the productive work. A
+    model never run returns empties (a fresh specimen)."""
     try:
         from . import profile
         c = profile.load(model_name).get("counts", {})
         edits = int(c.get("exact_edit", 0)) + int(c.get("fuzzy_edit", 0))
-        return {"verified": edits, "sessions": int(c.get("session", 0))}
+        return {"edits": edits, "sessions": int(c.get("session", 0))}
     except Exception:
         return {}
 
 
 def collection(installed_only=True):
-    """Every model this trainer 'owns' as a card. With installed_only, the models actually
-    pulled on this machine — the ones you've genuinely encountered."""
+    """Every model this install has forged into an agent, as a card. With installed_only,
+    only the models actually pulled on this machine."""
     from . import registry
     from .models_cmd import _installed_tags, _is_installed
     from . import config as _cfg
-    tid = trainer_id()
+    fid = forge_id()
     installed = _installed_tags(_cfg.load().get("engine", "ollama"))
-    cards_out = []
+    out = []
     for m in registry.MODELS:
         here = _is_installed(m["name"], installed)
         if installed_only and not here:
             continue
-        c = card(m, tid=tid, telemetry=_telemetry(m["name"]))
+        c = card(m, fid=fid, telemetry=_telemetry(m["name"]))
         c["_installed"] = here
-        cards_out.append(c)
-    return tid, cards_out, len(registry.MODELS)
+        out.append(c)
+    return fid, out, len(registry.MODELS)
 
 
-def render_dex(tid, owned, total):
-    """The collection: a one-line-per-card roster + dex completion, sorted by rarity then
-    BST. The gamified 'what have I got' view."""
-    order = {t: i for i, (_, t) in enumerate(RARITY_TIERS)}
-    owned = sorted(owned, key=lambda c: (order.get(c["rarity"], 9), -c["bst"]))
-    lines = [_r.paint(f"forge dex — trainer {tid[:8]}", "bold"),
-             _r.paint(f"  {len(owned)} caught · {total} in the pokedex", "dim"), ""]
-    shinies = sum(1 for c in owned if c["shiny"])
+def render_roster(fid, owned, total):
+    """The collection: one line per card, sorted by rarity then Forge Rating, with how many
+    of the catalog you've forged and your Forge ID."""
+    order = {t: i for i, (_, t) in enumerate(RATING_TIERS)}
+    owned = sorted(owned, key=lambda c: (order.get(c["rarity"], 9), -c["rating"]))
+    lines = [_r.paint(f"forge roster — forge {fid[:8]}", "bold"),
+             _r.paint(f"  {len(owned)} forged · {total} in the catalog", "dim"), ""]
+    foils = sum(1 for c in owned if c["foil"])
     for c in owned:
-        star = _r.paint("✨", "yellow") if c["shiny"] else " "
+        mark = _r.paint("✦", "yellow") if c["foil"] else " "
         rs = _RARITY_STYLE.get(c["rarity"], "dim")
         badge = _r.paint(f"{c['rarity'][:4].upper():4}", rs)
         name = _r.fit(c["name"], 22)
-        lines.append(f"  #{c['dex']:03d} {star} {name:<22}  {badge}  Lv.{c['level']:<3}  "
-                     + _r.paint(f"BST {c['bst']}  {'/'.join(c['types'])}", "dim"))
-    if shinies:
-        lines += ["", _r.paint(f"  ✨ {shinies} shiny", "yellow")]
+        lines.append(f"  No.{c['no']:03d} {mark} {name:<22}  {badge}  M{c['mastery']:<3}  "
+                     + _r.paint(f"FR {c['rating']}  {'/'.join(c['classes'])}", "dim"))
+    if foils:
+        lines += ["", _r.paint(f"  ✦ {foils} foil", "yellow")]
     return "\n".join(lines)
