@@ -22,6 +22,7 @@ DEFAULTS = {
     "wake": "off",          # idle wake-on-inbox: off | render | act (auto-act fleet msgs)
     "approvals": [],        # manual-mode 'always' approvals (e.g. "bash:git", "edit_file")
     "machine": {},                                  # detected hardware summary
+    "mcp": {},              # P9.1 stdio MCP servers: {name: {command:[...], env?, allow?}}
 }
 
 
