@@ -2511,7 +2511,9 @@ class TestTuiHelpers(unittest.TestCase):
     def test_clip_plain(self):
         from forge.tui import _clip
         self.assertEqual(_clip("hello", 10), "hello")
-        self.assertEqual(_clip("hello world", 5), "hello\033[0m")
+        # plain text gets NO gratuitous reset now (only styled text that was cut does) —
+        # the shared wcwidth clip appends a reset solely when it truncated inside ANSI
+        self.assertEqual(_clip("hello world", 5), "hello")
 
     def test_clip_preserves_ansi(self):
         from forge.tui import _clip, _vis

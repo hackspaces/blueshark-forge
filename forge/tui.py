@@ -34,21 +34,19 @@ def _supported():
     return termios is not None and sys.stdin.isatty() and sys.stdout.isatty()
 
 
+# Display width + clip come from the shared render engine (wcwidth-correct: CJK/emoji = 2
+# columns, combining/zero-width = 0), so the footer box and every column align on real
+# terminal columns, not code points — the bug that drifted the border on any non-ASCII input.
+from . import render as _render
+
+
 def _vis(s):
-    return len(_ANSI.sub("", s))
+    return _render.display_width(s)
 
 
 def _clip(s, width):
-    """Truncate to `width` visible columns, keeping ANSI codes intact."""
-    out, n, i = [], 0, 0
-    while i < len(s):
-        m = _ANSI.match(s, i)
-        if m:
-            out.append(m.group()); i = m.end(); continue
-        if n >= width:
-            return "".join(out) + RST
-        out.append(s[i]); n += 1; i += 1
-    return "".join(out)
+    """Truncate to `width` display columns, keeping ANSI codes intact (shared engine)."""
+    return _render.clip(s, width)
 
 
 def _read_key(fd):
