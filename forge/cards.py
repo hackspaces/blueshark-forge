@@ -23,6 +23,8 @@ import json
 import math
 import os
 
+from . import render as _r
+
 FORGE_DIR = os.path.expanduser("~/.forge")
 _TRAINER_PATH = os.path.join(FORGE_DIR, "trainer.json")
 
@@ -213,3 +215,110 @@ def card(model, tid=None, telemetry=None):
         "ivs": iv, "evs": evs, "level": level, "stats": stats,
         "iv_total": sum(iv.values()),
     }
+
+
+# ---- rendering (built on the display-width foundation) -----------------------
+_RARITY_STYLE = {"legendary": "yellow", "epic": "magenta", "rare": "cyan",
+                 "uncommon": "green", "common": "dim"}
+_RARITY_PIP = {"legendary": "★★★★★", "epic": "★★★★", "rare": "★★★", "uncommon": "★★", "common": "★"}
+_CARD_W = 42
+
+
+def _bar(value, hi, width=12):
+    """A stat bar scaled to the card's own strongest stat, so the spread is legible on a
+    weak model and a legendary alike (a fixed cap pins every legendary bar to full)."""
+    filled = max(0, min(width, round(value / max(1, hi) * width)))
+    return "█" * filled + "·" * (width - filled)
+
+
+def render_card(c, width=_CARD_W):
+    """A boxed trainer-card view of one specimen. Every line is padded to the same DISPLAY
+    width (the render foundation) so the box holds even with wide model names / emoji.
+    Colour by rarity; a shiny gets a ✨ and a gold frame. Content is placed at fixed inner
+    columns (not via fit(), which would collapse the indent) so labels + values align."""
+    inner = width - 2
+    rs = _RARITY_STYLE.get(c["rarity"], "dim")
+    frame = "yellow" if c["shiny"] else rs
+
+    def line(body="", pad_char=" "):
+        """Frame a body string, padding by DISPLAY columns (ANSI/wide-char aware). `body`
+        may carry colour; it is clipped to fit and padded to the inner width."""
+        body = _r.clip(body, inner)
+        pad = pad_char * max(0, inner - _r.display_width(body))
+        return _r.paint("│", frame) + body + pad + _r.paint("│", frame)
+
+    def rule(l, r):
+        return _r.paint(l + "─" * inner + r, frame)
+
+    shiny = _r.paint(" ✨", "yellow") if c["shiny"] else ""
+    types = " ".join(f"[{t}]" for t in c["types"])
+    nat = (f"+{STAT_LABELS[c['nature_up']]}/-{STAT_LABELS[c['nature_down']]}"
+           if c["nature_up"] else "neutral")
+    hi = max(c["stats"].values())
+    out = [rule("╭", "╮"),
+           line(f" #{c['dex']:03d}  " + _r.paint(c["name"], "bold")
+                + _r.paint(f"  Lv.{c['level']}", "dim") + shiny),
+           line("  " + _r.paint(f"{c['rarity'].upper()} {_RARITY_PIP[c['rarity']]}", rs)
+                + _r.paint(f"   {types}", "dim")),
+           line("  " + _r.paint(f"Nature {c['nature']} ({nat})", "dim")),
+           rule("├", "┤")]
+    for s in STATS:
+        # fixed columns: 2 indent · 7 label · 4 value · 2 gap · bar
+        out.append(line(f"  {STAT_LABELS[s]:<7}{c['stats'][s]:>4}  {_bar(c['stats'][s], hi)}"))
+    out.append(rule("├", "┤"))
+    out.append(line(_r.paint(f"  BST {c['bst']}   IV {c['iv_total']}/186   "
+                             f"Σ {sum(c['stats'].values())}", "dim")))
+    out.append(rule("╰", "╯"))
+    return "\n".join(out)
+
+
+def _telemetry(model_name):
+    """Real work done with a model on THIS machine, for level/EVs — read from the profile
+    store's actual counters. Sessions are experience (level); successful edits are the
+    productive work that trains it. A model never run returns empties (a fresh Lv.5)."""
+    try:
+        from . import profile
+        c = profile.load(model_name).get("counts", {})
+        edits = int(c.get("exact_edit", 0)) + int(c.get("fuzzy_edit", 0))
+        return {"verified": edits, "sessions": int(c.get("session", 0))}
+    except Exception:
+        return {}
+
+
+def collection(installed_only=True):
+    """Every model this trainer 'owns' as a card. With installed_only, the models actually
+    pulled on this machine — the ones you've genuinely encountered."""
+    from . import registry
+    from .models_cmd import _installed_tags, _is_installed
+    from . import config as _cfg
+    tid = trainer_id()
+    installed = _installed_tags(_cfg.load().get("engine", "ollama"))
+    cards_out = []
+    for m in registry.MODELS:
+        here = _is_installed(m["name"], installed)
+        if installed_only and not here:
+            continue
+        c = card(m, tid=tid, telemetry=_telemetry(m["name"]))
+        c["_installed"] = here
+        cards_out.append(c)
+    return tid, cards_out, len(registry.MODELS)
+
+
+def render_dex(tid, owned, total):
+    """The collection: a one-line-per-card roster + dex completion, sorted by rarity then
+    BST. The gamified 'what have I got' view."""
+    order = {t: i for i, (_, t) in enumerate(RARITY_TIERS)}
+    owned = sorted(owned, key=lambda c: (order.get(c["rarity"], 9), -c["bst"]))
+    lines = [_r.paint(f"forge dex — trainer {tid[:8]}", "bold"),
+             _r.paint(f"  {len(owned)} caught · {total} in the pokedex", "dim"), ""]
+    shinies = sum(1 for c in owned if c["shiny"])
+    for c in owned:
+        star = _r.paint("✨", "yellow") if c["shiny"] else " "
+        rs = _RARITY_STYLE.get(c["rarity"], "dim")
+        badge = _r.paint(f"{c['rarity'][:4].upper():4}", rs)
+        name = _r.fit(c["name"], 22)
+        lines.append(f"  #{c['dex']:03d} {star} {name:<22}  {badge}  Lv.{c['level']:<3}  "
+                     + _r.paint(f"BST {c['bst']}  {'/'.join(c['types'])}", "dim"))
+    if shinies:
+        lines += ["", _r.paint(f"  ✨ {shinies} shiny", "yellow")]
+    return "\n".join(lines)

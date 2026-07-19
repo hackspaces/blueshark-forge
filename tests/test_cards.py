@@ -101,5 +101,35 @@ class TestShinyOdds(unittest.TestCase):
         self.assertTrue(0.00010 < rate < 0.00045, f"shiny rate {rate:.5f} (~{n//max(shiny,1)} : 1)")
 
 
+class TestRendering(unittest.TestCase):
+    """The card box aligns on DISPLAY columns (the render foundation) even with wide-char
+    model names — the reason the rendering foundation came first."""
+
+    def _lines(self, model, **kw):
+        from forge import render
+        card = cards.render_card(cards.card(model, **kw))
+        return card.splitlines(), render
+
+    def test_every_line_is_the_same_display_width(self):
+        lines, render = self._lines({"name": "qwen2.5-coder:7b", "params_b": 7, "notes": "coding"},
+                                    tid="a" * 32)
+        widths = {render.display_width(ln) for ln in lines}
+        self.assertEqual(len(widths), 1, f"card box misaligned: {widths}")
+
+    def test_box_holds_with_cjk_emoji_model_name(self):
+        lines, render = self._lines({"name": "日本語-coder🚀:32b", "params_b": 32,
+                                     "weights": {"size_gb": 20}}, tid="f" * 32)
+        widths = {render.display_width(ln) for ln in lines}
+        self.assertEqual(len(widths), 1, f"wide-char name broke the box: {widths}")
+
+    def test_shiny_specimen_renders_a_sparkle(self):
+        # find a tid that makes this model shiny, then assert the ✨ shows
+        model = {"name": "m", "params_b": 7}
+        tid = next(t for t in (os.urandom(16).hex() for _ in range(100000))
+                   if cards.is_shiny(t, cards.pid(t, "m")))
+        self.assertTrue(cards.card(model, tid=tid)["shiny"])
+        self.assertIn("✨", cards.render_card(cards.card(model, tid=tid)))
+
+
 if __name__ == "__main__":
     unittest.main()
