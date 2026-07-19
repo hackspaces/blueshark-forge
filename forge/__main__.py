@@ -347,6 +347,48 @@ def cmd_team(args):
     print(_paint(f"  keep it: git checkout {res['base']} && git merge {res['integration_branch']}", "dim"))
 
 
+def cmd_company(args):
+    """forge company — run a goal through a small org: a manager decomposes, workers execute
+    in isolated worktrees, the independent TRUST verifier audits every done-claim, the manager
+    rolls up a STATUS you steer from. Subcommands: new / run / status."""
+    from . import company as co
+    sub = args.company_cmd
+    if sub == "new":
+        rungs = [r.strip() for r in (args.workers or "").split(",") if r.strip()] or [_resolve_model(args)]
+        manager = args.manager or (_resolve_model(args))
+        co.create_charter(args.name, manager, rungs)
+        print(_paint(f"✓ chartered company {args.name!r}", "green")
+              + f"  — manager: {manager} · workers: {', '.join(rungs)}")
+        print(_paint(f"  run a goal:  forge company run {args.name} \"<goal>\"", "dim"))
+        return
+    if sub == "status":
+        print(co.status(args.name))
+        return
+    # run
+    _colors = {"running": "cyan", "verified": "green", "escalated": "red", "blocked": "yellow"}
+    def on_event(kind, **k):
+        if kind == "company_board":
+            print(_paint(f"  manager planned {len(k['items'])} work items: {', '.join(k['items'])}", "cyan"))
+        elif kind == "company_item":
+            st = k.get("state", "")
+            tail = f" — {k['detail']}" if k.get("detail") else (f"  {k.get('title','')}" if k.get("title") else "")
+            who = f" [{k['assignee']}]" if k.get("assignee") else ""
+            print(_paint(f"  · {k['id']}{who}: {st}{tail}", _colors.get(st, "dim")))
+    def ladder_for(rung):
+        return _make_ladder(rung)
+    try:
+        res = co.run(args.name, args.goal, os.path.abspath(args.dir), ladder_for,
+                     on_event=on_event, max_steps=args.max_steps)
+    except (co.CompanyError,) as e:
+        print(_paint(f"✗ {e}", "red"), file=sys.stderr); sys.exit(1)
+    fin = res["final"]
+    print(f"\n{_paint('company done', 'green')}: {len(res['verified'])} verified, "
+          f"{len(res['escalated'])} escalated to you")
+    print(f"  final check: {'✓' if fin['ok'] else '✗'} {fin['detail']}")
+    print(_paint(f"  the roll-up:  forge company status {args.name}", "dim"))
+    print(_paint(f"  review:  git diff {res['base']}..{res['integration']}", "dim"))
+
+
 def cmd_up(args):
     import subprocess
     if _daemon_running():
@@ -637,6 +679,7 @@ _COMMAND_GROUPS = [
     ("Work", [
         ("run", 'one task, start to finish  ·  forge run "fix the failing test"'),
         ("team", 'a goal → a task DAG → isolated worktree workers → merge only what verifies'),
+        ("company", 'a goal → a manager + worker org, TRUST audits every done-claim, you steer as CEO'),
         ("bench", "harness-lift eval: the same model bare vs full harness"),
         ("roster", "your agent cards — each model you forge is scored on real agentic work"),
     ]),
@@ -752,6 +795,18 @@ def main():
     p_roster = sub.add_parser("roster", help="your agent-card collection (each model you forge becomes a card scored on real agentic work); `forge roster <model>` shows one card")
     p_roster.add_argument("model", nargs="?", default=None)
 
+    p_co = sub.add_parser("company", help="run a goal through a small org: a manager decomposes, workers execute in isolated worktrees, the TRUST verifier audits every done-claim")
+    co_sub = p_co.add_subparsers(dest="company_cmd", metavar="<new|run|status>", required=True)
+    p_co_new = co_sub.add_parser("new", help="charter a company")
+    p_co_new.add_argument("name")
+    p_co_new.add_argument("--manager", default=None, help="the manager's model rung (default: your model)")
+    p_co_new.add_argument("--workers", default=None, help="comma-separated worker model rungs")
+    p_co_run = co_sub.add_parser("run", help="run a goal through the company")
+    p_co_run.add_argument("name"); p_co_run.add_argument("goal")
+    p_co_run.add_argument("--max-steps", type=int, default=40)
+    p_co_status = co_sub.add_parser("status", help="the manager's roll-up (STATUS.md) or the live board")
+    p_co_status.add_argument("name")
+
     sub.add_parser("status", help="autopilot state + live sessions")
 
     p_send = sub.add_parser("send", help="message another session")
@@ -822,7 +877,7 @@ def main():
 
     args = ap.parse_args()
     from .models_cmd import cmd_models
-    dispatch = {"run": cmd_run, "team": cmd_team, "roster": cmd_roster, "status": cmd_status, "send": cmd_send, "up": cmd_up,
+    dispatch = {"run": cmd_run, "team": cmd_team, "company": cmd_company, "roster": cmd_roster, "status": cmd_status, "send": cmd_send, "up": cmd_up,
                 "down": cmd_down, "receipts": cmd_receipts, "learnings": cmd_learnings,
                 "forget": cmd_forget, "trace": cmd_trace, "corpus": cmd_corpus, "export": cmd_export, "bench": cmd_bench, "replay": cmd_replay,
                 "passport": cmd_passport, "models": cmd_models}
