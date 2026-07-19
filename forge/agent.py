@@ -544,10 +544,19 @@ class Agent:
         # P3.1 meta record: one machine-readable header per session so a dead
         # transcript is self-describing (forge version, model ladder, cwd, mode).
         # EphemeralSession.log is a no-op, so internal agents never pollute a file.
+        _sys = self.messages[0]["content"]
+        _sys_sha = hashlib.md5(_sys.encode()).hexdigest()[:12]
         self.session.log("meta", v=TRACE_V, forge=__version__, model=self.backend.name,
                          ladder=[b.name for b in self.ladder], cwd=self.session.cwd,
                          mode=self.mode, contract=self.contract.to_dict(),
+                         system_sha=_sys_sha,
                          briefing=hashlib.md5(workspace.encode()).hexdigest()[:12] if workspace else None)
+        # The EXACT assembled system prompt (core + AUTONOMOUS + any injected MCP help),
+        # logged once per session so a behavior change is ALWAYS attributable to a prompt
+        # change and two sessions' prompts are diffable. `system_sha` also rides in `meta`
+        # for at-a-glance "did the prompt change?" comparison across runs.
+        self.session.log("system_prompt", v=TRACE_V, sha=_sys_sha, chars=len(_sys),
+                         autonomous=self.autonomous, mcp_tools=sorted(self._mcp_variants), text=_sys)
 
     def set_ladder(self, ladder):
         """Swap the model ladder live (conversation preserved)."""
