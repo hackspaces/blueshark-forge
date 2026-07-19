@@ -5,6 +5,12 @@ Every published release of `blueshark-forge`, newest first.
 Generated from the GitHub Releases by `tools/changelog.py` — the releases are
 what the tag-gated publish actually shipped, so this cannot drift. Don't hand-edit.
 
+## [v0.11.11](https://github.com/hackspaces/blueshark-forge/releases/tag/v0.11.11) — forge models shows installed vs available at a glance
+
+*2026-07-19 · `pip install blueshark-forge==0.11.11`*
+
+See the release commit for details.
+
 ## [v0.11.10](https://github.com/hackspaces/blueshark-forge/releases/tag/v0.11.10) — terminal rendering foundation: wcwidth display-width, capability detection, Windows VT, aligned footer
 
 *2026-07-19 · `pip install blueshark-forge==0.11.10`*
