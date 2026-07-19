@@ -24,6 +24,62 @@ class TestFit(unittest.TestCase):
         self.assertEqual(render.fit("anything", 0), "")
 
 
+class TestDisplayWidth(unittest.TestCase):
+    """The terminal aligns by display COLUMNS, not code points — the wcwidth engine every
+    box border and column now measures with (the fix for emoji/CJK misalignment)."""
+
+    def test_ascii_is_one_per_char(self):
+        self.assertEqual(render.display_width("hello"), 5)
+
+    def test_cjk_is_two_columns(self):
+        self.assertEqual(render.display_width("日本語"), 6)
+
+    def test_emoji_is_two(self):
+        self.assertEqual(render.display_width("🚀"), 2)
+
+    def test_combining_accent_adds_nothing(self):
+        self.assertEqual(render.display_width("café"), 4)   # e + combining acute
+
+    def test_zwj_family_collapses_to_one_glyph(self):
+        self.assertEqual(render.display_width("👨‍👩‍👧"), 2)
+
+    def test_ansi_codes_are_zero_width(self):
+        self.assertEqual(render.display_width("\033[32mok\033[0m"), 2)
+
+    def test_clip_never_splits_a_wide_char(self):
+        # 3 CJK chars = 6 cols; clip to 5 must stop at 2 chars (4 cols), not split the third
+        self.assertEqual(render.clip("日本語", 5), "日本")
+        self.assertEqual(render.display_width(render.clip("日本語", 5)), 4)
+
+    def test_fit_is_column_accurate(self):
+        out = render.fit("日本語ab", 5)          # 8 cols → clip to 4 + ellipsis
+        self.assertTrue(out.endswith("…"))
+        self.assertLessEqual(render.display_width(out), 5)
+
+
+class TestCapability(unittest.TestCase):
+    def test_color_depth_none_when_off(self):
+        orig = render.color_on
+        render.color_on = lambda: False
+        try:
+            self.assertEqual(render.color_depth(), "none")
+        finally:
+            render.color_on = orig
+
+    def test_color_depth_reads_colorterm(self):
+        orig = render.color_on
+        render.color_on = lambda: True
+        os.environ["COLORTERM"] = "truecolor"
+        try:
+            self.assertEqual(render.color_depth(), "truecolor")
+        finally:
+            render.color_on = orig
+            del os.environ["COLORTERM"]
+
+    def test_enable_vt_is_noop_and_idempotent_on_posix(self):
+        render.enable_vt(); render.enable_vt()      # must not raise on POSIX
+
+
 class TestColour(unittest.TestCase):
     def test_paint_is_noop_when_colour_off(self):
         orig = render.color_on

@@ -701,6 +701,8 @@ def main():
         from .daemon import Forged
         Forged(sys.argv[2], int(sys.argv[3]) if len(sys.argv) > 3 else 20).run()
         return
+    from . import render as _render
+    _render.enable_vt()            # ANSI/VT on the Windows console; no-op on POSIX
     ap = argparse.ArgumentParser(prog="forge")
     ap.format_help = _help_text          # -h/--help routes through print_help → format_help
     # default LOCAL LADDER comes from ~/.forge/config.json (written by `forge setup`)
