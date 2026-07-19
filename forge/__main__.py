@@ -281,6 +281,16 @@ def cmd_send(args):
     print(f"delivered to {e['name']} ({e['sid'][:8]})")
 
 
+def _daemon_launch_cmd(model, interval):
+    """Command to spawn the autopilot daemon as a detached process. A frozen single-file
+    binary (PyInstaller/Nuitka) has no `python -m forge.daemon` — sys.executable IS the
+    forge binary — so it re-invokes forge's own hidden `daemon` subcommand instead. From
+    source, sys.frozen is unset and the `-m` form runs unchanged."""
+    if getattr(sys, "frozen", False):
+        return [sys.executable, "daemon", model, str(interval)]
+    return [sys.executable, "-m", "forge.daemon", model, str(interval)]
+
+
 def cmd_up(args):
     import subprocess
     if _daemon_running():
@@ -288,7 +298,7 @@ def cmd_up(args):
     model = _resolve_model(args)
     os.makedirs(os.path.expanduser("~/.forge/state"), exist_ok=True)
     with open(os.path.expanduser("~/.forge/forged.log"), "a") as log:
-        p = subprocess.Popen([sys.executable, "-m", "forge.daemon", model, str(args.interval)],
+        p = subprocess.Popen(_daemon_launch_cmd(model, args.interval),
                              stdout=log, stderr=log, start_new_session=True)  # own process group
     dump(os.path.expanduser("~/.forge/state/forged.pid"), str(p.pid))
     time.sleep(1)
@@ -648,6 +658,14 @@ def _help_text():
 
 
 def main():
+    # Frozen-binary re-invocation hook (see _daemon_launch_cmd): `forge daemon <model>
+    # [interval]` runs the autopilot loop that `forge up` spawns. Intercepted BEFORE
+    # argparse so it never becomes a user-facing subcommand — the exact counterpart of
+    # `python -m forge.daemon <model> <interval>` from source (forge/daemon.py __main__).
+    if len(sys.argv) >= 3 and sys.argv[1] == "daemon":
+        from .daemon import Forged
+        Forged(sys.argv[2], int(sys.argv[3]) if len(sys.argv) > 3 else 20).run()
+        return
     ap = argparse.ArgumentParser(prog="forge")
     ap.format_help = _help_text          # -h/--help routes through print_help → format_help
     # default LOCAL LADDER comes from ~/.forge/config.json (written by `forge setup`)
