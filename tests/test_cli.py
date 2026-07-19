@@ -240,5 +240,38 @@ class TestFirstRun(unittest.TestCase):
         self.assertIn("forge models", out.getvalue())
 
 
+class TestFrozenDaemonReinvoke(unittest.TestCase):
+    """A frozen single-file binary (PyInstaller/Nuitka) has no `python -m forge.daemon`
+    — sys.executable IS the forge binary — so `forge up` must re-invoke forge's own
+    `daemon` hook, and `forge daemon <model> [interval]` must run the autopilot loop
+    (intercepted before argparse). From source, sys.frozen is unset and behavior is
+    unchanged. Verified end-to-end in a real PyInstaller build; this pins the logic."""
+
+    def test_source_launch_uses_dash_m(self):
+        self.assertFalse(getattr(sys, "frozen", False))       # from source
+        self.assertEqual(M._daemon_launch_cmd("qwen2.5:0.5b", 20),
+                         [sys.executable, "-m", "forge.daemon", "qwen2.5:0.5b", "20"])
+
+    def test_frozen_launch_uses_daemon_subcommand(self):
+        import unittest.mock as mock
+        with mock.patch.object(sys, "frozen", True, create=True):
+            self.assertEqual(M._daemon_launch_cmd("qwen2.5:0.5b", 20),
+                             [sys.executable, "daemon", "qwen2.5:0.5b", "20"])
+
+    def test_daemon_argv_is_intercepted_before_argparse(self):
+        import unittest.mock as mock
+        seen = {}
+
+        class FakeForged:
+            def __init__(self, model, interval): seen["init"] = (model, interval)
+            def run(self): seen["ran"] = True
+
+        with mock.patch("forge.daemon.Forged", FakeForged), \
+             mock.patch.object(sys, "argv", ["forge", "daemon", "m1", "5"]):
+            M.main()                                          # must NOT reach argparse
+        self.assertEqual(seen.get("init"), ("m1", 5))
+        self.assertTrue(seen.get("ran"))
+
+
 if __name__ == "__main__":
     unittest.main()
