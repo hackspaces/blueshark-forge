@@ -356,7 +356,10 @@ def run(backend, session, verbose=False, workspace=None, resume=None):
     screen = Screen()           # activity (working…) · boxed 2-line input · status
     ui = UI(screen.emit, verbose, width=lambda: screen.w)
     ladder = backend if isinstance(backend, list) else [backend]
-    agent = Agent(ladder, session, on_event=ui, workspace=workspace, autonomous=True)
+    from . import mcp as mcpmod
+    mcp_servers = mcpmod.connect(cfgmod.load(),
+                                 warn=lambda n, e: screen.emit(f"{DIM}  ⚠ MCP server {n!r} unavailable: {e}{RST}\n"))
+    agent = Agent(ladder, session, on_event=ui, workspace=workspace, autonomous=True, mcp_servers=mcp_servers)
     if resume:                  # P4.7: splice reconstructed memory onto the fresh Agent
         from . import resume as resumemod
         try:

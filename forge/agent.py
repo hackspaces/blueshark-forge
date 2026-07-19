@@ -29,7 +29,8 @@ from .execution import (CompletionPolicy, CompletionDecision, PolicyOutcome,
 from .lifecycle import LifecycleTracker, outcome_for, Stage
 from .ledger import Ledger, DEFAULT_READ_LIMIT
 from .tools import (ACTION_SCHEMA, ACTION_VARIANTS, ALL_ACTIONS, NO_SUITE, TOOL_HELP,
-                    build_schema, required_fields, execute, dry_run, shape, error_hint)
+                    build_schema, mcp_variant, required_fields, execute, dry_run, shape, error_hint)
+from . import mcp as mcpmod
 
 STUCK_AT = int(os.environ.get("FORGE_STUCK_THRESHOLD", "7"))  # failures before escalating a rung
 TRACE_V = 1  # P3.1 schema version stamped on every meta/step/compact/loop/malformed record
@@ -333,7 +334,7 @@ BE AUTONOMOUS — this is the core of how you work. When the user asks for somet
 
 class Agent:
     def __init__(self, backend, session, max_steps=60, on_event=None, autonomous=False,
-                 system=None, allowed=None, workspace=None, levers=None, goal=""):
+                 system=None, allowed=None, workspace=None, levers=None, goal="", mcp_servers=None):
         # `backend` may be a single backend or a LADDER (list, cheapest→strongest
         # local models). The harness starts cheap and escalates a rung when stuck.
         self.ladder = backend if isinstance(backend, list) else [backend]
@@ -361,6 +362,38 @@ class Agent:
         self.autonomous = autonomous
         base = (system if system is not None else SYSTEM) + (AUTONOMOUS if autonomous else "")
         self.messages = [{"role": "system", "content": base}]
+        # P9.1: discovered MCP tools become mcp__<server>__<tool> actions inside the SAME
+        # constrained-decoding grammar as the built-ins — so a 7B calls them with the same
+        # forced-JSON reliability as bash. Servers are started+discovered by the caller
+        # (the CLI entry points); tests/bench pass none, so this whole block is inert
+        # unless the user configured `mcp` servers.
+        self._mcp_servers = mcp_servers or {}
+        self._mcp_route = {}        # mcp__s__t -> (server, tool_name)  — routes the call
+        self._mcp_variants = {}     # mcp__s__t -> grammar variant      — extends build_schema
+        self._mcp_mutating = set()  # mcp actions that can change things (not readOnlyHint)
+        _mcp_help = []
+        for _sname, _server in self._mcp_servers.items():
+            for _t in getattr(_server, "tools", []):
+                _act = f"mcp__{_sname}__{_t['name']}"
+                self._mcp_route[_act] = (_server, _t["name"])
+                self._mcp_variants[_act] = mcp_variant(_act)
+                if not (_t.get("annotations") or {}).get("readOnlyHint"):
+                    self._mcp_mutating.add(_act)   # mutating unless the server marks it read-only
+                # The tool's inputSchema is deliberately NOT in the grammar (judge caveat b:
+                # nesting each schema would exceed Ollama's format grammar). But the model
+                # still needs the ARGUMENT NAMES, or it guesses them wrong and the call fails
+                # (measured: a 7B sent `text` when the tool wanted `message`). So name the
+                # params in the help — required ones marked * — while `args` stays free-form.
+                _schema = _t.get("inputSchema") or {}
+                _req = set(_schema.get("required") or [])
+                _params = ", ".join((k + "*" if k in _req else k)
+                                    for k in (_schema.get("properties") or {})) or "none"
+                _desc = " ".join((_t.get("description") or "").split())[:70]
+                _mcp_help.append(f"  {_act}  {_desc}  · args: {{{_params}}}")
+        if _mcp_help:
+            self.messages[0]["content"] += (
+                "\n\nExternal tools (MCP) — emit like any action, with the tool's arguments in `args`:\n"
+                + "\n".join(_mcp_help))
         if workspace and self._lv("workspace"):
             self.messages.append({"role": "user", "content": workspace})
             self.messages.append({"role": "assistant", "content": '{"thought":"Oriented in the workspace. Ready.","action":"say","message":"Ready."}'})
@@ -1044,7 +1077,13 @@ class Agent:
         legal &= set(self.authority.legal_actions())
         if self.allowed is not None:
             legal &= set(self.allowed)
-        return legal
+        # P9.1: MCP tools are config-granted (their authority comes from the user adding
+        # the server, not from the model), so they bypass the authority/allow intersection;
+        # plan mode still hides the mutating ones so an investigate-only turn can't fire them.
+        mcp_legal = set(self._mcp_variants)
+        if self.mode == "plan":
+            mcp_legal -= self._mcp_mutating
+        return legal | mcp_legal
 
     def _missing_required(self, kind, act):
         """P5.1: the required fields (beyond thought/action) an action left out or
@@ -1085,7 +1124,7 @@ class Agent:
         candidate that may or may not be chosen."""
         if self._lv("schema"):
             if schema is None:
-                schema = build_schema(self._legal_actions(), self.mode)
+                schema = build_schema(self._legal_actions(), self.mode, extra_variants=self._mcp_variants)
         else:
             schema = None
         if not hasattr(self.backend, "stream"):
@@ -1320,7 +1359,7 @@ class Agent:
         try:
             if hasattr(b, "warm"):
                 b.warm()
-            schema = build_schema(self._legal_actions(), self.mode) if self._lv("schema") else None
+            schema = build_schema(self._legal_actions(), self.mode, extra_variants=self._mcp_variants) if self._lv("schema") else None
             raw = b.chat(prompt, schema=schema)
         except Exception:
             return None, None
@@ -1350,22 +1389,32 @@ class Agent:
 
     MUTATING = ("bash", "write_file", "edit_file", "fleet_send")
 
+    def _is_mutating(self, kind):
+        """Whether an action can change things: the built-in MUTATING set plus any MCP
+        tool the server did not mark readOnlyHint. Drives plan/manual gating and the
+        plan-mode grammar narrowing so a read-only MCP tool stays available in plan mode."""
+        return kind in self.MUTATING or kind in self._mcp_mutating
+
     def _approval_key(self, act):
-        """What an 'always' approval covers: bash by command head (bash:git),
-        other actions by kind (edit_file)."""
-        if act.get("action") == "bash":
+        """What an 'always' approval covers: bash by command head (bash:git), an MCP tool
+        by server+tool (mcp:github:create_issue), other actions by kind (edit_file)."""
+        kind = act.get("action")
+        if kind == "bash":
             head = (act.get("command") or "").strip().split()
             return f"bash:{head[0] if head else ''}"
-        return act.get("action")
+        if kind in self._mcp_route:
+            server, tool = self._mcp_route[kind]
+            return f"mcp:{server.name}:{tool}"
+        return kind
 
     def _gate_silent(self, kind, act):
         """Side-effect-free gate check for SCORING throwaway resample candidates:
         True if the action would be blocked, WITHOUT prompting the user or persisting
         an approval (which _gate does in manual mode). Auto never blocks; plan blocks
         mutating actions; manual blocks a mutating action unless already 'always'-approved."""
-        if not self.authority.evaluate(act).allowed:
-            return True
-        if kind not in self.MUTATING or self.mode == "auto":
+        if kind not in self._mcp_route and not self.authority.evaluate(act).allowed:
+            return True                        # MCP tools are config-granted; they skip authority
+        if not self._is_mutating(kind) or self.mode == "auto":
             return False
         if kind == "fleet_send" and (not act.get("message")
                                      or act.get("target", "").strip().lower() in ("", "list", "sessions")):
@@ -1377,13 +1426,14 @@ class Agent:
     def _gate(self, kind, act):
         """Authority + interaction-mode gate. Authority is harness-owned and is
         checked first; model capability, ladder tier, and auto mode never expand it."""
-        decision = self.authority.evaluate(act)
-        if not decision.allowed:
-            lc = self._lifecycle.deny(self._lifecycle.request(self._turn_id, kind), decision.reason)  # H03
-            self._log_lifecycle(lc)
-            self.session.log("authority_denied", decision=decision.to_dict())
-            return decision.reason
-        if kind not in self.MUTATING or self.mode == "auto":
+        if kind not in self._mcp_route:            # MCP tools are config-granted; they skip authority
+            decision = self.authority.evaluate(act)
+            if not decision.allowed:
+                lc = self._lifecycle.deny(self._lifecycle.request(self._turn_id, kind), decision.reason)  # H03
+                self._log_lifecycle(lc)
+                self.session.log("authority_denied", decision=decision.to_dict())
+                return decision.reason
+        if not self._is_mutating(kind) or self.mode == "auto":
             return None
         if kind == "fleet_send" and (not act.get("message")
                                      or act.get("target", "").strip().lower() in ("", "list", "sessions")):
@@ -1840,7 +1890,19 @@ class Agent:
         self.session.log("action", action=kind, args={k: act.get(k) for k in ("command", "path") if act.get(k)}, thought=act.get("thought", ""))
         self.on_event("action", action=kind, thought=act.get("thought", ""),
                       detail=act.get("command") or act.get("path") or act.get("pattern") or "")
-        obs, ok = execute(act, self.session.cwd, stop=self.stop)
+        if kind in self._mcp_route:
+            # P9.1: route to the MCP server instead of the built-in tool table, then let
+            # the SAME post-execute machinery below (heat reset, exemplars, stuck relax,
+            # fail-accounting, observation shaping, lifecycle) apply for free. isError ->
+            # ok=False so a failing tool feeds the loop breaker / escalation like any fail.
+            _srv, _tool = self._mcp_route[kind]
+            try:
+                obs, _is_err = _srv.call(_tool, act.get("args") or {})   # call() returns (text, is_error)
+                ok = not _is_err                                          # isError -> ok=False, feeds fail-accounting
+            except mcpmod.MCPError as _e:
+                obs, ok = f"MCP tool {kind} failed: {_e}", False
+        else:
+            obs, ok = execute(act, self.session.cwd, stop=self.stop)
         trace["ok"] = ok
         if ok:
             self._heat = 0.0   # P5.5: a clean execution unsticks — back to greedy
@@ -2316,6 +2378,12 @@ class Agent:
                     elif kind == "write_file":
                         _edit_disc = hashlib.sha1(
                             (act.get("content") or "").encode("utf-8", "replace")).hexdigest()
+                    elif kind in self._mcp_route:
+                        # an MCP tool has no path/command; fold its args so two DIFFERENT
+                        # calls to the same tool are distinct hypotheses, and only a
+                        # byte-identical repeat trips the loop breaker.
+                        _edit_disc = hashlib.sha1(
+                            json.dumps(act.get("args") or {}, sort_keys=True).encode("utf-8", "replace")).hexdigest()
                     sig = f"{kind}:{act.get('command') or act.get('path') or act.get('pattern') or ''}:{act.get('offset', '')}:{_edit_disc}"
                     trace["sig"] = sig
                     recent.append(sig)

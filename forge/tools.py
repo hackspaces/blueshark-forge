@@ -139,7 +139,22 @@ def _variant(action):
 ACTION_VARIANTS = {a: _variant(a) for a in ALL_ACTIONS}
 
 
-def build_schema(legal_actions=None, mode="auto"):
+def mcp_variant(name):
+    """The grammar variant for a discovered MCP tool (P9.1): a const action plus a
+    free-form `args` object. Per the roadmap judge (caveat b), `args` is deliberately
+    NOT the tool's nested inputSchema — nesting each tool's schema would exceed what
+    Ollama's `format` grammar handles; the server validates and returns argument errors
+    as observations instead. plan/thought/note stay optional, exactly like a built-in."""
+    props = {"action": {"const": name}}
+    for f in _COMMON_FIELDS:
+        if f != "action":
+            props[f] = ACTION_SCHEMA["properties"][f]
+    props["args"] = {"type": "object", "description": "arguments object for this tool"}
+    return {"type": "object", "properties": props,
+            "required": ["thought", "action"], "additionalProperties": False}
+
+
+def build_schema(legal_actions=None, mode="auto", extra_variants=None):
     """The action grammar for THIS step: an anyOf of the legal action variants.
 
     `legal_actions` is the set the caller narrowed to (all actions, minus the
@@ -148,14 +163,17 @@ def build_schema(legal_actions=None, mode="auto"):
     is pointless, and a root anyOf is what OpenAI strict mode rejects). With nothing
     legal, falls back to the flat ACTION_SCHEMA. `mode` is accepted for caller/telemetry
     intent; the narrowing itself is already reflected in `legal_actions`."""
+    extra_variants = extra_variants or {}
     if legal_actions is None:
         actions = list(ALL_ACTIONS)
+        extra = list(extra_variants)
     else:
         legal = set(legal_actions)
         actions = [a for a in ALL_ACTIONS if a in legal]
-    if not actions:
+        extra = [a for a in extra_variants if a in legal]   # MCP tools narrowed the same way
+    variants = [ACTION_VARIANTS[a] for a in actions] + [extra_variants[a] for a in extra]
+    if not variants:
         return ACTION_SCHEMA
-    variants = [ACTION_VARIANTS[a] for a in actions]
     if len(variants) == 1:
         return variants[0]
     return {"anyOf": variants}

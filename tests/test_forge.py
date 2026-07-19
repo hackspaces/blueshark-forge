@@ -2320,6 +2320,8 @@ class TestModeGate(unittest.TestCase):
         a.approvals = set(approvals)
         a.approve = approve or (lambda d: "yes")
         a.authority = AuthorityPolicy("operator")   # harness authority is always present on a real Agent
+        a._mcp_route = {}                           # ...as are the (empty, no-server) MCP registries
+        a._mcp_mutating = set()
         return a
 
     def test_auto_never_gates(self):

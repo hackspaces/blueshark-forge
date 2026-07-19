@@ -215,6 +215,22 @@ def load_servers(cfg):
     return servers
 
 
+def connect(cfg, warn=None):
+    """Load the configured servers, start + discover each, and return the ones that came
+    up ({name: started MCPServer}) — ready to hand to Agent(mcp_servers=...). A server
+    that fails to start is skipped (with an optional warn(name, msg) callback), never
+    fatal: a broken MCP config must not stop the agent from running at all."""
+    up = {}
+    for name, server in load_servers(cfg).items():
+        try:
+            server.start()
+            up[name] = server
+        except MCPError as e:
+            if warn:
+                warn(name, str(e))
+    return up
+
+
 def _register(server):
     global _ATEXIT_REGISTERED
     _SERVERS.append(server)
