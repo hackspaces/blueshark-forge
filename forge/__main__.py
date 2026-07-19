@@ -293,6 +293,28 @@ def _daemon_launch_cmd(model, interval):
     return [sys.executable, "-m", "forge.daemon", model, str(interval)]
 
 
+def cmd_roster(args):
+    """The agent-card profile: `forge roster` shows your collection, `forge roster <model>`
+    shows one model's full card. Each model, forged into an agent, becomes a card whose six
+    attributes measure real agentic work. Deterministic yet globally unique per install;
+    grows with your real work."""
+    from . import cards, registry
+    if getattr(args, "model", None):
+        m = registry.get(args.model)
+        if not m:
+            print(_paint(f"✗ no model named {args.model!r} in the catalog", "red"), file=sys.stderr)
+            sys.exit(1)
+        print(cards.render_card(cards.card(m, telemetry=cards._telemetry(m["name"]))))
+        return
+    fid, owned, total = cards.collection(installed_only=True)
+    if not owned:
+        print(_paint("No agents forged yet — pull a model to forge its card:  forge models use <name>", "dim"))
+        print(_paint("  (or preview any model's card:  forge roster <name>)", "dim"))
+        return
+    print(cards.render_roster(fid, owned, total))
+    print(_paint("\n  one model's full card:  forge roster <name>", "dim"))
+
+
 def cmd_team(args):
     """P9.2 first swarm slice: plan a goal into a task DAG, run each task as a worker in
     its own git worktree, and merge only the branches that pass the verify gate."""
@@ -616,6 +638,7 @@ _COMMAND_GROUPS = [
         ("run", 'one task, start to finish  ·  forge run "fix the failing test"'),
         ("team", 'a goal → a task DAG → isolated worktree workers → merge only what verifies'),
         ("bench", "harness-lift eval: the same model bare vs full harness"),
+        ("roster", "your agent cards — each model you forge is scored on real agentic work"),
     ]),
     ("The fleet", [
         ("up, down", "start / stop the autopilot"),
@@ -726,6 +749,9 @@ def main():
     p_team.add_argument("goal")
     p_team.add_argument("--max-steps", type=int, default=40)
 
+    p_roster = sub.add_parser("roster", help="your agent-card collection (each model you forge becomes a card scored on real agentic work); `forge roster <model>` shows one card")
+    p_roster.add_argument("model", nargs="?", default=None)
+
     sub.add_parser("status", help="autopilot state + live sessions")
 
     p_send = sub.add_parser("send", help="message another session")
@@ -796,7 +822,7 @@ def main():
 
     args = ap.parse_args()
     from .models_cmd import cmd_models
-    dispatch = {"run": cmd_run, "team": cmd_team, "status": cmd_status, "send": cmd_send, "up": cmd_up,
+    dispatch = {"run": cmd_run, "team": cmd_team, "roster": cmd_roster, "status": cmd_status, "send": cmd_send, "up": cmd_up,
                 "down": cmd_down, "receipts": cmd_receipts, "learnings": cmd_learnings,
                 "forget": cmd_forget, "trace": cmd_trace, "corpus": cmd_corpus, "export": cmd_export, "bench": cmd_bench, "replay": cmd_replay,
                 "passport": cmd_passport, "models": cmd_models}
