@@ -220,8 +220,8 @@ class TestRunTestsSatisfiesDoneGate(unittest.TestCase):
         a = Agent(_Backend(acts), sm.EphemeralSession(d, "b"), max_steps=8, autonomous=True)
         reply = a.send("fix the bug in mathx.py")
         self.assertIn("Fixed", reply)                          # say accepted — done-gate saw run_tests pass
-        self.assertEqual(open(os.path.join(d, "mathx.py")).read(),
-                         "def add(a, b):\n    return a + b\n")
+        with open(os.path.join(d, "mathx.py")) as f:
+            self.assertEqual(f.read(), "def add(a, b):\n    return a + b\n")
 
 
 if __name__ == "__main__":

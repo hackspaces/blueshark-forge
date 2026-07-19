@@ -198,7 +198,8 @@ class TestReplayIntegration(unittest.TestCase):
             path = R.write_fixture("sid", "wtest")
             wpath = path[:-len(".jsonl")] + ".workspace.json"
             self.assertTrue(os.path.exists(wpath))            # companion workspace fixture written
-            wf = json.load(open(wpath))
+            with open(wpath) as f:
+                wf = json.load(f)
             self.assertIn("app.py", wf["files"])
             self.assertNotIn("secret123", json.dumps(wf["files"]))   # secret not archived
             self.assertTrue(any(".env" in line for line in FX.fidelity_limitations(wf)))

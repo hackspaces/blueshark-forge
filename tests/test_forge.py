@@ -3139,7 +3139,7 @@ class TestStepTrace(unittest.TestCase):
         a = Agent(ScriptBackend(acts), _RecSession(d), max_steps=6,
                   on_event=lambda k, **kw: events.append((k, kw)))
         a.send("bump x")
-        self.assertEqual(open(os.path.join(d, "main.py")).read(), "x = 2\n")
+        self.assertEqual(_read(os.path.join(d, "main.py")), "x = 2\n")
         self.assertFalse(any(kw.get("detail") == "(incomplete)" for k, kw in events if k == "action"))
         self.assertEqual(a.stuck["sig_fails"], {})    # a legal batch edit is not a failure
 

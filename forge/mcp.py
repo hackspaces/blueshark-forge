@@ -48,6 +48,7 @@ class MCPServer:
         self._start_lock = threading.Lock()
         self._started = False
         self._alive = False
+        self._reader = None      # the stdout reader thread, joined on stop()
 
     # ---- lifecycle -------------------------------------------------------------
     def start(self):
@@ -68,7 +69,9 @@ class MCPServer:
             except (OSError, ValueError) as e:
                 raise MCPError(f"could not start MCP server {self.name!r}: {e}")
             self._alive = True
-            threading.Thread(target=self._read_loop, name=f"mcp-{self.name}", daemon=True).start()
+            self._reader = threading.Thread(
+                target=self._read_loop, name=f"mcp-{self.name}", daemon=True)
+            self._reader.start()
             _register(self)
             try:
                 self._handshake()
@@ -113,6 +116,26 @@ class MCPServer:
             p.terminate()                                   # native Windows
         except (OSError, ProcessLookupError):
             pass
+        # Reap the child so it isn't left unwaited (Python warns "subprocess still
+        # running" at interpreter exit otherwise), then release the pipe fds. The
+        # reader thread sees EOF once the process dies; join it before closing its
+        # stream so the close can't race an in-flight readline().
+        try:
+            p.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            p.kill()
+            try:
+                p.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                pass
+        r = self._reader
+        if r is not None:
+            r.join(timeout=2)
+        if p.stdout:
+            try:
+                p.stdout.close()
+            except OSError:
+                pass
 
     # ---- JSON-RPC transport ----------------------------------------------------
     def _read_loop(self):

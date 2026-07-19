@@ -483,6 +483,10 @@ def _kill_background():
                 os.killpg(os.getpgid(p.pid), signal.SIGKILL)
             except (OSError, ProcessLookupError):
                 pass
+        try:
+            p.wait(timeout=5)          # reap the child so it isn't left unwaited (Python
+        except (subprocess.TimeoutExpired, OSError):   # warns "subprocess still running" at exit)
+            pass
 
 
 # Sentinel prefix for "this project has no test suite at all". The agent's evidence

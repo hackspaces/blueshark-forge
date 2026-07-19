@@ -433,7 +433,8 @@ def _stop(name):
         print(f"  no forge-launched server for '{name}'.")
         return 0
     try:
-        pid = int(open(pidf).read().strip())
+        with open(pidf) as f:
+            pid = int(f.read().strip())
     except (OSError, ValueError):
         os.remove(pidf)
         print(f"  cleared a stale pidfile for '{name}'.")

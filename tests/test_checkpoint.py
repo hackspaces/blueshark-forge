@@ -45,7 +45,8 @@ class TestCorruptTailQuarantine(unittest.TestCase):
         # (newline-terminated) record before the cut must always be recovered.
         base = os.path.join(tempfile.mkdtemp(), "s.jsonl")
         _log(base, {"type": "meta"}, {"type": "user", "text": "x"}, {"type": "action", "action": "bash"})
-        full = open(base, "rb").read()
+        with open(base, "rb") as f:
+            full = f.read()
         committed_prefix_len = full.rfind(b"\n", 0, len(full) - 1) + 1   # end of the 2nd record
         for cut in range(committed_prefix_len + 1, len(full)):
             p = os.path.join(tempfile.mkdtemp(), "s.jsonl")
