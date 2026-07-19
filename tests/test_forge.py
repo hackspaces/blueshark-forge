@@ -2505,6 +2505,35 @@ class TestBoxLayout(unittest.TestCase):
         self.assertLessEqual(ccol, 19)
 
 
+class TestFooterAlignment(unittest.TestCase):
+    """The footer box must be exactly W display columns wide on EVERY row, including
+    when the input carries emoji/CJK — the wide-char misalignment the pty+pyte rig caught
+    (the painter padded by len(), and a symbol was miscounted 2 cols). Stdlib guard so it
+    can't regress: build the footer lines and assert each box row's display width == W."""
+
+    def _screen(self, w=40, rows=2):
+        from forge.tui import Screen
+        s = Screen.__new__(Screen)
+        s.w, s.rows, s.footer, s._activity = w, rows, rows + 4, ""
+        return s
+
+    def _assert_aligned(self, text, w=40):
+        from forge.tui import _vis
+        s = self._screen(w=w)
+        lines, _, _ = s._footer_lines("❯ ", text, "")
+        for ln in lines[1:-1]:                      # the ╭─╮ / content rows / ╰─╯ (skip activity/status)
+            self.assertEqual(_vis(ln), w, f"row {ln!r} is {_vis(ln)} cols, want {w}")
+
+    def test_plain_input_box_aligned(self):
+        self._assert_aligned("fix the failing test")
+
+    def test_wide_char_input_box_aligned(self):
+        self._assert_aligned("fix café 日本語 bug 🚀 now")   # emoji + CJK + accent
+
+    def test_overlong_wide_input_box_aligned(self):
+        self._assert_aligned("日本語 " * 20)                 # wraps across rows, all still == W
+
+
 class TestTuiHelpers(unittest.TestCase):
     """Pure helpers from the TUI: ANSI-aware clipping and raw-mode key decoding."""
 

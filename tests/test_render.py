@@ -46,6 +46,14 @@ class TestDisplayWidth(unittest.TestCase):
     def test_ansi_codes_are_zero_width(self):
         self.assertEqual(render.display_width("\033[32mok\033[0m"), 2)
 
+    def test_narrow_dingbats_are_width_one(self):
+        # regression: a too-broad emoji range (0x2600–0x27bf) once counted the ❯ prompt
+        # ornament as 2 cols, drifting the footer box border. These are width-1 (EAW
+        # N/A), matching wcwidth + real terminals. (⚡/☀/★ ARE east-asian-wide = 2 —
+        # correctly, so they're deliberately not in this list.)
+        for ch in "❯·→↑✓✗":
+            self.assertEqual(render.display_width(ch), 1, f"{ch!r} ({hex(ord(ch))}) should be 1 col")
+
     def test_clip_never_splits_a_wide_char(self):
         # 3 CJK chars = 6 cols; clip to 5 must stop at 2 chars (4 cols), not split the third
         self.assertEqual(render.clip("日本語", 5), "日本")
