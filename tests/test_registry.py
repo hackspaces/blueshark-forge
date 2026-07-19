@@ -383,5 +383,22 @@ class TestRemoteCtxConfig(unittest.TestCase):
             self.assertEqual(b.context_window(), 128000)       # large-window fallback
 
 
+class TestInstalledMarker(unittest.TestCase):
+    """`forge models` now marks which catalog models are actually pulled locally
+    (● installed / ○ available) — the install-state it knew but never showed."""
+
+    def test_matcher_by_tag_and_base_name(self):
+        from forge.models_cmd import _is_installed
+        self.assertTrue(_is_installed("gemma2:9b", {"gemma2:9b"}))
+        self.assertTrue(_is_installed("phi-2", {"phi-2:latest"}))      # bare name → tagged
+        self.assertFalse(_is_installed("mistral:7b", {"gemma2:9b"}))
+        self.assertFalse(_is_installed("qwen2.5:14b", set()))
+
+    def test_installed_tags_empty_off_ollama(self):
+        # non-Ollama engine (or absent Ollama) shows no install-state rather than guessing
+        from forge.models_cmd import _installed_tags
+        self.assertEqual(_installed_tags("llamacpp"), set())
+
+
 if __name__ == "__main__":
     unittest.main()

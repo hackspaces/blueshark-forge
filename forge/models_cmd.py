@@ -109,11 +109,34 @@ def _hw_desc(hw, accel):
 _RUN_STYLE = {"good": "green", "warn": "yellow", "faint": "dim"}
 
 
+def _installed_tags(engine="ollama"):
+    """Model tags already pulled/installed on THIS machine (Ollama today). Empty when the
+    engine isn't Ollama or Ollama isn't reachable — installed-state just isn't shown then,
+    never guessed."""
+    if engine != "ollama":
+        return set()
+    try:
+        import subprocess
+        out = subprocess.check_output(["ollama", "list"], text=True, timeout=10)
+        return {ln.split()[0] for ln in out.splitlines()[1:] if ln.strip()}
+    except (subprocess.SubprocessError, OSError):
+        return set()
+
+
+def _is_installed(name, installed):
+    """A catalog model counts as installed if its tag, or its bare base name, is pulled
+    (so 'gemma2:9b' matches an installed 'gemma2:9b', and 'phi-2' matches 'phi-2:latest')."""
+    base = name.split(":")[0]
+    return name in installed or any(t == name or t.split(":")[0] == base for t in installed)
+
+
 def _list(hw):
     ram = hw.get("ram_gb") or 0
     accel = _accelerated(hw)
     vram = hw.get("vram_gb", 0)
     W = term_width()
+    from . import config as _cfg
+    installed = _installed_tags(_cfg.load().get("engine", "ollama"))
     print(paint("forge models — what this machine can run", "bold"))
     print(paint(f"  {_hw_desc(hw, accel)}", "dim"))
     cap_p, cap_name = registry.ceiling(ram, accel, vram)
@@ -125,21 +148,28 @@ def _list(hw):
     else:
         print(paint("  → tight on RAM — only the smallest models fit.", "yellow"))
     print()
-    head = (f"  {'MODEL':<20} {'PARAMS':>7}  {'ENGINE':<11} {'SIZE':>7}  "
+    head = (f"    {'MODEL':<18} {'PARAMS':>7}  {'ENGINE':<11} {'SIZE':>7}  "
             f"{'RAM~':>5}  {'RUNS':<18} NOTES")
     print(paint(head, "dim"))
+    n_installed = 0
     for m in sorted(registry.MODELS, key=lambda x: x.get("params_b") or 0):
         size = m.get("weights", {}).get("size_gb")
         verdict, style = registry.runs(m, ram, accel, vram)
         runs_cell = paint(f"{verdict:<18}", _RUN_STYLE.get(style, "dim"))
         star = paint(" ★", "green") if m.get("status") == "verified" else "  "
-        note = fit(m.get("notes", ""), max(8, W - 82))
-        print(f"  {m['name']:<20} {_pnum(m.get('params_b') or 0) + 'B':>7}  {m['engine']:<11} "
+        here = _is_installed(m["name"], installed)
+        n_installed += here
+        mark = paint("●", "green") if here else paint("○", "dim")   # installed vs available
+        note = fit(m.get("notes", ""), max(8, W - 84))
+        print(f"  {mark} {m['name']:<18} {_pnum(m.get('params_b') or 0) + 'B':>7}  {m['engine']:<11} "
               f"{(f'{size}GB' if size else '?'):>7}  {str(m.get('ram_gb_needed', '?')) + 'GB':>5}  "
               + runs_cell + " " + paint(note, "dim") + star)
     print()
-    print(paint("  ★ forge has run it   ·   run any of these:  forge models use <name>   ·   "
-                "RAM/RUNS are estimates.   Scan the FULL catalog:  forge models --all", "dim"))
+    tally = (paint(f"  ● {n_installed} installed", "green") + paint("  ○ available", "dim")) if installed \
+        else paint("  ○ = in the catalog (install-state needs Ollama)", "dim")
+    print(tally)
+    print(paint("  ★ forge has run it   ·   pull one:  forge models use <name>   ·   "
+                "RAM/RUNS are estimates.   Full catalog:  forge models --all", "dim"))
 
 
 def _scan(hw, refresh=False):
