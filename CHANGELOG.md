@@ -5,6 +5,12 @@ Every published release of `blueshark-forge`, newest first.
 Generated from the GitHub Releases by `tools/changelog.py` — the releases are
 what the tag-gated publish actually shipped, so this cannot drift. Don't hand-edit.
 
+## [v0.11.13](https://github.com/hackspaces/blueshark-forge/releases/tag/v0.11.13) — forge company: a manager+worker org doing real verified work, with a braille office view
+
+*2026-07-19 · `pip install blueshark-forge==0.11.13`*
+
+See the release commit for details.
+
 ## [v0.11.12](https://github.com/hackspaces/blueshark-forge/releases/tag/v0.11.12) — forge roster: each model you forge becomes an agent card scored on real agentic work
 
 *2026-07-19 · `pip install blueshark-forge==0.11.12`*
