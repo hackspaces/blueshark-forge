@@ -5,6 +5,12 @@ Every published release of `blueshark-forge`, newest first.
 Generated from the GitHub Releases by `tools/changelog.py` — the releases are
 what the tag-gated publish actually shipped, so this cannot drift. Don't hand-edit.
 
+## [v0.11.15](https://github.com/hackspaces/blueshark-forge/releases/tag/v0.11.15) — git is harness-managed: run in any folder, verified work auto-applies, a starter company after setup
+
+*2026-07-20 · `pip install blueshark-forge==0.11.15`*
+
+See the release commit for details.
+
 ## [v0.11.14](https://github.com/hackspaces/blueshark-forge/releases/tag/v0.11.14) — the company TUI: an animated office, live board, and a receipts ticker where a rejected done-claim shows on screen
 
 *2026-07-19 · `pip install blueshark-forge==0.11.14`*
