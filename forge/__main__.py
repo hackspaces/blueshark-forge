@@ -341,10 +341,25 @@ def cmd_team(args):
         sys.exit(1)
     merged, total = len(res["merged"]), len(res["results"])
     fin = res["final"]
-    print(f"\n{_paint('team done', 'green')}: {merged}/{total} tasks merged into {res['integration_branch']}")
+    print(f"\n{_paint('team done', 'green')}: {merged}/{total} tasks verified")
     print(f"  final suite: {'✓' if fin['ok'] else '✗'} {fin['detail']}")
-    print(_paint(f"  review:  git diff {res['base']}..{res['integration_branch']}", "dim"))
-    print(_paint(f"  keep it: git checkout {res['base']} && git merge {res['integration_branch']}", "dim"))
+    _print_applied(res.get("applied"))
+
+
+def _print_applied(applied):
+    """Report how the verified work landed — the harness owns the git, so the user gets a
+    plain outcome + a one-line undo, not a merge chore."""
+    if not applied:
+        return
+    if applied.get("applied"):
+        n = applied.get("ahead", 0)
+        print(_paint(f"  ✓ applied {n} verified change{'s' if n != 1 else ''} to your files", "green")
+              + _paint(f"   (undo:  git reset --hard {applied.get('undo_to','')})", "dim"))
+    elif applied.get("ahead", 0) > 0:
+        # verified work exists but wasn't auto-applied (final check failed, or the tree was dirty)
+        print(_paint("  ⚠ verified work is on a branch but not applied — your files were not clean, "
+                     "or the final check failed. Review it before applying.", "yellow"))
+    # nothing verified → nothing to say
 
 
 def cmd_company(args):
@@ -403,8 +418,8 @@ def cmd_company(args):
     print(f"\n{_paint('company done', 'green')}: {len(res['verified'])} verified, "
           f"{len(res['escalated'])} escalated to you")
     print(f"  final check: {'✓' if fin['ok'] else '✗'} {fin['detail']}")
+    _print_applied(res.get("applied"))
     print(_paint(f"  the roll-up:  forge company status {args.name}", "dim"))
-    print(_paint(f"  review:  git diff {res['base']}..{res['integration']}", "dim"))
 
 
 def cmd_office(args):

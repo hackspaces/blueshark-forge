@@ -206,5 +206,103 @@ class TestRun(unittest.TestCase):
         self.assertNotIn("SECRET_WORKER_INTERNALS", company.status("co"))
 
 
+class TestHarnessManagedGit(unittest.TestCase):
+    """Git is the harness's job: a company runs in a plain directory (auto-init), and
+    verified work is applied back to the user's files (reversibly), not left as a chore."""
+
+    def setUp(self):
+        self.old = company.COMPANY_DIR
+        company.COMPANY_DIR = tempfile.mkdtemp()
+
+    def tearDown(self):
+        company.COMPANY_DIR = self.old
+
+    def test_auto_inits_a_non_git_directory(self):
+        from forge import team
+        d = tempfile.mkdtemp()                              # NOT a git repo
+        with open(os.path.join(d, "x.txt"), "w") as f:
+            f.write("hi\n")
+        created = team.ensure_repo(d)
+        self.assertTrue(created)
+        self.assertEqual(_git(d, "rev-parse", "--is-inside-work-tree").stdout.strip(), "true")
+        self.assertTrue(team.working_tree_clean(d))         # the snapshot committed the files
+
+    def test_existing_repo_is_not_reinitialised(self):
+        from forge import team
+        d = _repo({"a": "1\n"})
+        self.assertFalse(team.ensure_repo(d))
+
+    def test_verified_work_is_applied_to_a_plain_directory(self):
+        # the whole point: run a company in a bare dir, get the files back — no git by hand
+        d = tempfile.mkdtemp()
+        with open(os.path.join(d, "a.py"), "w") as f:
+            f.write("x = 1\n")
+        company.create_charter("co", "m", ["w"])
+        plan = {"work_items": [{"id": "w1", "title": "t", "brief": "", "assignee": "worker-1",
+                                "files": ["b.py"], "verify": "test -f b.py", "depends_on": []}]}
+        res = company.run("co", "goal", d, lambda r: [object()], planner_override=_Manager(plan),
+                          agent_factory=lambda ladder, wt, item: _Worker(wt, item,
+                              {"w1": lambda wt: _write(wt, "b.py", "B=1\n")}))
+        self.assertTrue(res["applied"]["applied"])
+        self.assertTrue(os.path.exists(os.path.join(d, "b.py")))   # applied to the user's files
+        self.assertTrue(res["applied"]["undo_to"])                 # and reversible
+
+    def test_dirty_working_tree_is_not_auto_applied(self):
+        from forge import team
+        d = _repo({"a.py": "x = 1\n"})
+        with open(os.path.join(d, "a.py"), "w") as f:
+            f.write("x = 999  # uncommitted\n")               # make the tree DIRTY
+        company.create_charter("co", "m", ["w"])
+        plan = {"work_items": [{"id": "w1", "title": "t", "brief": "", "assignee": "worker-1",
+                                "files": ["b.py"], "verify": "test -f b.py", "depends_on": []}]}
+        res = company.run("co", "goal", d, lambda r: [object()], planner_override=_Manager(plan),
+                          agent_factory=lambda ladder, wt, item: _Worker(wt, item,
+                              {"w1": lambda wt: _write(wt, "b.py", "B=1\n")}))
+        self.assertFalse(res["applied"]["applied"])          # not applied — the user's edits are safe
+        self.assertEqual(_read(os.path.join(d, "a.py")), "x = 999  # uncommitted\n")
+
+
+def _read(p):
+    with open(p) as f:
+        return f.read()
+
+
+class TestSetupOffersCompany(unittest.TestCase):
+    """forge setup ends by chartering a 'starter' company, so a first-time user comes out
+    with an org ready, not just a lone agent."""
+
+    def setUp(self):
+        self.old = company.COMPANY_DIR
+        company.COMPANY_DIR = tempfile.mkdtemp()
+
+    def tearDown(self):
+        company.COMPANY_DIR = self.old
+
+    def test_auto_charters_a_starter_from_the_ladder(self):
+        import unittest.mock as mock
+        from forge import setup
+        with mock.patch("forge.config.load", return_value={"ladder": ["cheap:1b", "strong:30b"]}):
+            setup._offer_company(auto=True)                  # auto → no prompt, just charter
+        self.assertTrue(company.charter_exists("starter"))
+        c = company.load_charter("starter")
+        self.assertEqual(c["roles"]["manager"]["rung"], "strong:30b")   # strongest rung manages
+        self.assertEqual(set(company.workers(c)), {"worker-1", "worker-2"})
+
+    def test_does_not_duplicate_an_existing_starter(self):
+        import unittest.mock as mock
+        from forge import setup
+        company.create_charter("starter", "m", ["w"])
+        with mock.patch("forge.config.load", return_value={"ladder": ["x:1b", "y:30b"]}):
+            setup._offer_company(auto=True)                  # already exists → no-op
+        self.assertEqual(company.load_charter("starter")["roles"]["manager"]["rung"], "m")
+
+    def test_no_ladder_is_a_clean_noop(self):
+        import unittest.mock as mock
+        from forge import setup
+        with mock.patch("forge.config.load", return_value={"ladder": []}):
+            setup._offer_company(auto=True)                  # nothing to build from
+        self.assertFalse(company.charter_exists("starter"))
+
+
 if __name__ == "__main__":
     unittest.main()
