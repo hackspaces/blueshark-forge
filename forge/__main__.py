@@ -293,28 +293,6 @@ def _daemon_launch_cmd(model, interval):
     return [sys.executable, "-m", "forge.daemon", model, str(interval)]
 
 
-def cmd_roster(args):
-    """The agent-card profile: `forge roster` shows your collection, `forge roster <model>`
-    shows one model's full card. Each model, forged into an agent, becomes a card whose six
-    attributes measure real agentic work. Deterministic yet globally unique per install;
-    grows with your real work."""
-    from . import cards, registry
-    if getattr(args, "model", None):
-        m = registry.get(args.model)
-        if not m:
-            print(_paint(f"✗ no model named {args.model!r} in the catalog", "red"), file=sys.stderr)
-            sys.exit(1)
-        print(cards.render_card(cards.card(m, telemetry=cards._telemetry(m["name"]))))
-        return
-    fid, owned, total = cards.collection(installed_only=True)
-    if not owned:
-        print(_paint("No agents forged yet — pull a model to forge its card:  forge models use <name>", "dim"))
-        print(_paint("  (or preview any model's card:  forge roster <name>)", "dim"))
-        return
-    print(cards.render_roster(fid, owned, total))
-    print(_paint("\n  one model's full card:  forge roster <name>", "dim"))
-
-
 def cmd_team(args):
     """P9.2 first swarm slice: plan a goal into a task DAG, run each task as a worker in
     its own git worktree, and merge only the branches that pass the verify gate."""
@@ -360,101 +338,6 @@ def _print_applied(applied):
         print(_paint("  ⚠ verified work is on a branch but not applied — your files were not clean, "
                      "or the final check failed. Review it before applying.", "yellow"))
     # nothing verified → nothing to say
-
-
-def cmd_company(args):
-    """forge company — run a goal through a small org: a manager decomposes, workers execute
-    in isolated worktrees, the independent TRUST verifier audits every done-claim, the manager
-    rolls up a STATUS you steer from. Subcommands: new / run / status."""
-    from . import company as co
-    sub = args.company_cmd
-    if sub == "new":
-        rungs = [r.strip() for r in (args.workers or "").split(",") if r.strip()] or [_resolve_model(args)]
-        manager = args.manager or (_resolve_model(args))
-        co.create_charter(args.name, manager, rungs)
-        print(_paint(f"✓ chartered company {args.name!r}", "green")
-              + f"  — manager: {manager} · workers: {', '.join(rungs)}")
-        print(_paint(f"  run a goal:  forge company run {args.name} \"<goal>\"", "dim"))
-        return
-    if sub == "status":
-        print(co.status(args.name))
-        return
-    if sub == "watch":
-        from . import company_tui
-        import time
-        try:
-            while True:
-                sys.stdout.write("\033[2J\033[H")
-                try:
-                    print("\n".join(company_tui.render_dashboard(args.name,
-                          cols=term_width(), rows=max(20, _term_rows()))))
-                except co.CompanyError as e:
-                    print(_paint(f"✗ {e}", "red")); break
-                board = co.read_board(args.name)
-                if board and all(it.get("state") in ("verified", "escalated", "blocked") for it in board):
-                    print(_paint("\n  run complete — Ctrl-C to exit", "dim"))
-                time.sleep(1.0)
-        except KeyboardInterrupt:
-            pass
-        return
-    # run
-    _colors = {"running": "cyan", "verified": "green", "escalated": "red", "blocked": "yellow"}
-    def on_event(kind, **k):
-        if kind == "company_board":
-            print(_paint(f"  manager planned {len(k['items'])} work items: {', '.join(k['items'])}", "cyan"))
-        elif kind == "company_item":
-            st = k.get("state", "")
-            tail = f" — {k['detail']}" if k.get("detail") else (f"  {k.get('title','')}" if k.get("title") else "")
-            who = f" [{k['assignee']}]" if k.get("assignee") else ""
-            print(_paint(f"  · {k['id']}{who}: {st}{tail}", _colors.get(st, "dim")))
-    def ladder_for(rung):
-        return _make_ladder(rung)
-    try:
-        res = co.run(args.name, args.goal, os.path.abspath(args.dir), ladder_for,
-                     on_event=on_event, max_steps=args.max_steps)
-    except (co.CompanyError,) as e:
-        print(_paint(f"✗ {e}", "red"), file=sys.stderr); sys.exit(1)
-    fin = res["final"]
-    print(f"\n{_paint('company done', 'green')}: {len(res['verified'])} verified, "
-          f"{len(res['escalated'])} escalated to you")
-    print(f"  final check: {'✓' if fin['ok'] else '✗'} {fin['detail']}")
-    _print_applied(res.get("applied"))
-    print(_paint(f"  the roll-up:  forge company status {args.name}", "dim"))
-
-
-def cmd_office(args):
-    """Render a company's office — the spatial view over its board. A one-shot floorplan
-    (the braille/dither map with each worker's desk state), or --watch to tail the board and
-    re-render live as items move through queued → running → verified/escalated."""
-    from . import company as co, office
-    try:
-        charter = co.load_charter(args.name)
-    except co.CompanyError as e:
-        print(_paint(f"✗ {e}", "red"), file=sys.stderr); sys.exit(1)
-    roles = ["manager"] + co.workers(charter) + ["verifier"]
-
-    def snapshot():
-        board = co.read_board(args.name)
-        states = {it["assignee"]: it.get("state", "queued") for it in board}
-        agents = {r: (r if not r.startswith("worker") else r) for r in roles}
-        agents["manager"] = "board" if any(s == "running" for s in states.values()) else "manager"
-        return office.render_office(args.name, roles, item_states=states, agent_at=agents)
-
-    if not args.watch:
-        print("\n".join(snapshot()))
-        return
-    import time
-    try:
-        while True:
-            sys.stdout.write("\033[2J\033[H")               # clear + home
-            print(_paint(f"  {args.name} — office  (Ctrl-C to exit)", "bold"))
-            print("\n".join(snapshot()))
-            board = co.read_board(args.name)
-            if board and all(it.get("state") in ("verified", "escalated", "blocked") for it in board):
-                print(_paint("\n  run complete.", "dim")); break
-            time.sleep(1.0)
-    except KeyboardInterrupt:
-        pass
 
 
 def cmd_up(args):
@@ -747,10 +630,7 @@ _COMMAND_GROUPS = [
     ("Work", [
         ("run", 'one task, start to finish  ·  forge run "fix the failing test"'),
         ("team", 'a goal → a task DAG → isolated worktree workers → merge only what verifies'),
-        ("company", 'a goal → a manager + worker org, TRUST audits every done-claim, you steer as CEO'),
-        ("office", 'the spatial view of a company — a live braille floorplan of desks + state'),
         ("bench", "harness-lift eval: the same model bare vs full harness"),
-        ("roster", "your agent cards — each model you forge is scored on real agentic work"),
     ]),
     ("The fleet", [
         ("up, down", "start / stop the autopilot"),
@@ -861,27 +741,6 @@ def main():
     p_team.add_argument("goal")
     p_team.add_argument("--max-steps", type=int, default=40)
 
-    p_roster = sub.add_parser("roster", help="your agent-card collection (each model you forge becomes a card scored on real agentic work); `forge roster <model>` shows one card")
-    p_roster.add_argument("model", nargs="?", default=None)
-
-    p_co = sub.add_parser("company", help="run a goal through a small org: a manager decomposes, workers execute in isolated worktrees, the TRUST verifier audits every done-claim")
-    co_sub = p_co.add_subparsers(dest="company_cmd", metavar="<new|run|status>", required=True)
-    p_co_new = co_sub.add_parser("new", help="charter a company")
-    p_co_new.add_argument("name")
-    p_co_new.add_argument("--manager", default=None, help="the manager's model rung (default: your model)")
-    p_co_new.add_argument("--workers", default=None, help="comma-separated worker model rungs")
-    p_co_run = co_sub.add_parser("run", help="run a goal through the company")
-    p_co_run.add_argument("name"); p_co_run.add_argument("goal")
-    p_co_run.add_argument("--max-steps", type=int, default=40)
-    p_co_status = co_sub.add_parser("status", help="the manager's roll-up (STATUS.md) or the live board")
-    p_co_status.add_argument("name")
-    p_co_watch = co_sub.add_parser("watch", help="the live company TUI — animated office + board + receipts ticker")
-    p_co_watch.add_argument("name")
-
-    p_office = sub.add_parser("office", help="the spatial office view of a company — a braille floorplan of desks + live state; --watch animates it")
-    p_office.add_argument("name")
-    p_office.add_argument("--watch", action="store_true", help="tail the board and re-render live")
-
     sub.add_parser("status", help="autopilot state + live sessions")
 
     p_send = sub.add_parser("send", help="message another session")
@@ -952,7 +811,7 @@ def main():
 
     args = ap.parse_args()
     from .models_cmd import cmd_models
-    dispatch = {"run": cmd_run, "team": cmd_team, "company": cmd_company, "office": cmd_office, "roster": cmd_roster, "status": cmd_status, "send": cmd_send, "up": cmd_up,
+    dispatch = {"run": cmd_run, "team": cmd_team, "status": cmd_status, "send": cmd_send, "up": cmd_up,
                 "down": cmd_down, "receipts": cmd_receipts, "learnings": cmd_learnings,
                 "forget": cmd_forget, "trace": cmd_trace, "corpus": cmd_corpus, "export": cmd_export, "bench": cmd_bench, "replay": cmd_replay,
                 "passport": cmd_passport, "models": cmd_models}
