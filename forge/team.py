@@ -148,11 +148,16 @@ def ensure_repo(cwd, emit=None):
     if _git(cwd, "rev-parse", "--is-inside-work-tree", check=False).returncode == 0:
         return False
     _git(cwd, "init", "-q")
+    # A REPO-LOCAL identity (not global — the user's config is untouched) so that EVERY
+    # commit in this repo works: the initial snapshot, the worker worktree commits, and the
+    # verified-work merges. A per-call `-c` would only cover the one commit it's on, and a
+    # bare-inited repo on a machine with no global git identity (e.g. CI) has none — which
+    # made the worktree commits silently fail and nothing reach the integration branch.
+    _git(cwd, "config", "user.email", "forge@localhost", check=False)
+    _git(cwd, "config", "user.name", "forge", check=False)
     _git(cwd, "checkout", "-q", "-B", "main", check=False)
     _git(cwd, "add", "-A", check=False)
-    # commit with a per-call identity so we never touch the user's global git config
-    _git(cwd, "-c", "user.email=forge@localhost", "-c", "user.name=forge",
-         "commit", "-q", "--allow-empty", "-m", "forge: initial snapshot", check=False)
+    _git(cwd, "commit", "-q", "--allow-empty", "-m", "forge: initial snapshot", check=False)
     if emit:
         emit("repo_init", cwd=cwd)
     return True
