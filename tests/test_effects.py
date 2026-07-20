@@ -10,6 +10,8 @@ import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from tests import _hermetic  # noqa: E402,F401 — never touch the real ~/.forge
+
 from forge import effects as E                                   # noqa: E402
 from forge.authority import AuthorityLevel, AuthorityPolicy, ACTION_AUTHORITY  # noqa: E402
 

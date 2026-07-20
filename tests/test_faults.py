@@ -2,6 +2,7 @@
 import copy
 import unittest
 
+from tests import _hermetic  # noqa: E402,F401 — never touch the real ~/.forge
 from forge import faults
 from forge import replay as replaymod
 

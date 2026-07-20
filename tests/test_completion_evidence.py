@@ -6,6 +6,7 @@ import tempfile
 import unittest
 import unittest.mock as mock
 
+from tests import _hermetic  # noqa: E402,F401 — never touch the real ~/.forge
 from forge.agent import Agent
 from forge.execution import CompletionPolicy, EvidenceContract, VerificationEvidence
 
