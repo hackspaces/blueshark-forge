@@ -68,6 +68,11 @@ def _write(wt, name, body):
         f.write(body)
 
 
+def _read(p):
+    with open(p) as f:
+        return f.read()
+
+
 class TestDagValidation(unittest.TestCase):
     def test_overlapping_scopes_rejected(self):
         dag = {"subtasks": [
@@ -130,12 +135,13 @@ class TestRunTeam(unittest.TestCase):
                 "b": lambda wt: _write(wt, "b.py", "B=1\n")}
         res = self._run(repo, dag, muts)
         self.assertEqual(sorted(res["merged"]), ["a", "b"])
-        # both files exist on the integration branch
-        show = _git(repo, "show", "forge-team/integration:a.py")
-        self.assertIn("A=1", show.stdout)
-        self.assertIn("B=1", _git(repo, "show", "forge-team/integration:b.py").stdout)
-        # the user's working tree/branch is untouched (still just README)
-        self.assertFalse(os.path.exists(os.path.join(repo, "a.py")))
+        # git is harness-managed: the verified work is AUTO-APPLIED to the user's working
+        # tree (the tree was clean and the final check passed), not left on a branch to
+        # merge by hand — and it's reversible via the reported undo point.
+        self.assertTrue(res["applied"]["applied"])
+        self.assertTrue(res["applied"]["undo_to"])
+        self.assertEqual(_read(os.path.join(repo, "a.py")), "A=1\n")
+        self.assertEqual(_read(os.path.join(repo, "b.py")), "B=1\n")
 
     def test_verify_gate_blocks_a_failing_task(self):
         # a repo WITH a suite: the task must make it pass. A worker that writes a wrong

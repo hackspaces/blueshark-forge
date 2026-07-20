@@ -139,6 +139,58 @@ def _git(cwd, *args, check=True):
     return r
 
 
+# ---- git is harness-managed: the user never has to init/branch/merge by hand ------
+def ensure_repo(cwd, emit=None):
+    """Make `cwd` a git repo if it isn't one. Isolation (worktrees + verify-before-merge)
+    is load-bearing, but that's the HARNESS's job — a user shouldn't have to `git init` to
+    put an org to work. A fresh dir is initialised and its current files snapshotted as the
+    base, so all agent work stays tracked and reversible. Returns True if it auto-created."""
+    if _git(cwd, "rev-parse", "--is-inside-work-tree", check=False).returncode == 0:
+        return False
+    _git(cwd, "init", "-q")
+    # A REPO-LOCAL identity (not global — the user's config is untouched) so that EVERY
+    # commit in this repo works: the initial snapshot, the worker worktree commits, and the
+    # verified-work merges. A per-call `-c` would only cover the one commit it's on, and a
+    # bare-inited repo on a machine with no global git identity (e.g. CI) has none — which
+    # made the worktree commits silently fail and nothing reach the integration branch.
+    _git(cwd, "config", "user.email", "forge@localhost", check=False)
+    _git(cwd, "config", "user.name", "forge", check=False)
+    _git(cwd, "checkout", "-q", "-B", "main", check=False)
+    _git(cwd, "add", "-A", check=False)
+    _git(cwd, "commit", "-q", "--allow-empty", "-m", "forge: initial snapshot", check=False)
+    if emit:
+        emit("repo_init", cwd=cwd)
+    return True
+
+
+def working_tree_clean(cwd):
+    return not _git(cwd, "status", "--porcelain", check=False).stdout.strip()
+
+
+def apply_result(cwd, base, integration, was_clean, final_ok, emit=None):
+    """Bring the verified work back into the user's own branch — the last thing the harness
+    should own, not leave as a `git merge` chore. Applies only when it's SAFE and worthwhile:
+    the final check passed, the working tree was clean at the start (so nothing of the user's
+    is at risk), and the integration branch is actually ahead. Otherwise the work is kept on
+    the branch and the user is told. Returns {applied, undo_to, ahead} — undo_to is the base
+    commit to `git reset --hard` to, so applying is always reversible."""
+    base_sha = _git(cwd, "rev-parse", "HEAD", check=False).stdout.strip()[:12]
+    ahead = 0
+    cnt = _git(cwd, "rev-list", "--count", f"HEAD..{integration}", check=False)
+    if cnt.returncode == 0 and cnt.stdout.strip().isdigit():
+        ahead = int(cnt.stdout.strip())
+    if not (final_ok and was_clean and ahead > 0):
+        return {"applied": False, "undo_to": base_sha, "ahead": ahead}
+    m = _git(cwd, "merge", "--no-ff", "-m", f"forge: apply {ahead} verified change(s)",
+             integration, check=False)
+    if m.returncode != 0:
+        _git(cwd, "merge", "--abort", check=False)
+        return {"applied": False, "undo_to": base_sha, "ahead": ahead}
+    if emit:
+        emit("applied", ahead=ahead, undo_to=base_sha)
+    return {"applied": True, "undo_to": base_sha, "ahead": ahead}
+
+
 def _repo_files(cwd):
     r = _git(cwd, "ls-files", check=False)
     return [f for f in r.stdout.splitlines() if f] if r.returncode == 0 else []
@@ -171,7 +223,8 @@ def run_team(goal, cwd, ladder, planner=None, on_event=None, max_steps=40,
     planner = planner or ladder[-1]
     agent_factory = agent_factory or _default_agent
 
-    _git(cwd, "rev-parse", "--is-inside-work-tree")            # fail early if not a git repo
+    ensure_repo(cwd, emit)                                     # harness-managed git: auto-init if needed
+    was_clean = working_tree_clean(cwd)
     files = _repo_files(cwd)
     emit("team_plan_start", goal=goal, files=len(files))
     dag = plan(goal, files, planner)
@@ -203,9 +256,10 @@ def run_team(goal, cwd, ladder, planner=None, on_event=None, max_steps=40,
         _cleanup_worktrees(cwd, wt_root)
 
     merged = [t for t, r in results.items() if r["status"] == "merged"]
+    applied = apply_result(cwd, base, integration, was_clean, final_ok, emit)
     emit("team_done", merged=len(merged), total=len(order))
     return {"goal": goal, "integration_branch": integration, "base": base,
-            "results": results, "merged": merged,
+            "results": results, "merged": merged, "applied": applied,
             "final": {"ok": final_ok, "detail": final_detail}}
 
 

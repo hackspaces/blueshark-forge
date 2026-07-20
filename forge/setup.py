@@ -188,8 +188,43 @@ def run(auto=False, keep_models=None, engine=None, url=None, api_key=None, model
         engine, url, models, api_key = _ask_server(url, models, api_key)
 
     if engine == "ollama":
-        return _setup_ollama(hw, auto, models or keep_models)
-    return _setup_server(hw, engine, url, models, api_key)
+        rc = _setup_ollama(hw, auto, models or keep_models)
+    else:
+        rc = _setup_server(hw, engine, url, models, api_key)
+    if rc == 0:
+        _offer_company(auto)
+    return rc
+
+
+def _offer_company(auto):
+    """After a model is set up, offer to charter a default company — so a first-time user
+    comes out of setup with an ORG ready, not just a single agent. Uses the configured
+    ladder: the strongest rung manages, a cheaper rung works. Skipped in --auto (no prompts)
+    and if a 'starter' company already exists."""
+    from . import company, config
+    from .render import paint
+    if company.charter_exists("starter"):
+        return
+    ladder = config.load().get("ladder", []) or []
+    if not ladder:
+        return
+    manager = ladder[-1]                              # strongest rung manages
+    workers = [ladder[0], ladder[0]]                 # two cheap workers
+    if not auto:
+        try:
+            ans = input(paint("\n  Charter a starter company (a manager + 2 workers)? [Y/n] ", "cyan")).strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            return
+        if ans in ("n", "no"):
+            return
+    try:
+        company.create_charter("starter", manager, workers)
+    except Exception:
+        return
+    print(paint(f"  ✓ chartered company 'starter'", "green")
+          + paint(f"   — manager {manager} · workers {ladder[0]} ×2", "dim"))
+    print(paint("    put it to work:  forge company run starter \"<a goal>\"", "dim"))
+    print(paint("    watch it live:   forge company watch starter", "dim"))
 
 
 def _setup_ollama(hw, auto, keep_models):

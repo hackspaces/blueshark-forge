@@ -82,6 +82,10 @@ def create_charter(name, manager_rung, worker_rungs, verifier_model=None,
     return charter
 
 
+def charter_exists(name):
+    return os.path.isfile(os.path.join(_company_path(name), "company.json"))
+
+
 def load_charter(name):
     try:
         with open(os.path.join(_company_path(name), "company.json")) as f:
@@ -249,7 +253,8 @@ def run(name, goal, cwd, ladder_for, on_event=None, max_steps=40,
         manager_ladder = ladder_for(charter["roles"]["manager"]["rung"])
         planner = manager_ladder[-1] if isinstance(manager_ladder, list) else manager_ladder
 
-    team._git(cwd, "rev-parse", "--is-inside-work-tree")
+    team.ensure_repo(cwd, emit)                                # harness-managed git: auto-init if needed
+    was_clean = team.working_tree_clean(cwd)
     emit("company_plan", goal=goal)
     items = decompose(goal, charter, planner)
     order = team._topo_order([{"id": it["id"], "depends_on": it.get("depends_on", [])} for it in items])
@@ -281,9 +286,10 @@ def run(name, goal, cwd, ladder_for, on_event=None, max_steps=40,
     status = roll_up(name, goal, base, integration, final_ok, final_detail)
     verified = [it["id"] for it in read_board(name) if it.get("state") == "verified"]
     escalated = [it["id"] for it in read_board(name) if it.get("state") == "escalated"]
+    applied = team.apply_result(cwd, base, integration, was_clean, final_ok, emit)
     emit("company_done", verified=len(verified), escalated=len(escalated))
     return {"company": name, "goal": goal, "integration": integration, "base": base,
-            "verified": verified, "escalated": escalated,
+            "verified": verified, "escalated": escalated, "applied": applied,
             "final": {"ok": final_ok, "detail": final_detail}, "status_path": _status_path(name)}
 
 
